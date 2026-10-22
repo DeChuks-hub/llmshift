@@ -664,7 +664,12 @@ def _branch_name(plan: UpgradePlan, requested: str | None) -> str:
 def register(sub: Any) -> None:
     from . import cli
 
-    p = sub.add_parser("upgrade", help="swap a retiring model in your code and open a pull request")
+    p = sub.add_parser(
+        "upgrade",
+        help="swap a retiring model in your code and open a pull request",
+        description="Swap a retiring model id where scan finds it, rename settings the replacement needs, and optionally "
+        "test the replacement and open a pull request. Without --apply or --pr, only the diff is shown.",
+    )
     p.add_argument("paths", nargs="*", help="where to look (default: scan.paths, else .)")
     p.add_argument("--from", dest="old", metavar="MODEL", help="the model to move off")
     p.add_argument("--to", dest="new", metavar="MODEL", help="its replacement (default: the lifecycle registry's)")

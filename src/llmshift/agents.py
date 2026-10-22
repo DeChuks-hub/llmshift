@@ -295,6 +295,7 @@ def compare_steps(base_steps: list[dict], new_steps: list[dict]) -> tuple[list[s
         "missing": sorted(missing.elements()),
         "extra": sorted(extra.elements()),
         "looped": [name for (name, _), _ in looped],
+        "unfinished": bool(new_steps and new_steps[-1].get("tool_calls")),
         "unrecorded": unrecorded,
         "trace": trace(new_steps),
         "baseline_trace": trace(base_steps),

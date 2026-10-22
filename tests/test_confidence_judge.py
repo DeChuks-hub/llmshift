@@ -16,6 +16,7 @@ from llmshift.checks import CheckContext, Sample, run_checks
 from llmshift.compare import run_compare
 from llmshift.demo import create_project
 from llmshift.providers.mock import MockProvider
+from llmshift.stats import cases_needed, wilson_interval
 from llmshift.testset import TestCase, load_tests
 
 
@@ -71,6 +72,16 @@ def demo_cases(tmp_path, monkeypatch):
     monkeypatch.chdir(root)
     assert cli.main(["snapshot", "logs"]) == 0
     return load_tests(".llmshift/tests.jsonl")
+
+
+@pytest.mark.parametrize("rate", [0.0, 0.2, 0.5, 0.8, 0.95, 1.0])
+def test_cases_needed_is_the_smallest_count_with_a_10_point_range(rate):
+    n = cases_needed(rate)
+    low, high = wilson_interval(rate * n, n)
+    assert high - low <= 0.1 + 1e-9  # the promised +/- 5 points
+    low, high = wilson_interval(rate * (n - 1), n - 1)
+    assert high - low > 0.1  # and no fewer cases would do
+    assert cases_needed(1.0) >= 35  # 16 of 16 passing still only shows 81%-100%
 
 
 def test_paired_comparison_against_the_live_old_model(demo_cases):

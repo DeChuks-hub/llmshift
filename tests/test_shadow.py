@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
+import warnings
 
 import pytest
 
+import llmshift.shadow as shadow_mod
 from llmshift import cli
 from llmshift.providers import resolve
 from llmshift.providers.mock import MockProvider
@@ -166,3 +171,102 @@ def test_shadow_report(tmp_path, monkeypatch, capsys):
     assert cli.main(["shadow", "report", str(tmp_path / "missing.jsonl")]) == 2
     assert cli.main(["shadow", "report", str(bad), "--html"]) == 1
     assert list((tmp_path / ".llmshift" / "reports").glob("shadow-*.html"))
+
+
+HANGING_APP = """
+import sys, time
+import llmshift.shadow as shadow_mod
+from llmshift.providers.mock import MockProvider
+shadow_mod.EXIT_GRACE = 0.5
+shadow = shadow_mod.Shadow(MockProvider("hang", fn=lambda r: (time.sleep(2), "late")[1]), rate=1.0, path=sys.argv[1], max_workers=1)
+answer = {"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]}
+for i in range(10):
+    shadow.observe("chat", {"model": "gpt-4o", "messages": [{"role": "user", "content": f"q{i}"}]}, answer)
+"""
+
+
+def test_a_hanging_shadow_model_does_not_hold_up_the_app_exit(tmp_path):
+    # 10 queued copies of 2 s each: the exit waits for the grace period, not for the copies.
+    start = time.perf_counter()
+    proc = subprocess.run([sys.executable, "-c", HANGING_APP, str(tmp_path / "s.jsonl")], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert time.perf_counter() - start < 12
+
+
+def test_idle_workers_stop_and_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(shadow_mod, "IDLE_SECONDS", 0.1)
+    shadow = Shadow("mock:nextgen", rate=1.0, path=tmp_path / "s.jsonl", max_workers=2)
+    client = wrap(FakeClient(), record=False, shadow=shadow)
+    _ask(client, TICKETS[0])
+    assert shadow.flush(10)
+    deadline = time.monotonic() + 10
+    while shadow._threads and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert shadow._threads == []  # nothing to do: no threads left behind
+    _ask(client, TICKETS[1])
+    assert shadow.flush(10) and shadow.stats["written"] == 2
+
+
+def test_thread_limits_and_exits_inside_the_shadow_model(tmp_path, monkeypatch):
+    shadow = Shadow("mock:nextgen", rate=1.0, path=tmp_path / "s.jsonl")
+    with monkeypatch.context() as m:
+        m.setattr(threading.Thread, "start", lambda self: (_ for _ in ()).throw(RuntimeError("can't start new thread")))
+        with pytest.warns(RuntimeWarning, match="can't start new thread"):
+            shadow.observe("chat", {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}, {"choices": [{"message": {"content": "x"}}]})
+    assert shadow.stats["errors"] == 1 and shadow._pending == 0 and shadow.flush(0.1)
+
+    def exits(request):
+        raise SystemExit(3)
+
+    quits = Shadow(MockProvider("quits", fn=exits), rate=1.0, path=tmp_path / "q.jsonl", max_workers=1)
+    client = wrap(FakeClient(), record=False, shadow=quits)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for t in TICKETS[:2]:
+            _ask(client, t)
+        assert quits.flush(10)
+    assert quits.stats["errors"] == 2 and len(quits._threads) == 1  # the worker survived both
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_shadowing_and_recording_work_in_a_forked_child(tmp_path):
+    from llmshift.record import _path_lock
+
+    shadow = Shadow(MockProvider("slow", fn=lambda r: (time.sleep(0.5), "late")[1]), rate=1.0, path=tmp_path / "s.jsonl", max_workers=1)
+    client = wrap(FakeClient(), path=tmp_path / "rec.jsonl", shadow=shadow)
+    _ask(client, TICKETS[0])  # a copy is in flight in the parent
+    held = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():  # another thread is writing to the log at the moment of the fork
+        with _path_lock(tmp_path / "rec.jsonl"):
+            held.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    held.wait(10)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)  # "use of fork() may lead to deadlocks": that is the point
+        pid = os.fork()
+    if pid == 0:  # child
+        code = 1
+        try:
+            _ask(client, TICKETS[1])
+            code = 0 if shadow.flush(10) and shadow.stats["written"] >= 1 else 2
+        finally:
+            os._exit(code)
+    release.set()
+    holder.join()
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(pid, 9)
+        os.waitpid(pid, 0)
+        pytest.fail("the forked child hung")
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert shadow.flush(10)

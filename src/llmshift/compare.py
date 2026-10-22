@@ -200,9 +200,23 @@ def failure_patterns(result: CheckResult) -> list[str]:
         return ["low similarity to the reference answer"]
     if result.type == "length":
         return ["much longer" if "longer" in (result.message or "") else "much shorter"]
-    msg = re.sub(r"\s*\(.*?\)", "", result.message or result.type)
-    msg = re.sub(r'"[^"]*"', '"..."', msg)
-    return [msg.strip()[:80] or result.type]
+    if result.type == "agent" and "baseline_steps" in d:
+        looped = d.get("looped") or []
+        out = [f"looped on {name}" for name in looped]
+        if d.get("unfinished"):
+            out.append("ran out of steps without a final answer")
+        out += [f"missing tool call: {name}" for name in dict.fromkeys(d.get("missing") or [])]
+        out += [f"extra tool call: {name}" for name in dict.fromkeys(d.get("extra") or []) if name not in looped]
+        if "different order" in (result.message or ""):
+            out.append("tools called in a different order")
+        if d.get("unrecorded"):
+            out.append("tool call with no recorded result")
+        return out or ["tool arguments changed"]
+    msg = re.sub(r"\s*\((?!s\)).*?\)", "", result.message or result.type)  # keep the "(s)" of "call(s)"
+    msg = re.sub(r'"[^"]*"', '"..."', re.sub(r"\s+", " ", msg)).strip()
+    if len(msg) > 80:
+        msg = msg[:80].rsplit(" ", 1)[0].rstrip(",;:") + "..."
+    return [msg or result.type]
 
 
 SKIP_REASONS = {

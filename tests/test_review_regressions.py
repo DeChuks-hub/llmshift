@@ -141,6 +141,8 @@ def test_scan_in_git_repos(in_tmp):
     (in_tmp / "build" / "cfg.yaml").write_text("model: gpt-4-0613\n", encoding="utf-8")
     (in_tmp / "ignored").mkdir()
     (in_tmp / "ignored" / "x.py").write_text('model = "gpt-4-0613"\n', encoding="utf-8")
+    (in_tmp / ".llmshift" / "reports").mkdir(parents=True)  # llmshift's own output, tracked or not
+    (in_tmp / ".llmshift" / "reports" / "compare-1.json").write_text('{"baseline": "recorded (gpt-4-0613)"}\n', encoding="utf-8")
     subprocess.run(["git", "add", "-A"], cwd=in_tmp, check=True)
     assert [f.file for f in scan_paths(["."]).findings] == ["build/cfg.yaml"]  # tracked, so scanned; ignored stays out
     assert [f.file for f in scan_paths(["ignored"]).findings] == ["ignored/x.py"]  # named explicitly, so scanned

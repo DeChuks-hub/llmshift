@@ -42,9 +42,27 @@ def margin_of_error(p: float, n: int, z: float = Z95) -> float:
 
 
 def cases_needed(p: float, margin: float = 0.05, z: float = Z95) -> int:
-    """How many cases make the pass rate accurate to +/- `margin` (95% confidence)."""
-    p = min(0.99, max(0.01, p))
-    return max(1, math.ceil(z * z * p * (1 - p) / (margin * margin)))
+    """How many cases make the Wilson range of a pass rate `p` at most +/- `margin` wide.
+
+    The usual p(1-p)/margin^2 rule says 16 cases near 100%, where 16 of 16 still only
+    shows 81%-100%; the Wilson half-width shrinks steadily with n, so search it.
+    """
+    p = min(1.0, max(0.0, p))
+    margin = max(margin, 1e-4)
+
+    def half(n: int) -> float:
+        return z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+
+    lo, hi = 1, 1
+    while half(hi) > margin:
+        hi *= 2
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if half(mid) > margin:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
 
 
 def mcnemar_p(b: int, c: int) -> float:

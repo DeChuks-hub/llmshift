@@ -687,7 +687,12 @@ def cmd_calendar(args: argparse.Namespace, cfg: dict) -> int:
 
 
 def register(sub: Any) -> None:
-    p = sub.add_parser("update", help="download the latest retirement data (and, with --prices, model prices)")
+    p = sub.add_parser(
+        "update",
+        help="download the latest retirement data (and, with --prices, model prices)",
+        description="Download the latest lifecycle data; it is validated, kept in your user data folder (LLMSHIFT_HOME), "
+        "and used instead of the bundled copy while it is newer.",
+    )
     p.add_argument("--prices", action="store_true", help="also download current model prices (LiteLLM's price list)")
     p.add_argument("--check", action="store_true", help="only report whether newer data is available")
     p.add_argument("--url", metavar="URL", help="where to download the lifecycle data from (default: the llmshift repository)")
@@ -695,7 +700,12 @@ def register(sub: Any) -> None:
     p.add_argument("--format", choices=["text", "json"], default="text")
     p.set_defaults(func=cmd_update)
 
-    p = sub.add_parser("digest", help="one message listing the models your repos use that are retired or retire soon")
+    p = sub.add_parser(
+        "digest",
+        help="one message listing the models your repos use that are retired or retire soon",
+        description="Scan one or more repositories and send one message (Slack, Teams, Discord, e-mail, webhook or file) "
+        "listing the models they use that are retired or retire soon. Made for a weekly scheduled job.",
+    )
     p.add_argument("paths", nargs="*", help="repositories or folders to scan (default: .)")
     p.add_argument("--within", type=int, metavar="DAYS", help="include models retiring within this many days (default 30)")
     p.add_argument("--alert", action="append", metavar="DEST", help="slack:<url> | teams:<url> | discord:<url> | webhook:<url> | email:<addr> | file:<path>")
@@ -707,7 +717,12 @@ def register(sub: Any) -> None:
     p.add_argument("--format", choices=["text", "json", "markdown"], default="text")
     p.set_defaults(func=cmd_digest)
 
-    p = sub.add_parser("calendar", help="build a retirement-calendar website and iCalendar feed")
+    p = sub.add_parser(
+        "calendar",
+        help="build a retirement-calendar website and iCalendar feed",
+        description="Write a static website (index.html), an iCalendar feed (retirements.ics) and JSON of model retirement "
+        "dates, e.g. for GitHub Pages.",
+    )
     p.add_argument("--out", required=True, metavar="DIR", help="folder to write index.html, retirements.ics and retirements.json")
     p.add_argument("--days-back", type=int, default=90, help="also list models retired in the last N days (default 90)")
     p.add_argument("--title", default="AI model retirement calendar")

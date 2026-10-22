@@ -17,11 +17,12 @@ import atexit
 import datetime as _dt
 import json
 import os
+import queue
 import random
 import threading
 import time
 import warnings
-from concurrent.futures import ThreadPoolExecutor
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,30 @@ from .providers.base import Response
 from .textutil import stable_hash
 
 DEFAULT_PATH = "logs/llmshift-shadow.jsonl"
+IDLE_SECONDS = 10.0  # a worker with nothing to do for this long stops (a new one starts with the next copy)
+EXIT_GRACE = 5.0  # at interpreter exit, copies still in flight get this long in total
+
+_INSTANCES: weakref.WeakSet = weakref.WeakSet()
+
+
+def _close_all() -> None:
+    deadline = time.monotonic() + EXIT_GRACE
+    for shadow in list(_INSTANCES):
+        shadow.close(max(0.0, deadline - time.monotonic()))
+
+
+def _reset_after_fork() -> None:
+    # Only the forking thread survives a fork: copies queued in the parent stay the parent's.
+    for shadow in list(_INSTANCES):
+        shadow._lock = threading.Lock()
+        shadow._queue = queue.SimpleQueue()
+        shadow._threads = []
+        shadow._pending = 0
+
+
+atexit.register(_close_all)
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_after_fork)
 
 
 def _canonical(api: str, request: dict) -> dict | None:
@@ -89,14 +114,17 @@ class Shadow:
         self._provider: Any = None
         self._provider_error: str | None = None
         self._warned = False
-        self._pool = ThreadPoolExecutor(max_workers=max(1, int(max_workers)), thread_name_prefix="llmshift-shadow")
+        # Daemon workers, so a slow or hanging shadow model can never keep the app from exiting.
+        self.max_workers = max(1, int(max_workers))
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._threads: list[threading.Thread] = []
         from .record import _path_lock
         from .redact import Redactor
 
         self._file_lock = _path_lock(self.path)
         self._redactor = Redactor(secrets=True, pii=False) if redact_secrets else None
         self._closed = False
-        atexit.register(self.close)
+        _INSTANCES.add(self)
 
     @property
     def spec(self) -> str:
@@ -117,9 +145,35 @@ class Shadow:
             if canonical is None or answer is None:
                 self._done(None)
                 return
-            self._pool.submit(self._run, api, canonical, answer)
+            with self._lock:
+                if len(self._threads) < self.max_workers:
+                    try:
+                        worker = threading.Thread(target=self._work, name="llmshift-shadow", daemon=True)
+                        worker.start()
+                        self._threads.append(worker)
+                    except RuntimeError:  # "can't start new thread": fine while another worker runs
+                        if not self._threads:
+                            raise
+                self._queue.put((api, canonical, answer))
         except Exception as exc:  # shadowing must never break the app
             self._done(exc)
+
+    def _work(self) -> None:
+        me = threading.current_thread()
+        while True:
+            try:
+                item = self._queue.get(timeout=IDLE_SECONDS)
+            except queue.Empty:
+                with self._lock:  # observe() queues under this lock, so no copy is left without a worker
+                    if self._queue.empty():
+                        if me in self._threads:
+                            self._threads.remove(me)
+                        return
+                continue
+            try:
+                self._run(*item)
+            except BaseException as exc:  # e.g. SystemExit from a python: provider; keep serving
+                self._done(exc)
 
     def _get_provider(self) -> Any:
         if self._provider is None and self._provider_error is None:
@@ -188,14 +242,13 @@ class Shadow:
             time.sleep(0.02)
         return False
 
-    def close(self, timeout: float = 5.0) -> None:
-        """Stop taking copies; give the ones in flight a moment to finish."""
+    def close(self, timeout: float = EXIT_GRACE) -> None:
+        """Stop taking copies; give the ones in flight a moment to finish. Called at exit."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
         self.flush(timeout)
-        self._pool.shutdown(wait=False)
 
 
 # ------------------------------------------------------------------ report

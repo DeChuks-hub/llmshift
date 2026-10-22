@@ -42,8 +42,10 @@ PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR =
 INSTRUCTIONS = (
     "llmshift checks AI model migrations. Typical flow: llmshift_scan finds the model IDs the code calls and their "
     "retirement dates; llmshift_snapshot turns usage logs into a test set of real requests; llmshift_compare runs that "
-    "test set on the new model and reports exactly what changed; llmshift_fix suggests system-prompt changes that make "
-    "the new model match. After editing model IDs or prompts, run llmshift_compare again to prove nothing broke. "
+    "test set on the new model and reports exactly what changed (llmshift_pick tries several cheaper models at once, "
+    "llmshift_safety checks refusals, prompt injection and PII leaks); llmshift_fix suggests system-prompt changes that "
+    "make the new model match; llmshift_upgrade swaps the model IDs in the code. After editing model IDs, run "
+    "llmshift_compare again to prove nothing broke; after editing prompts, llmshift_check tests just those. "
     "Model specs look like provider:model, e.g. openai:gpt-5.6-sol or anthropic:claude-sonnet-5-5."
 )
 
@@ -1054,8 +1056,9 @@ def register(sub: Any) -> None:
     p = sub.add_parser(
         "mcp",
         help="run an MCP server so AI coding assistants can use llmshift as tools",
-        description="Serve llmshift's scan, models, snapshot, compare, fix and doctor as Model Context Protocol tools over "
-        "stdio, for Claude Code (claude mcp add llmshift -- llmshift mcp), Cursor, VS Code and other MCP clients.",
+        description="Serve llmshift's scan, models, snapshot, compare, fix, pick, safety, check, upgrade and doctor as Model "
+        "Context Protocol tools over stdio, for Claude Code (claude mcp add llmshift -- llmshift mcp), Cursor, VS Code and other "
+        "MCP clients.",
     )
     p.add_argument("--cwd", help="project directory the tools work in (default: the current directory)")
     p.set_defaults(func=cmd_mcp)

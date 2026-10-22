@@ -608,7 +608,12 @@ def check_terminal(run: CheckRun) -> str:
 def register(sub: Any) -> None:
     from . import cli
 
-    p = sub.add_parser("check", help="test only the prompts a change edits (for pull requests)")
+    p = sub.add_parser(
+        "check",
+        help="test only the prompts a change edits (for pull requests)",
+        description="Find the system prompts this change edits (against --base) and run only their test cases, with the "
+        "edited text, on the model in production. In a GitHub pull request, the result is posted as one comment.",
+    )
     p.add_argument("--model", metavar="MODEL", help="model to test with (default: baseline, then candidate, from llmshift.yaml)")
     p.add_argument("--base", metavar="REF", help="git ref to compare with (default: the pull request's base in GitHub Actions, else origin/main)")
     p.add_argument("--files", nargs="+", metavar="FILE", help="only look at these files")

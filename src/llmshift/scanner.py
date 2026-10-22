@@ -330,7 +330,8 @@ def _wanted(path: Path, include_docs: bool) -> bool:
 
 
 # Directories never scanned, even when git tracks them; SKIP_DIRS only applies when walking.
-_ALWAYS_SKIP = {".git", "node_modules", "site-packages", "__pycache__"}
+# .llmshift holds llmshift's own reports, test sets and caches: recorded model names, not code.
+_ALWAYS_SKIP = {".git", "node_modules", "site-packages", "__pycache__", ".llmshift"}
 _GLOB_CHARS_RE = re.compile(r"[*?\[]")
 
 

@@ -157,6 +157,18 @@ _recorders: dict[str, Recorder] = {}
 _recorders_lock = threading.Lock()
 
 
+def _release_after_fork() -> None:
+    # Only the forking thread survives a fork; a lock another thread held at that moment
+    # would stay locked in the child forever.
+    for lock in (_PATH_LOCKS_GUARD, _recorders_lock, *_PATH_LOCKS.values()):
+        if lock.locked():
+            lock.release()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_release_after_fork)
+
+
 def log(request: dict, response: Any = None, *, path: str | os.PathLike | None = None, **kwargs: Any) -> None:
     """Append one request/response pair to the log file."""
     if path is None:

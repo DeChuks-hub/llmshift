@@ -151,3 +151,34 @@ def test_no_leftovers_of_the_old_name_or_placeholders():
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"model ?shift", text, re.I), path
         assert "your-org" not in text and "contributors" not in text.lower(), path
+
+
+def _subparsers(parser):
+    import argparse
+
+    return next((a.choices for a in parser._actions if isinstance(a, argparse._SubParsersAction)), {})
+
+
+def test_every_command_and_flag_in_the_docs_exists():
+    """Each `llmshift <command> --flag` written in the README, CHANGELOG or example
+    workflows must be accepted by that command's parser."""
+    docs = [ROOT / "README.md", ROOT / "CHANGELOG.md", *sorted((ROOT / "examples" / "workflows").glob("*.yml"))]
+    commands = _subparsers(cli.build_parser())
+    checked = 0
+    for path in docs:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            for m in re.finditer(r"(?<![\w/.-])llmshift ([a-z][\w-]*)((?: [^`|#;&]*)?)", line):
+                name, rest = m.group(1), m.group(2)
+                assert name in commands, f"{path.name}: no command `llmshift {name}` (in {line.strip()!r})"
+                parser = commands[name]
+                words = rest.split()
+                sub = _subparsers(parser)
+                if sub and words and words[0] in sub:
+                    parser = sub[words.pop(0)]
+                known = {opt for a in parser._actions for opt in a.option_strings}
+                for word in words:
+                    flag = word.split("=", 1)[0].rstrip(",.)")
+                    if flag.startswith("--"):
+                        assert flag in known, f"{path.name}: `llmshift {name}` has no {flag} (in {line.strip()!r})"
+                        checked += 1
+    assert checked > 40  # the docs really were checked

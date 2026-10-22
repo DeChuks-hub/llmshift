@@ -624,7 +624,12 @@ def cmd_embeddings(args: argparse.Namespace, cfg: dict) -> int:
 
 
 def register(sub: Any) -> None:
-    p = sub.add_parser("embeddings", help="see how search results change before switching embedding models")
+    p = sub.add_parser(
+        "embeddings",
+        help="see how search results change before switching embedding models",
+        description="Embed a sample of your documents and queries with both models, compare the top-k results per query, "
+        "and estimate the cost and time of re-embedding the whole corpus.",
+    )
     p.add_argument("--from", dest="old", required=True, metavar="MODEL", help="the embedding model you use today")
     p.add_argument("--to", dest="new", required=True, metavar="MODEL", help="the embedding model you are moving to")
     p.add_argument("--corpus", nargs="+", action="extend", required=True, metavar="PATH", help="documents: files or folders (.txt .md .rst .html .json .jsonl)")

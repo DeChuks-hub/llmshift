@@ -14,12 +14,12 @@
       "chars": 14604
     },
     "https://api-docs.deepseek.com/quick_start/pricing": {
-      "sha256": "1b26af5380091f219570400386e439a7dfa41e5ae8c77c82d69300c420c538b6",
-      "chars": 3107
+      "sha256": "8cf997afcc7fffc97f629ec1817f909097bcb9e7bc8bd3ecb92c14d9051dac44",
+      "chars": 2787
     },
     "https://api-docs.deepseek.com/updates": {
-      "sha256": "1259fcd273ca80e14f6c6496bc53fe2660ae5779deac522b631cef6f5ac2a5d7",
-      "chars": 17855
+      "sha256": "1b26af5380091f219570400386e439a7dfa41e5ae8c77c82d69300c420c538b6",
+      "chars": 3107
     },
     "https://developers.openai.com/api/docs/deprecations": {
       "sha256": "893a086e5811fe29d9726852f9d57eff76b1fc48d97b086d73b34acccd61492e",

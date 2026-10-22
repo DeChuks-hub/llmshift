@@ -34,6 +34,8 @@ pip install llmshift
 llmshift demo          # 1-minute offline walkthrough with simulated models (no API key)
 ```
 
+It runs on Python 3.9 to 3.15 on Linux, macOS and Windows. On Python 3.15, PyYAML has no prebuilt wheels yet; if pip tries to compile it and there is no C compiler, install with `PYYAML_FORCE_LIBYAML=0 pip install llmshift` (pure-Python YAML, which is all LLMShift uses).
+
 ---
 
 ## Quick start with your own app
@@ -486,4 +488,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite (370 tests) runs offline on Python 3.9 to 3.13. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.
+The test suite (370 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.

@@ -2,7 +2,7 @@
 
 ## 0.1.0 (2026-10-22)
 
-First release.
+First release. Runs on Python 3.9 to 3.15 on Linux, macOS and Windows.
 
 **Find what has to move**
 

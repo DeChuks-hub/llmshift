@@ -671,6 +671,7 @@ def _case_summary(c: Any) -> dict:
             "case_ids": {**STRINGS, "description": "Only these case IDs."},
             "limit": {"type": "integer", "minimum": 1, "description": "Only the first N cases."},
             "max_cases_shown": {"type": "integer", "minimum": 0, "maximum": 200, "description": "Changed cases included in the result (default 10)."},
+            "repeat": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Run each case N times to find flaky cases and narrow the pass-rate range (default 1)."},
             "no_cache": {"type": "boolean", "description": "Call the model even for requests answered before."},
         }
     ),
@@ -699,6 +700,7 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
         tests_path=path,
         min_pass_rate=float(min_rate) if min_rate is not None else None,
         show_progress=False,
+        repeat=int(args.get("repeat") or 1),
     )
     reports = cli._write_reports(result, SimpleNamespace(html=None, json=None, markdown=None, junit=None, no_report=False, report_dir=None), cfg, "compare")
     s = result.summary
@@ -719,7 +721,12 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
         "ok": ok,
         "verdict": verdict,
         "min_pass_rate": result.min_pass_rate,
-        "summary": {k: s.get(k) for k in ("total", "evaluated", "passed", "warned", "failed", "errors", "pass_rate", "unchanged_rate", "latency_ms", "tokens")},
+        "summary": {
+            k: s.get(k)
+            for k in ("total", "evaluated", "passed", "warned", "failed", "errors", "pass_rate", "pass_rate_range", "cases_needed",
+                      "repeats", "flaky", "flaky_cases", "unchanged_rate", "latency_ms", "tokens", "agent", "vs_baseline")
+            if s.get(k) is not None
+        },
         "what_changed": {
             cat: {"failed": v.get("fail", 0), "changed": v.get("warn", 0), "patterns": v.get("patterns", {})}
             for cat, v in (s.get("by_category") or {}).items()
@@ -830,6 +837,91 @@ _KEY_ENV = (
     ("GROQ_API_KEY", "groq"), ("DEEPSEEK_API_KEY", "deepseek"), ("XAI_API_KEY", "xai"), ("TOGETHER_API_KEY", "together"),
     ("FIREWORKS_API_KEY", "fireworks"), ("PERPLEXITY_API_KEY", "perplexity"), ("COHERE_API_KEY", "cohere"),
 )
+
+
+@tool(
+    "llmshift_pick",
+    "Find the cheapest model that still passes the project's test set: runs the tests on several candidate models at once "
+    "and reports each one's pass rate (with a 95% range), cost per 1,000 requests and latency, then recommends the cheapest "
+    "that meets the quality bar, with the saving against today's model (per month when `volume` is given). Calls every "
+    "candidate once per test case (cached on re-runs).",
+    _schema(
+        {
+            "models": {**STRINGS, "minItems": 1, "description": "Candidate models, e.g. openai:gpt-6-luna, anthropic:claude-haiku-5-5."},
+            "tests": TESTS,
+            "baseline": {"type": "string", "description": "The model used today, for its cost (default: baseline in llmshift.yaml, else the recorded model)."},
+            "min_pass_rate": {"type": "number", "minimum": 0, "maximum": 1, "description": "Quality bar (default: min_pass_rate in llmshift.yaml)."},
+            "volume": {"type": "integer", "minimum": 1, "description": "Requests per month, to state the monthly saving."},
+            "groups": {**STRINGS, "description": "Only these prompt templates (substring match)."},
+            "limit": {"type": "integer", "minimum": 1, "description": "Only the first N cases."},
+            "no_cache": {"type": "boolean", "description": "Call the models even for requests answered before."},
+        },
+        required=("models",),
+    ),
+    title="Find the cheapest model that still passes",
+    read_only=False,
+    open_world=True,
+)
+def _pick_tool(args: dict, cfg: Any) -> dict:
+    from .pick import run_pick
+    from .pricing import overrides_from_config
+
+    cases, path = _load_cases(cfg, args)
+    pick_cfg = cfg.get("pick") or {}
+    min_rate = args.get("min_pass_rate", cfg.get("min_pass_rate"))
+    try:
+        prices = overrides_from_config(cfg)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
+    result = run_pick(
+        cases,
+        list(args["models"]),
+        baseline=args.get("baseline") or cfg.get("baseline"),
+        config=cfg,
+        min_pass_rate=float(min_rate) if min_rate is not None else 0.95,
+        volume=args.get("volume") or pick_cfg.get("volume"),
+        prices=prices,
+        concurrency=int(cfg.get("concurrency", 4)),
+        cache=_cache(cfg, args),
+        judge=cfg.get("judge"),
+        tests_path=path,
+    )
+    return result.to_dict()
+
+
+@tool(
+    "llmshift_safety",
+    "Check whether a new model is riskier than the current one: refusals on the project's real requests, prompt-injection "
+    "probes (hidden instructions in messages, quoted documents or tool results) and leaks of confidential data from the "
+    "system prompt, all built from the project's own test cases and run on both models. Reports old vs new rates, the "
+    "change, a paired significance test and examples. Calls both models.",
+    _schema(
+        {
+            "to": {"type": "string", "minLength": 1, "description": "The new model (default: candidate in llmshift.yaml)."},
+            "baseline_model": {"type": "string", "minLength": 1, "description": "The current model (default: baseline in llmshift.yaml)."},
+            "tests": TESTS,
+            "categories": {"type": "array", "items": {"type": "string", "enum": ["refusal", "injection", "pii"]}, "description": "Which checks to run (default all)."},
+            "probes": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Probes per category (default 20)."},
+            "no_cache": {"type": "boolean", "description": "Call the models even for requests answered before."},
+        }
+    ),
+    title="Is the new model riskier?",
+    read_only=False,
+    open_world=True,
+)
+def _safety_tool(args: dict, cfg: Any) -> dict:
+    from .safety import run_safety
+
+    cases, _path = _load_cases(cfg, args)
+    new = _model(args, cfg)
+    old = args.get("baseline_model") or cfg.get("baseline")
+    if not old:
+        raise ToolError("which model is in use today? Pass baseline_model (or set baseline in llmshift.yaml)")
+    result = run_safety(
+        cases, new, str(old), config=cfg, categories=tuple(args.get("categories") or ("refusal", "injection", "pii")),
+        probes=int(args.get("probes") or 20), concurrency=int(cfg.get("concurrency", 4)), cache=_cache(cfg, args), show_progress=False,
+    )
+    return result.to_dict()
 
 
 @tool(

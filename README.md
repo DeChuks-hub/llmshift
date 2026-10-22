@@ -372,7 +372,8 @@ When the test set changes, the next run becomes the new reference. Destinations:
 
 - `llmshift update` downloads the latest lifecycle data from this repository (`--prices` also refreshes model prices; `--check` only says whether newer data exists). The download is validated and kept in your user data folder (`LLMSHIFT_HOME` to move it), and is used only while it is newer than the data bundled with your version. `llmshift doctor` shows which data is in use.
 - `llmshift digest repo-a repo-b --alert slack` sends one message listing the models your repositories use that are retired or retire within 30 days (`--within DAYS`). `--dry-run` prints it without sending. A weekly example is in [`examples/workflows/llmshift-digest.yml`](examples/workflows/llmshift-digest.yml).
-- `llmshift calendar --out site` builds a searchable retirement-calendar website and an iCalendar feed (`retirements.ics`) you can subscribe to, plus `retirements.json`. In this repository, the `calendar` workflow publishes it to GitHub Pages every day, and `registry-watch` checks the providers' deprecation pages daily, opening an issue when one changes so the data can be reviewed.
+- `llmshift calendar --out site` builds a searchable retirement-calendar website and an iCalendar feed (`retirements.ics`) you can subscribe to, plus `retirements.json`. In this repository, the `calendar` workflow publishes it to GitHub Pages every day.
+- The data updates itself: every day, `registry-watch` reads the deprecation tables of OpenAI, Anthropic, the Gemini API and Vertex AI, merges new shutdown dates, replacements and newly deprecated models (it never removes anything, and models that already retired keep their record), runs the tests and commits the result, which `llmshift update` then brings to you. Changes on the other source pages, or more than 40 at once, open an issue for a person to review.
 
 ## import: move off the OpenAI Evals platform
 
@@ -478,7 +479,7 @@ Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`;
 - Costs in `pick` are per request on your test set. Cached-input discounts and batch pricing aren't modelled, and token counts estimated from text (about 4 characters per token) are rough.
 - `safety` compares two models; it is not an absolute safety score. Injection and PII detection are deterministic (a canary or a planted value in the answer).
 - Bedrock and Vertex AI are reached through an OpenAI-compatible proxy (for example LiteLLM) or a `python:` provider. Their native APIs are not built in.
-- Lifecycle data is a dated snapshot (2026-10-21) that `llmshift update` refreshes. Statuses update themselves by date, but a new deprecation announcement reaches you only once the data in this repository is updated.
+- Lifecycle data updates itself daily from the four providers that publish deprecation tables; Mistral, Cohere, xAI and DeepSeek changes are reviewed by a person (an issue is opened). Run `llmshift update` to get the newest data.
 
 ## Development
 
@@ -488,4 +489,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite (373 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.
+The test suite (377 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.

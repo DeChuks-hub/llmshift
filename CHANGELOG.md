@@ -7,7 +7,7 @@ First release. Runs on Python 3.9 to 3.15 on Linux, macOS and Windows; pure Pyth
 **Find what has to move**
 
 - `scan`: model detection for Python (AST), JS/TS and other languages, configs, `.env` and notebooks. Lifecycle data covers 617 models from OpenAI, Anthropic, Google (Gemini API and Vertex AI), Mistral, Cohere, xAI and DeepSeek, built from official deprecation pages on 2026-10-21. Status is computed by date. Output as SARIF, JSON or Markdown, with GitHub annotations.
-- `update`: fetches newer lifecycle data and prices; they are validated, stored per user, and used only when newer than the bundled copy.
+- `update`: fetches newer lifecycle data and prices; they are validated, stored per user, and used only when newer than the bundled copy. The data in this repository updates itself every day from the OpenAI, Anthropic, Gemini API and Vertex AI deprecation tables (a conservative merge, tested before it is committed); other source pages open an issue when they change.
 - `digest`: one message listing the models your repositories use that are retired or retire soon, via Slack, Teams, Discord, e-mail, a webhook or a file.
 - `calendar`: a static retirement-calendar website with an iCalendar (RFC 5545) feed and JSON, published daily to GitHub Pages by this repository; a daily watch of the providers' deprecation pages opens an issue when one changes.
 

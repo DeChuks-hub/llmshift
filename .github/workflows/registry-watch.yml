@@ -1,6 +1,13 @@
-# Checks the provider pages the lifecycle data was built from, every day. When one
-# changes, an issue lists it so the data can be reviewed and updated (see
-# scripts/check_registry_sources.py). Unreachable pages do not fail the job.
+# Keeps the lifecycle data current, every day:
+# 1. scripts/update_registry.py reads the deprecation tables of OpenAI, Anthropic, the
+#    Gemini API and Vertex AI and merges new shutdown dates, replacements and newly
+#    deprecated models into src/llmshift/data/models.json. When something changed, the
+#    test suite runs and the update is committed to main, so `llmshift update` brings it
+#    to every user. More than 40 changes at once are not committed: the job fails for a
+#    person to review.
+# 2. scripts/check_registry_sources.py checks every page the data was built from and
+#    opens (or updates) an issue for changes the update could not read. Unreachable
+#    pages do not fail the job.
 name: registry-watch
 on:
   schedule:
@@ -8,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   issues: write
 
 jobs:
@@ -19,6 +26,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python scripts/check_registry_sources.py --issue
+      - run: python -m pip install --disable-pip-version-check -e ".[dev]"
+
+      - name: Update the data from the providers' deprecation tables
+        id: update
+        run: |
+          python scripts/update_registry.py --write --summary "$RUNNER_TEMP/update.md"
+          if git diff --quiet -- src/llmshift/data; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test and publish the updated data
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          python -m pytest -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/llmshift/data/models.json src/llmshift/data/sources.json
+          git commit -q -F "$RUNNER_TEMP/update.md"
+          git push
+
+      - name: Open an issue for page changes the update did not cover
+        if: ${{ !cancelled() }}
+        run: python scripts/check_registry_sources.py --issue
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

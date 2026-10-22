@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import console as con
+from . import fileio
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import Response
 from .textutil import stable_hash
@@ -158,13 +159,7 @@ class Shadow:
                 record = self._redactor.obj(record)
             data = memoryview((json.dumps(record, ensure_ascii=False, default=str) + "\n").encode("utf-8", "replace"))
             with self._file_lock:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(str(self.path), os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
-                try:
-                    while data:
-                        data = data[os.write(fd, data):]
-                finally:
-                    os.close(fd)
+                fileio.append(self.path, bytes(data))
             with self._lock:
                 self.stats["sent"] += 1
                 self.stats["written"] += 1

@@ -9,6 +9,7 @@ numbers changed value ("2.1 million -> 2 million").
 
 from __future__ import annotations
 
+import bisect
 import re
 
 from .textutil import normalize
@@ -103,6 +104,35 @@ MAX_HARD = 15
 MAX_ENTITIES = 10
 
 
+class _Taken:
+    """Character spans already claimed, kept merged into disjoint runs so each lookup
+    is a binary search (long, fact-dense answers stay fast)."""
+
+    def __init__(self) -> None:
+        self.starts: list[int] = []
+        self.ends: list[int] = []
+
+    def add(self, start: int, end: int) -> None:
+        if end <= start:
+            return
+        i = bisect.bisect_right(self.ends, start)  # runs that end after `start` ...
+        j = bisect.bisect_left(self.starts, end)  # ... and start before `end` overlap it
+
+        if i < j:
+            start, end = min(start, self.starts[i]), max(end, self.ends[j - 1])
+        del self.starts[i:j], self.ends[i:j]
+        self.starts.insert(i, start)
+        self.ends.insert(i, end)
+
+    def overlaps(self, start: int, end: int) -> bool:
+        k = bisect.bisect_left(self.starts, end) - 1
+        return k >= 0 and self.ends[k] > start
+
+    def contains(self, pos: int) -> bool:
+        k = bisect.bisect_right(self.starts, pos) - 1
+        return k >= 0 and pos < self.ends[k]
+
+
 def _blank(text: str, spans: list[tuple[int, int]]) -> str:
     if not spans:
         return text
@@ -143,24 +173,24 @@ def _date_value(kind: str, m: re.Match) -> str | None:
 
 def _dates(text: str) -> list[dict]:
     out: list[dict] = []
-    taken: list[tuple[int, int]] = []
+    taken = _Taken()
     for pattern, kind in _DATE_RES:
         for m in pattern.finditer(text):
-            if any(s < m.end() and m.start() < e for s, e in taken):
+            if taken.overlaps(m.start(), m.end()):
                 continue
             value = _date_value(kind, m)
             if value:
-                taken.append((m.start(), m.end()))
+                taken.add(m.start(), m.end())
                 out.append({"kind": "date", "text": m.group(0).strip(), "value": value, "span": (m.start(), m.end())})
     return out
 
 
 def _times(text: str) -> list[dict]:
     out: list[dict] = []
-    taken: list[tuple[int, int]] = []
+    taken = _Taken()
     for pattern in _TIME_RES:
         for m in pattern.finditer(text):
-            if any(s < m.end() and m.start() < e for s, e in taken):
+            if taken.overlaps(m.start(), m.end()):
                 continue
             h, mi = int(m.group(1)), int(m.group(2) or 0)
             ampm = (m.group(3) or "").lower()
@@ -170,7 +200,7 @@ def _times(text: str) -> list[dict]:
                 h = 0
             if h > 23 or mi > 59:
                 continue
-            taken.append((m.start(), m.end()))
+            taken.add(m.start(), m.end())
             out.append({"kind": "time", "text": m.group(0).strip().rstrip("."), "value": f"{h:02d}:{mi:02d}", "span": (m.start(), m.end())})
     return out
 
@@ -228,30 +258,37 @@ def _scan(text: str) -> dict:
     text = _FENCED_RE.sub(lambda m: " " * len(m.group(0)), text or "")
     urls, emails, codes = [], [], []
     spans: list[tuple[int, int]] = []
+    taken = _Taken()
+
+    def claim(start: int, end: int) -> None:
+        spans.append((start, end))
+        taken.add(start, end)
+
     for m in _URL_RE.finditer(text):
         url = m.group(0).rstrip(".,;:!?")
         urls.append({"kind": "url", "text": url})
-        spans.append((m.start(), m.start() + len(url)))
+        claim(m.start(), m.start() + len(url))
     for m in _EMAIL_RE.finditer(text):
-        if not any(s <= m.start() < e for s, e in spans):
+        if not taken.contains(m.start()):
             emails.append({"kind": "email", "text": m.group(0)})
-            spans.append((m.start(), m.end()))
+            claim(m.start(), m.end())
     for m in _CODE_RE.finditer(text):
         code = m.group(1).strip()
-        if code and not any(s <= m.start() < e for s, e in spans):
+        if code and not taken.contains(m.start()):
             codes.append({"kind": "code", "text": code})
-        spans.append((m.start(), m.end()))
+        claim(m.start(), m.end())
     blanked = _blank(text, spans)
     dates = _dates(blanked)  # before IDs, so "03/14/2026" is a date, not a phone-like ID
-    spans.extend(d["span"] for d in dates)
+    for d in dates:
+        claim(*d["span"])
     blanked = _blank(text, spans)
     ids = []
     for pattern in _ID_RES:
         for m in pattern.finditer(blanked):
-            if any(s < m.end() and m.start() < e for s, e in spans):
+            if taken.overlaps(m.start(), m.end()):
                 continue
             ids.append({"kind": "id", "text": m.group(0).strip()})
-            spans.append((m.start(), m.end()))
+            claim(m.start(), m.end())
     blanked = _blank(text, spans)
     times = _times(blanked)
     blanked = _blank(blanked, [t["span"] for t in times])

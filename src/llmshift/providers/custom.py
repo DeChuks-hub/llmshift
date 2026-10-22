@@ -224,7 +224,7 @@ class CommandProvider(Provider):
                 _RUNNING.discard(proc)
         if proc.returncode != 0:
             raise ProviderError(f"command exited with {proc.returncode}: {(stderr or '').strip()[:300]}", code="command_error")
-        text = (stdout or "").lstrip("﻿")
+        text = (stdout or "").lstrip("\ufeff")
         out = text.strip()
         try:
             data = json.loads(out)

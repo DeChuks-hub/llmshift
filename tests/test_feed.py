@@ -108,7 +108,7 @@ def test_registry_ignores_broken_or_older_caches(home):
     assert Registry.load().origin == "bundled"
     cache.write_text(json.dumps(newer_registry(updated="2026-10-30")), encoding="utf-8")
     assert Registry.load().origin == "bundled"  # dated in the future (today is 2026-10-21 in tests)
-    cache.write_text("﻿" + json.dumps(newer_registry(updated="2026-10-22")), encoding="utf-8")
+    cache.write_text("\ufeff" + json.dumps(newer_registry(updated="2026-10-22")), encoding="utf-8")
     assert Registry.load().origin == str(cache)
 
 

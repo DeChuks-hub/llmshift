@@ -26,6 +26,8 @@ RETRY_STATUSES = (408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529)
 NON_RETRYABLE_CODES = ("insufficient_quota", "billing_hard_limit_reached", "invalid_api_key")
 MAX_DELAY = 60.0
 
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024  # no model answer is this large; a runaway body is cut off
+
 # Set by the runner on Ctrl+C: requests stop retrying and new ones are not sent.
 CANCEL = threading.Event()
 
@@ -151,7 +153,9 @@ def request(
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
         try:
             with _OPENER.open(req, timeout=timeout) as resp:
-                payload = resp.read()
+                payload = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(payload) > MAX_RESPONSE_BYTES:
+                raise ProviderError(f"response from {url} is larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MB", code="invalid_response")
             if raw:
                 return payload
             text = payload.decode("utf-8", errors="replace")
@@ -160,6 +164,8 @@ def request(
             try:
                 data = json.loads(text)
                 return clean_surrogates(data) if has_surrogate_escape(text) else data
+            except RecursionError:
+                raise ProviderError(f"response from {url} is nested too deeply to read", code="invalid_response") from None
             except ValueError:
                 raise ProviderError(f"invalid JSON response from {url}: {text[:200]!r}", code="invalid_response", retryable=True) from None
         except urllib.error.HTTPError as exc:

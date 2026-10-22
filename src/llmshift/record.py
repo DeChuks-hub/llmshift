@@ -39,6 +39,7 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from . import fileio
 from .redact import Redactor
 
 _ENDPOINTS = {
@@ -143,15 +144,9 @@ class Recorder:
                 rec = self.redactor.obj(rec)
             data = memoryview((json.dumps(rec, ensure_ascii=False, default=str) + "\n").encode("utf-8", "replace"))
             with self._lock:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                # A single O_APPEND write per record keeps lines whole even when
-                # several processes log to the same file.
-                fd = os.open(str(self.path), os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
-                try:
-                    while data:
-                        data = data[os.write(fd, data):]
-                finally:
-                    os.close(fd)
+                # One locked append per record: lines stay whole even when several
+                # processes (web workers, jobs) log to the same file.
+                fileio.append(self.path, bytes(data))
         except Exception as exc:  # recording must never break the app
             if not self._warned:
                 self._warned = True

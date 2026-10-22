@@ -314,7 +314,7 @@ class Server:
                         break
                 self.send(writer, _error(None, INVALID_REQUEST, f"message larger than {MAX_MESSAGE_BYTES // (1024 * 1024)} MB"))
                 continue
-            text = line.decode("utf-8", errors="replace").strip().lstrip("﻿")
+            text = line.decode("utf-8", errors="replace").strip().lstrip("\ufeff")
             if not text:
                 continue
             try:

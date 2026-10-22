@@ -537,8 +537,10 @@ def _request_kind(req: dict, resp: Any = None) -> str | None:
     if not isinstance(req, dict):
         return None
     if "contents" in req:
-        return "gemini"
+        return "gemini" if isinstance(req.get("contents"), list) else None
     if "messages" in req:
+        if not isinstance(req.get("messages"), list):
+            return None
         if isinstance(resp, dict) and resp.get("type") == "message" and isinstance(resp.get("content"), list):
             return "anthropic"
         if "system" in req and not any(m.get("role") == "system" for m in req.get("messages") or [] if isinstance(m, dict)):
@@ -959,11 +961,15 @@ def _finish_batch(batch: dict, stats: LogStats) -> list[Interaction]:
             slot = outs[match] if match is not None else {}
             if match is not None:
                 claimed.add(match)
-            reason = non_chat_reason(inp["request"], slot.get("response"), inp.get("url"))
-            if reason:
-                stats.skip(reason, inp["where"])
+            try:  # one malformed batch line must not stop the others
+                reason = non_chat_reason(inp["request"], slot.get("response"), inp.get("url"))
+                if reason:
+                    stats.skip(reason, inp["where"])
+                    continue
+                inter = from_pair(inp["request"], slot.get("response"), {}, inp["where"])
+            except Exception as exc:
+                stats.skip("could not parse record", f"{inp['where']}: {exc.__class__.__name__}: {exc}")
                 continue
-            inter = from_pair(inp["request"], slot.get("response"), {}, inp["where"])
             if inter is None:
                 stats.skip("unrecognised batch request", inp["where"])
                 continue
@@ -977,10 +983,9 @@ def _finish_batch(batch: dict, stats: LogStats) -> list[Interaction]:
 
 
 class _Sample:
-    """A bounded sample of interactions: up to `limit` are kept; past that, each prompt
-    template keeps a fair random sample of its records (reservoir sampling), and a
-    template seen for the first time takes a place from the largest one, so rare
-    templates are not crowded out."""
+    """A bounded sample of interactions: up to `limit` are kept. Past that, every prompt
+    template is guaranteed up to `floor` places (taken from the largest template), and
+    within a template each record has the same chance to stay (reservoir sampling)."""
 
     def __init__(self, limit: int | None, seed: int = 7):
         self.limit = limit
@@ -990,7 +995,26 @@ class _Sample:
         self.heap: list = []
         self.size = 0
         self.order = 0
-        self.dropped = 0
+        self.floor = max(50, (limit or 0) // 50)
+
+    @property
+    def dropped(self) -> int:
+        return sum(self.seen.values()) - self.size
+
+    def _evict(self, exclude: str) -> bool:
+        """Free one place from the largest template that is above its guaranteed share."""
+        while self.heap:
+            neg, largest = heapq.heappop(self.heap)
+            group = self.groups[largest]
+            if -neg != len(group):
+                continue  # stale entry
+            if largest == exclude or len(group) <= min(self.seen[largest], self.floor):
+                heapq.heappush(self.heap, (neg, largest))
+                return False
+            group.pop(self.rng.randrange(len(group)))
+            heapq.heappush(self.heap, (-len(group), largest))
+            return True
+        return False
 
     def add(self, inter: Interaction) -> None:
         self.order += 1
@@ -1003,21 +1027,14 @@ class _Sample:
             self.size += 1
             heapq.heappush(self.heap, (-len(kept), key))
             return
-        self.dropped += 1
+        if len(kept) < min(self.seen[key], self.floor) and self._evict(key):
+            kept.append(item)
+            heapq.heappush(self.heap, (-len(kept), key))
+            return
         if kept:
             j = self.rng.randrange(self.seen[key])
             if j < len(kept):
                 kept[j] = item
-            return
-        while self.heap:
-            neg, largest = heapq.heappop(self.heap)
-            if -neg == len(self.groups[largest]) and len(self.groups[largest]) > 1:
-                victims = self.groups[largest]
-                victims.pop(self.rng.randrange(len(victims)))
-                heapq.heappush(self.heap, (-len(victims), largest))
-                kept.append(item)
-                heapq.heappush(self.heap, (-1, key))
-                return
 
     def items(self) -> list[Interaction]:
         return [inter for _, inter in sorted((it for g in self.groups.values() for it in g), key=lambda it: it[0])]

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import os
 import re
 import statistics
 import time
@@ -22,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import fileio
 from .alerts import AlertMessage, SEVERITY_RANK, deliver, run_url
 from .compare import CompareResult, run_compare
 from .registry import Registry
@@ -347,16 +347,9 @@ def run_watch(
             "summary": summary,
             "drift": [d.to_dict() for d in drifts],
         }
-        prefix = ""
-        try:  # a hand-edited or truncated history must not swallow this run's line
-            if hist_file.stat().st_size:
-                with hist_file.open("rb") as fh:
-                    fh.seek(-1, os.SEEK_END)
-                    prefix = "" if fh.read(1) == b"\n" else "\n"
-        except OSError:
-            pass
-        with hist_file.open("a", encoding="utf-8", errors="replace", newline="\n") as fh:
-            fh.write(prefix + json.dumps(record, ensure_ascii=False) + "\n")
+        # A hand-edited or truncated history must not swallow this run's line.
+        prefix = "" if fileio.ends_with_newline(hist_file) else "\n"
+        fileio.append(hist_file, (prefix + json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8", "replace"))
         run_files = sorted(runs_dir.glob("*.json"))
         for old in run_files[:-KEEP_RUNS]:
             try:

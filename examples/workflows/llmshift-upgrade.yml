@@ -1,0 +1,33 @@
+# Copy to .github/workflows/llmshift-upgrade.yml
+# Every Monday: find models in this repository that are retired or retire soon, swap them
+# for their replacement, test the replacement on the recorded traffic and open a pull
+# request with the diff and the results ("Dependabot for AI models").
+# Pull requests opened with GITHUB_TOKEN do not start other workflows; use a personal
+# access token or a GitHub App token instead if your CI must run on them.
+name: llmshift upgrade
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install llmshift
+
+      - name: Open upgrade pull requests
+        run: llmshift upgrade --auto --apply --compare --pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

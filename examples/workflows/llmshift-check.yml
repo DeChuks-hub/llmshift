@@ -1,0 +1,26 @@
+# Copy to .github/workflows/llmshift-check.yml
+# On every pull request: find the prompts it edits, run only their tests with the edited
+# text against the model in production, and comment on the pull request with the result.
+name: llmshift check
+on:
+  pull_request:
+
+jobs:
+  prompts:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the base branch is needed to see what the change edits
+
+      - name: Test the edited prompts
+        uses: DeChuks-hub/llmshift@v0.1.0
+        with:
+          command: check
+          args: --min-pass-rate 0.95
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

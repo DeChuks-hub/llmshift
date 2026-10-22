@@ -353,7 +353,7 @@ def test_watcher_issue_is_opened_then_updated_once(watcher, server, monkeypatch)
         return (201, issues[-1])
 
     def edit(req):
-        issues[0]["body"] = req["json"]["body"]
+        issues[0].update(req["json"])
         return issues[0]
 
     server.route("GET", "/repos/acme/llmshift/issues", lambda req: [dict(i) for i in issues])
@@ -367,3 +367,8 @@ def test_watcher_issue_is_opened_then_updated_once(watcher, server, monkeypatch)
     assert watcher.report_issue(result) == "updated issue #7" and "https://b.example/y" in issues[0]["body"]
     methods = [r["method"] for r in server.requests]
     assert methods.count("POST") == 2 and methods.count("PATCH") == 1  # one issue, one comment, one edit
+    # Once every page matches the reviewed data again, the issue closes itself.
+    assert watcher.close_issue() == "closed issue #7"
+    assert server.requests[-1]["method"] == "PATCH" and server.requests[-1]["json"]["state"] == "closed"
+    issues.clear()
+    assert watcher.close_issue() == "no open issue"

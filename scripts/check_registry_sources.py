@@ -148,6 +148,20 @@ def report_issue(result: dict) -> str:
     return f"updated issue #{existing['number']}"
 
 
+def close_issue() -> str:
+    """Close the open issue once every page matches the reviewed data again."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not repo or not os.environ.get("GITHUB_TOKEN"):
+        raise SystemExit("--issue needs GITHUB_TOKEN and GITHUB_REPOSITORY (both are set inside GitHub Actions)")
+    issues = _github("GET", f"/repos/{repo}/issues?state=open&per_page=100") or []
+    existing = next((i for i in issues if isinstance(i, dict) and i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
+    if existing is None:
+        return "no open issue"
+    _github("POST", f"/repos/{repo}/issues/{existing['number']}/comments", {"body": "Every source page matches the reviewed lifecycle data again; closing."})
+    _github("PATCH", f"/repos/{repo}/issues/{existing['number']}", {"state": "closed", "state_reason": "completed"})
+    return f"closed issue #{existing['number']}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--update", action="store_true", help="record the current state of every page in sources.json")
@@ -176,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"recorded {len(result['current'])} pages in {shown}")
     elif args.issue and (result["changed"] or result["new"]):
         print(report_issue(result))
+    elif args.issue and not result["unreachable"]:
+        print(close_issue())
     if urls and len(result["unreachable"]) == len(urls):
         print("no source page could be fetched (network problem?)", file=sys.stderr)
         return 1

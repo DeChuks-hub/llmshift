@@ -129,8 +129,9 @@ def report_issue(result: dict) -> str:
         "",
         *[f"- {url}" for url in changed],
         "",
-        "To resolve: review the pages, update `src/llmshift/data/models.json` (bump `updated`), then run",
-        "`python scripts/check_registry_sources.py --update` and commit `src/llmshift/data/sources.json`.",
+        "To resolve: review the pages and update `src/llmshift/data/models.json` if a model's lifecycle changed",
+        "(bump `updated`). Then run Actions > registry-watch > Run workflow with \"reviewed\" ticked: it records",
+        "the pages as they are now and this issue closes.",
     ]
     if result["unreachable"]:
         lines += ["", "Could not be fetched this time: " + ", ".join(u["url"] for u in result["unreachable"])]

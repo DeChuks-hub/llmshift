@@ -19,7 +19,7 @@ from typing import Any, Iterable
 from . import messages as msgs
 from .agents import link_runs
 from .infer import GroupStats, group_stats, infer_checks, merge_checks
-from .logparse import Interaction, LogStats, parse_logs, parse_time
+from .logparse import DEFAULT_MAX_RECORDS, Interaction, LogStats, parse_logs, parse_time
 from .redact import Redactor
 from .testset import TestCase, case_id_for
 from .textutil import jaccard, stable_hash, tokenize
@@ -117,9 +117,9 @@ def build_snapshot(
     judge: bool = False,
     concurrency: int = 4,
     cache: Any = None,
+    max_records: int | None = DEFAULT_MAX_RECORDS,
 ) -> SnapshotResult:
-    interactions, stats = parse_logs(sources)
-    result = SnapshotResult(cases=[], stats=stats)
+    result = SnapshotResult(cases=[], stats=LogStats())
     since_dt, until_dt = parse_time(since), parse_time(until)
     if since and since_dt is None:
         raise ValueError(f"cannot parse --since {since!r} (use YYYY-MM-DD or ISO-8601)")
@@ -130,32 +130,33 @@ def build_snapshot(
         until_dt += _dt.timedelta(days=1)  # a date means "through the end of that day"
         until_inclusive = False
 
-    kept: list[Interaction] = []
-    for inter in interactions:
+    def admit(inter: Interaction) -> bool:
+        """Filters applied while the logs are read, so dropped calls never take memory."""
+        reason = None
         if inter.error and not include_errors:
-            result.filtered["API error recorded in the log"] += 1
-            continue
-        if not (_matches_model(inter.model, models or []) or _matches_model(inter.metadata.get("served_model"), models or [])):
-            result.filtered["different model" if inter.model else "model not recorded"] += 1
-            continue
-        if since_dt or until_dt:
+            reason = "API error recorded in the log"
+        elif not (_matches_model(inter.model, models or []) or _matches_model(inter.metadata.get("served_model"), models or [])):
+            reason = "different model" if inter.model else "model not recorded"
+        elif since_dt or until_dt:
             ts = parse_time(inter.timestamp)
             if ts is None:
-                result.filtered["no timestamp (time window given)"] += 1
-                continue
-            if (since_dt and ts < since_dt) or (until_dt and (ts > until_dt if until_inclusive else ts >= until_dt)):
-                result.filtered["outside the time window"] += 1
-                continue
-        if inter.finish_reason == "length" and not include_truncated:
-            result.filtered["truncated output (finish_reason=length)"] += 1
-            continue
-        if not inter.has_output and baseline_provider is None:
-            result.filtered["no output recorded (pass --baseline-model to generate one)"] += 1
-            continue
-        if not any(m.get("role") in ("user", "tool") for m in inter.messages) and not msgs.system_prompt(inter.messages):
-            result.filtered["no prompt content"] += 1
-            continue
-        kept.append(inter)
+                reason = "no timestamp (time window given)"
+            elif (since_dt and ts < since_dt) or (until_dt and (ts > until_dt if until_inclusive else ts >= until_dt)):
+                reason = "outside the time window"
+        if reason is None:
+            if inter.finish_reason == "length" and not include_truncated:
+                reason = "truncated output (finish_reason=length)"
+            elif not inter.has_output and baseline_provider is None:
+                reason = "no output recorded (pass --baseline-model to generate one)"
+            elif not any(m.get("role") in ("user", "tool") for m in inter.messages) and not msgs.system_prompt(inter.messages):
+                reason = "no prompt content"
+        if reason is not None:
+            result.filtered[reason] += 1
+            return False
+        return True
+
+    kept, stats = parse_logs(sources, admit=admit, max_records=max_records)
+    result.stats = stats
 
     redactor = Redactor(secrets=redact_secrets, pii=redact_pii)
     if redactor.patterns:

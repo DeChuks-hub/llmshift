@@ -338,7 +338,7 @@ def run_watch(
     )
     if not dry_run:
         runs_dir.mkdir(parents=True, exist_ok=True)
-        (runs_dir / f"{run_id}.json").write_text(json.dumps(per_case, ensure_ascii=False), encoding="utf-8")
+        (runs_dir / f"{run_id}.json").write_bytes(json.dumps(per_case, ensure_ascii=False).encode("utf-8", "replace"))
         record = {
             "run_id": run_id,
             "created_at": now.isoformat(timespec="seconds"),
@@ -355,7 +355,7 @@ def run_watch(
                     prefix = "" if fh.read(1) == b"\n" else "\n"
         except OSError:
             pass
-        with hist_file.open("a", encoding="utf-8", newline="\n") as fh:
+        with hist_file.open("a", encoding="utf-8", errors="replace", newline="\n") as fh:
             fh.write(prefix + json.dumps(record, ensure_ascii=False) + "\n")
         run_files = sorted(runs_dir.glob("*.json"))
         for old in run_files[:-KEEP_RUNS]:

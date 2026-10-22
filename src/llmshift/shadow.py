@@ -156,7 +156,7 @@ class Shadow:
         try:
             if self._redactor is not None:
                 record = self._redactor.obj(record)
-            data = memoryview((json.dumps(record, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+            data = memoryview((json.dumps(record, ensure_ascii=False, default=str) + "\n").encode("utf-8", "replace"))
             with self._file_lock:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 fd = os.open(str(self.path), os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)

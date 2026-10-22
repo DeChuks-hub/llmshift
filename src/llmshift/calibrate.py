@@ -62,7 +62,7 @@ def load_labels(path: Path) -> list[dict]:
 
 def _append(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as fh:
+    with path.open("a", encoding="utf-8", errors="replace", newline="\n") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
@@ -251,7 +251,7 @@ def cmd_calibrate(args: Any, cfg: dict) -> int:
     cal = run_calibration(labels, judge, labels_name=str(path), cache=_cache(cfg, args), concurrency=args.concurrency or int(cfg.get("concurrency", 4)))
     out = calibration_path(cfg)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes((json.dumps(cal.to_dict(), indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    out.write_bytes((json.dumps(cal.to_dict(), indent=2, ensure_ascii=False) + "\n").encode("utf-8", "replace"))
     if args.format == "json":
         con.out(json.dumps(cal.to_dict(), indent=2, ensure_ascii=False))
     else:

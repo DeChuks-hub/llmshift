@@ -612,12 +612,12 @@ def _registry_root(path: Path) -> tuple[Path, list[Path]]:
 
 
 def _load_yaml_entries(files: Iterable[Path], warnings: list[str]) -> dict:
-    import yaml
+    from .. import yamlsafe
 
     entries: dict = {}
     for f in files:
         try:
-            data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+            data = yamlsafe.load(f.read_text(encoding="utf-8")) or {}
         except Exception as exc:
             warnings.append(f"{f}: cannot parse YAML ({exc})")
             continue

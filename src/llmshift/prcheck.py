@@ -130,10 +130,10 @@ def prompt_candidates(text: str, path: str) -> list[str]:
         found = _python_strings(text)
     elif suffix in (".yaml", ".yml"):
         try:
-            import yaml
+            from . import yamlsafe
 
             found = []
-            for doc in yaml.safe_load_all(text):
+            for doc in yamlsafe.load_all(text):
                 _data_strings(doc, found)
         except Exception:
             found = None

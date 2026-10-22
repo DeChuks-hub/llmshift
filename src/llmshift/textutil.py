@@ -64,7 +64,27 @@ def word_count(text: Any) -> int:
 
 def stable_hash(obj: Any, length: int = 12) -> str:
     data = obj if isinstance(obj, str) else json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256(data.encode("utf-8")).hexdigest()[:length]
+    return hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()[:length]
+
+
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def has_surrogate_escape(raw: str) -> bool:
+    """Cheap test before cleaning: JSON text that may decode to lone surrogates."""
+    return "\\ud" in raw or "\\uD" in raw
+
+
+def clean_surrogates(value: Any) -> Any:
+    """Replace lone UTF-16 surrogates (JSON allows "\\ud83d" alone, and models emit them
+    when a stream splits an emoji) with U+FFFD, so the text can be stored as UTF-8."""
+    if isinstance(value, str):
+        return _SURROGATE_RE.sub("\ufffd", value) if _SURROGATE_RE.search(value) else value
+    if isinstance(value, list):
+        return [clean_surrogates(v) for v in value]
+    if isinstance(value, dict):
+        return {clean_surrogates(k): clean_surrogates(v) for k, v in value.items()}
+    return value
 
 
 def shorten(text: Any, limit: int = 120) -> str:

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import messages as msgs
+from .textutil import clean_surrogates, has_surrogate_escape
 from .textutil import stable_hash
 
 
@@ -197,20 +198,29 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
             if not line.strip():
                 continue
             try:
-                yield json.loads(line), f"{path}:{lineno}"
+                rec = json.loads(line)
+                yield (clean_surrogates(rec) if has_surrogate_escape(line) else rec), f"{path}:{lineno}"
             except ValueError as exc:
                 raise TestFileError(f"{path}:{lineno}: invalid JSON ({exc})") from None
+            except RecursionError:
+                raise TestFileError(f"{path}:{lineno}: JSON nested too deeply") from None
         return
     if suffix in (".yaml", ".yml"):
         import yaml
 
+        from . import yamlsafe
+
         try:
-            data = yaml.safe_load(text)
+            data = yamlsafe.load(text)
         except yaml.YAMLError as exc:
             raise TestFileError(f"{path}: invalid YAML ({exc})") from None
     else:
         try:
             data = json.loads(text)
+            if has_surrogate_escape(text):
+                data = clean_surrogates(data)
+        except RecursionError:
+            raise TestFileError(f"{path}: JSON nested too deeply") from None
         except ValueError as exc:
             if "Extra data" in str(exc):  # one object per line in a .json file: read it as JSON lines
                 yield from _iter_records(path, lines=True)
@@ -272,7 +282,7 @@ def atomic_write(path: str | os.PathLike, text: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=p.suffix, dir=str(p.parent))
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, p)
     except BaseException:
@@ -314,7 +324,7 @@ def append_tests(new: list[TestCase], path: str | os.PathLike, existing: list[Te
         return
     data = p.read_bytes()
     prefix = "\n" if data and not data.endswith(b"\n") else ""
-    with p.open("a", encoding="utf-8", newline="\n") as fh:
+    with p.open("a", encoding="utf-8", errors="replace", newline="\n") as fh:
         fh.write(prefix + "".join(dumps_case(c) + "\n" for c in new))
 
 

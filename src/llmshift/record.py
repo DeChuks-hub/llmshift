@@ -141,7 +141,7 @@ class Recorder:
                 rec["agent_run"] = {"id": run["id"], "step": step, **({"name": run["name"]} if run["name"] else {})}
             if self.redactor is not None:
                 rec = self.redactor.obj(rec)
-            data = memoryview((json.dumps(rec, ensure_ascii=False, default=str) + "\n").encode("utf-8"))
+            data = memoryview((json.dumps(rec, ensure_ascii=False, default=str) + "\n").encode("utf-8", "replace"))
             with self._lock:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 # A single O_APPEND write per record keeps lines whole even when

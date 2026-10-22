@@ -18,17 +18,20 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import gzip
+import heapq
 import io
 import json
 import os
+import random
 import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from . import messages as msgs
+from .textutil import clean_surrogates, has_surrogate_escape
 
 LOG_SUFFIXES = (".jsonl", ".ndjson", ".json", ".csv", ".log", ".txt")
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))  # logged prompts easily exceed the 128 KB default
@@ -69,6 +72,7 @@ class LogStats:
     formats: Counter = field(default_factory=Counter)
     skipped: Counter = field(default_factory=Counter)
     examples: dict = field(default_factory=dict)
+    sampled_out: int = 0  # calls left out to stay within max_records
 
     def skip(self, reason: str, example: str | None = None) -> None:
         self.skipped[reason] += 1
@@ -79,13 +83,56 @@ class LogStats:
 # ------------------------------------------------------------------- reading
 
 
-def _open_text(path: Path) -> str:
-    if path.suffix.lower() == ".gz":
-        with gzip.open(path, "rb") as fh:
-            raw = fh.read()
-    else:
-        raw = path.read_bytes()
-    return raw.decode("utf-8-sig", errors="replace")
+MAX_DOCUMENT_BYTES = 512 * 1024 * 1024  # a log read as one JSON document
+MAX_LINE_BYTES = 64 * 1024 * 1024  # one record in a JSON-lines log
+DEFAULT_MAX_RECORDS = 100_000  # requests kept in memory; beyond this a fair sample is kept
+_TOO_LARGE = object()
+
+
+def _open_binary(path: Path) -> Any:
+    return gzip.open(path, "rb") if path.suffix.lower() == ".gz" else open(path, "rb")
+
+
+def _sniff(path: Path) -> bytes:
+    with _open_binary(path) as fh:
+        return fh.read(4096)
+
+
+def _read_document(path: Path, ref: str, stats: "LogStats") -> Any:
+    """The whole file as one JSON document (None when it is not one)."""
+    with _open_binary(path) as fh:
+        raw = fh.read(MAX_DOCUMENT_BYTES + 1)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        stats.skip("file too large to read as one JSON document (over 512 MB); export JSON Lines instead", ref)
+        return _TOO_LARGE
+    text = raw.decode("utf-8-sig", errors="replace")
+    try:
+        data = json.loads(text)
+        return clean_surrogates(data) if has_surrogate_escape(text) else data
+    except RecursionError:
+        stats.skip("JSON nested too deeply", ref)
+        return _TOO_LARGE
+    except ValueError:
+        return None
+
+
+def _lines(path: Path, ref: str, stats: "LogStats") -> Iterator[tuple[int, str]]:
+    """The file's lines, read one at a time (any size of file, .gz included); a line
+    over MAX_LINE_BYTES is skipped without being held in memory."""
+    with _open_binary(path) as fh:
+        lineno = 0
+        while True:
+            raw = fh.readline(MAX_LINE_BYTES + 1)
+            if not raw:
+                return
+            lineno += 1
+            if len(raw) > MAX_LINE_BYTES:
+                while raw and not raw.endswith(b"\n"):
+                    raw = fh.readline(MAX_LINE_BYTES + 1)
+                stats.skip(f"record too large (one line over {MAX_LINE_BYTES // (1024 * 1024)} MB)", f"{ref}:{lineno}")
+                continue
+            text = raw.decode("utf-8", errors="replace")
+            yield lineno, (text.lstrip("\ufeff") if lineno == 1 else text)
 
 
 def _inner_suffix(path: Path) -> str:
@@ -131,20 +178,19 @@ def _csv_value(value: Any) -> Any:
 
 
 def iter_records(path: Path, stats: LogStats) -> Iterator[tuple[Any, str]]:
-    text = _open_text(path)
     suffix = _inner_suffix(path)
     ref = path.as_posix()  # portable "file:line" references in test files
     if suffix == ".csv":
-        reader = csv.DictReader(io.StringIO(text))
-        for i, row in enumerate(reader, 2):
-            yield {_csv_key(k): _csv_value(v) for k, v in row.items() if k is not None and str(k).strip()}, f"{ref}:{i}"
+        with _open_binary(path) as fh:
+            reader = csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace", newline=""))
+            for i, row in enumerate(reader, 2):
+                yield {_csv_key(k): _csv_value(v) for k, v in row.items() if k is not None and str(k).strip()}, f"{ref}:{i}"
         return
-    stripped = text.lstrip()
-    if suffix == ".json" or (stripped.startswith("[") and suffix not in (".jsonl", ".ndjson")):
-        try:
-            data = json.loads(text)
-        except ValueError:
-            data = None
+    head = _sniff(path).lstrip(b"\xef\xbb\xbf").lstrip()
+    if suffix == ".json" or (head.startswith(b"[") and suffix not in (".jsonl", ".ndjson")):
+        data = _read_document(path, ref, stats)
+        if data is _TOO_LARGE:
+            return
         if data is not None:
             if isinstance(data, dict):
                 for key in ("data", "records", "logs", "items", "runs", "cases", "tests", "examples", "rows"):
@@ -157,7 +203,7 @@ def iter_records(path: Path, stats: LogStats) -> Iterator[tuple[Any, str]]:
             else:
                 yield data, ref
             return
-    for lineno, line in enumerate(text.splitlines(), 1):
+    for lineno, line in _lines(path, ref, stats):
         line = line.strip()
         if not line:
             continue
@@ -165,9 +211,14 @@ def iter_records(path: Path, stats: LogStats) -> Iterator[tuple[Any, str]]:
             stats.skip("streamed chunk (log whole responses, e.g. with llmshift.record)", f"{ref}:{lineno}")
             continue
         try:
-            yield json.loads(line), f"{ref}:{lineno}"
+            rec = json.loads(line)
+        except RecursionError:
+            stats.skip("JSON nested too deeply", f"{ref}:{lineno}")
+            continue
         except ValueError:
             stats.skip("invalid JSON line", f"{ref}:{lineno}")
+            continue
+        yield (clean_surrogates(rec) if has_surrogate_escape(line) else rec), f"{ref}:{lineno}"
 
 
 # ---------------------------------------------------------------- helpers
@@ -925,9 +976,63 @@ def _finish_batch(batch: dict, stats: LogStats) -> list[Interaction]:
     return out
 
 
-def parse_logs(sources: Iterable[str | os.PathLike]) -> tuple[list[Interaction], LogStats]:
+class _Sample:
+    """A bounded sample of interactions: up to `limit` are kept; past that, each prompt
+    template keeps a fair random sample of its records (reservoir sampling), and a
+    template seen for the first time takes a place from the largest one, so rare
+    templates are not crowded out."""
+
+    def __init__(self, limit: int | None, seed: int = 7):
+        self.limit = limit
+        self.rng = random.Random(seed)
+        self.groups: dict[str, list] = {}
+        self.seen: Counter = Counter()
+        self.heap: list = []
+        self.size = 0
+        self.order = 0
+        self.dropped = 0
+
+    def add(self, inter: Interaction) -> None:
+        self.order += 1
+        key = msgs.template_key(inter.messages, inter.params)
+        self.seen[key] += 1
+        kept = self.groups.setdefault(key, [])
+        item = (self.order, inter)
+        if self.limit is None or self.size < self.limit:
+            kept.append(item)
+            self.size += 1
+            heapq.heappush(self.heap, (-len(kept), key))
+            return
+        self.dropped += 1
+        if kept:
+            j = self.rng.randrange(self.seen[key])
+            if j < len(kept):
+                kept[j] = item
+            return
+        while self.heap:
+            neg, largest = heapq.heappop(self.heap)
+            if -neg == len(self.groups[largest]) and len(self.groups[largest]) > 1:
+                victims = self.groups[largest]
+                victims.pop(self.rng.randrange(len(victims)))
+                heapq.heappush(self.heap, (-len(victims), largest))
+                kept.append(item)
+                heapq.heappush(self.heap, (-1, key))
+                return
+
+    def items(self) -> list[Interaction]:
+        return [inter for _, inter in sorted((it for g in self.groups.values() for it in g), key=lambda it: it[0])]
+
+
+def parse_logs(
+    sources: Iterable[str | os.PathLike],
+    *,
+    admit: Callable[[Interaction], bool] | None = None,
+    max_records: int | None = DEFAULT_MAX_RECORDS,
+) -> tuple[list[Interaction], LogStats]:
+    """Every LLM call in the logs. `admit` filters calls as they are read, and at most
+    `max_records` are kept in memory (a fair sample per prompt template beyond that)."""
     stats = LogStats()
-    interactions: list[Interaction] = []
+    sample = _Sample(max_records)
     batch: dict = {}
     for path in iter_files(sources):
         stats.files += 1
@@ -944,12 +1049,16 @@ def parse_logs(sources: Iterable[str | os.PathLike]) -> tuple[list[Interaction],
                     if not inter.messages:
                         stats.skip("no messages", where)
                         continue
-                    interactions.append(inter)
+                    stats.parsed += 1
                     stats.formats[inter.fmt] += 1
+                    if admit is None or admit(inter):
+                        sample.add(inter)
         except (OSError, EOFError, ValueError, csv.Error) as exc:  # unreadable, truncated .gz, bad CSV
             stats.skip("unreadable file", f"{path.as_posix()}: {exc.__class__.__name__}: {exc}")
     for inter in _finish_batch(batch, stats):
-        interactions.append(inter)
+        stats.parsed += 1
         stats.formats[inter.fmt] += 1
-    stats.parsed = len(interactions)
-    return interactions, stats
+        if admit is None or admit(inter):
+            sample.add(inter)
+    stats.sampled_out = sample.dropped
+    return sample.items(), stats

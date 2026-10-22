@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
+from ..textutil import clean_surrogates, has_surrogate_escape
 from .base import ProviderError
 
 RETRY_STATUSES = (408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529)
@@ -121,9 +122,9 @@ def _clean_floats(value: Any) -> Any:
 
 def _encode(body: Any) -> bytes:
     try:
-        return json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8", "replace")
     except ValueError:  # NaN/Infinity are not valid JSON: send null instead
-        return json.dumps(_clean_floats(body), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return json.dumps(_clean_floats(body), ensure_ascii=False, allow_nan=False).encode("utf-8", "replace")
 
 
 def request(
@@ -157,7 +158,8 @@ def request(
             if not text.strip():
                 return {}
             try:
-                return json.loads(text)
+                data = json.loads(text)
+                return clean_surrogates(data) if has_surrogate_escape(text) else data
             except ValueError:
                 raise ProviderError(f"invalid JSON response from {url}: {text[:200]!r}", code="invalid_response", retryable=True) from None
         except urllib.error.HTTPError as exc:

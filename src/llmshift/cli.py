@@ -31,7 +31,10 @@ def _write(path: str | Path, text: str) -> Path:
     from .testset import atomic_write
 
     p = Path(path)
-    atomic_write(p, text)
+    try:
+        atomic_write(p, text)
+    except OSError as exc:
+        raise UsageError(f"cannot write {path}: {exc.strerror or exc}") from None
     return p
 
 
@@ -47,7 +50,7 @@ def _step_summary(markdown: str) -> None:
     if not path:
         return
     try:
-        with open(path, "a", encoding="utf-8") as fh:
+        with open(path, "a", encoding="utf-8", errors="replace") as fh:
             fh.write(markdown + "\n")
     except OSError:
         pass
@@ -58,7 +61,7 @@ def _github_output(name: str, value: Any) -> None:
     if not path:
         return
     try:
-        with open(path, "a", encoding="utf-8") as fh:
+        with open(path, "a", encoding="utf-8", errors="replace") as fh:
             fh.write(f"{name}={value}\n")
     except OSError:
         pass
@@ -375,6 +378,7 @@ def cmd_snapshot(args: argparse.Namespace, cfg: dict) -> int:
         judge=args.with_judge_checks,
         concurrency=args.concurrency or int(cfg.get("concurrency", 4)),
         cache=_cache(cfg, args),
+        max_records=_positive(args.max_records if args.max_records is not None else sc.get("max_records", 100_000), "--max-records"),
     )
     st = result.stats
     out_path = args.output or cfg.get("tests") or ".llmshift/tests.jsonl"
@@ -382,6 +386,8 @@ def cmd_snapshot(args: argparse.Namespace, cfg: dict) -> int:
         out_path = str(Path(out_path) / "tests.jsonl")
     con.out(con.style("LLMShift snapshot", "bold"))
     con.out(f"  read {st.records} records from {st.files} file(s); recognised {st.parsed} LLM calls" + (f" ({', '.join(f'{k}: {v}' for k, v in st.formats.most_common())})" if st.formats else ""))
+    if st.sampled_out:
+        con.out(con.style(f"  kept a fair sample per prompt template: {st.sampled_out:,} call(s) left out to stay within --max-records", "grey"))
     for reason, n in list(st.skipped.most_common()) + list(result.filtered.most_common()):
         example = st.examples.get(reason)
         con.out(con.style(f"  skipped {n}: {reason}" + (f"  e.g. {con.truncate(example, 90)}" if example else ""), "grey"))
@@ -971,6 +977,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--regenerate", action="store_true", help="re-generate every baseline with --baseline-model")
     p.add_argument("--with-judge-checks", action="store_true", help="add an LLM-judged equivalence check to free-text cases")
     p.add_argument("--append", action="store_true", help="add to an existing test file instead of replacing it")
+    p.add_argument("--max-records", type=int, metavar="N", help="calls held in memory (default 100000); larger logs keep a fair sample per prompt template")
     p.add_argument("--concurrency", type=int)
     p.add_argument("--no-cache", action="store_true")
     p.set_defaults(func=cmd_snapshot)
@@ -1093,6 +1100,11 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     except (UsageError, ConfigError, TestFileError, ProviderError, FileNotFoundError, ValueError) as exc:
         con.fail(str(exc))
+        if os.environ.get("LLMSHIFT_DEBUG"):
+            traceback.print_exc()
+        return EXIT_USAGE
+    except OSError as exc:  # unreadable or unwritable files, full disks
+        con.fail(f"{exc.filename}: {exc.strerror or exc}" if getattr(exc, "filename", None) else str(exc))
         if os.environ.get("LLMSHIFT_DEBUG"):
             traceback.print_exc()
         return EXIT_USAGE

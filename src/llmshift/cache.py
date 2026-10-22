@@ -60,7 +60,7 @@ class ResponseCache:
             data.pop("cached", None)
             text = json.dumps(data, ensure_ascii=False, default=str)
             fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
                 fh.write(text)
             os.replace(tmp, path)
             tmp = None

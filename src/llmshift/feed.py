@@ -666,9 +666,9 @@ def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int 
         "recent": [lk.to_dict() for lk in entries["recent"]],
         "deprecated_without_date": [lk.to_dict() for lk in entries["undated"]],
     }
-    (out / "index.html").write_bytes(build_page(entries, reg.updated, title=title, days_back=days_back).encode("utf-8"))
+    (out / "index.html").write_bytes(build_page(entries, reg.updated, title=title, days_back=days_back).encode("utf-8", "replace"))
     (out / "retirements.ics").write_bytes(build_ics(entries, reg.updated))
-    (out / "retirements.json").write_bytes((json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    (out / "retirements.json").write_bytes((json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8", "replace"))
     return {"dir": str(out), "files": ["index.html", "retirements.ics", "retirements.json"], "counts": {k: len(v) for k, v in entries.items()}}
 
 

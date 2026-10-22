@@ -222,6 +222,97 @@ def _rebase(cfg: dict, base: Path, user: dict) -> None:
             dest["path"] = fix(dest["path"])
 
 
+# Known settings: (kind, low, high). Values from ${ENV} arrive as text, so numbers and
+# booleans written as text are converted; anything else wrong is reported by name.
+_RULES: dict[tuple, tuple] = {
+    ("concurrency",): ("int", 1, 256),
+    ("timeout",): ("number", 0.001, 86400),
+    ("max_retries",): ("int", 0, 50),
+    ("min_pass_rate",): ("rate", 0, 1),
+    ("repeat",): ("int", 1, 100),
+    ("cache",): ("bool", None, None),
+    ("allow_python_checks",): ("bool", None, None),
+    ("judge_mode",): ("choice", ("auto", "always"), None),
+    ("scan", "warn_days"): ("int", 0, 36500),
+    ("scan", "include_docs"): ("bool", None, None),
+    ("scan", "fail_on"): ("choice", ("retired", "retiring", "deprecated", "unknown", "never"), None),
+    ("snapshot", "max_cases"): ("int", 1, 10_000_000),
+    ("snapshot", "per_group"): ("int", 1, 10_000_000),
+    ("snapshot", "max_records"): ("int", 1, 100_000_000),
+    ("snapshot", "seed"): ("int", None, None),
+    ("snapshot", "redact_secrets"): ("bool", None, None),
+    ("snapshot", "redact_pii"): ("bool", None, None),
+    ("fix", "rounds"): ("int", 1, 50),
+    ("fix", "target_pass_rate"): ("rate", 0, 1),
+    ("fix", "max_cases_per_group"): ("int", 1, 100_000),
+    ("watch", "max_pass_rate_drop"): ("rate", 0, 1),
+    ("watch", "min_pass_rate"): ("rate", 0, 1),
+    ("watch", "max_similarity_drop"): ("rate", 0, 1),
+    ("watch", "retirement_warn_days"): ("int", 0, 36500),
+    ("watch", "fail_on"): ("choice", ("info", "warning", "critical", "never"), None),
+    ("watch", "alert_on"): ("choice", ("info", "warning", "critical"), None),
+}
+_SECTIONS = ("scan", "snapshot", "fix", "watch", "providers", "severity", "pricing", "pick", "digest")
+_TRUE, _FALSE = ("true", "yes", "on", "1"), ("false", "no", "off", "0")
+
+
+def _coerce(value: Any, kind: str, low: Any, high: Any, name: str) -> Any:
+    if value is None:
+        if kind == "rate":
+            return None  # null switches a threshold off
+        raise ValueError(f"{name} must not be empty")
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in _TRUE or text in _FALSE:
+            return text in _TRUE
+        raise ValueError(f"{name} must be true or false, got {value!r}")
+    if kind == "choice":
+        if str(value) not in low:
+            raise ValueError(f"{name} must be one of {', '.join(low)}, got {value!r}")
+        return str(value)
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    try:
+        number = float(str(value).strip()) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {value!r}") from None
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError(f"{name} must be a finite number, got {value!r}")
+    if kind == "int":
+        if number != int(number):
+            raise ValueError(f"{name} must be a whole number, got {value!r}")
+        number = int(number)
+    if (low is not None and number < low) or (high is not None and number > high):
+        bounds = f"between {low} and {high}" if high is not None else f"at least {low}"
+        raise ValueError(f"{name} must be {bounds}, got {value!r}")
+    return number
+
+
+def _validate(user: dict, source: Path | None) -> None:
+    """Check (and convert) the known settings, so mistakes are reported where they are."""
+    where = f"{source}: " if source else ""
+    for section in _SECTIONS:
+        if section in user and user[section] is not None and not isinstance(user[section], dict):
+            raise ConfigError(f"{where}'{section}' must be a mapping of settings, got {type(user[section]).__name__}")
+    for keys, (kind, low, high) in _RULES.items():
+        node, key = _get_path(user, keys)
+        if node is None or key not in node:
+            continue
+        try:
+            node[key] = _coerce(node[key], kind, low, high, ".".join(keys))
+        except ValueError as exc:
+            raise ConfigError(f"{where}{exc}") from None
+    for key in ("paths", "exclude"):
+        values = (user.get("scan") or {}).get(key)
+        if values is not None and not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) for v in values):
+            raise ConfigError(f"{where}scan.{key} must be a list of paths or patterns")
+    for key in ("tests", "baseline", "candidate", "judge", "embedder", "cache_dir", "reports_dir"):
+        if user.get(key) is not None and not isinstance(user[key], (str, int, float)):
+            raise ConfigError(f"{where}{key} must be text, got {type(user[key]).__name__}")
+
+
 def load_config(path: str | os.PathLike | None = None) -> Config:
     data: dict | None = None
     source: Path | None = None
@@ -237,14 +328,15 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             raise ConfigError(f"{source}: no [tool.llmshift] table (or the file is not valid TOML)")
     elif source is not None:
         try:
-            import yaml
+            from . import yamlsafe
 
-            data = yaml.safe_load(source.read_text(encoding="utf-8-sig")) or {}
+            data = yamlsafe.load(source.read_text(encoding="utf-8-sig")) or {}
         except Exception as exc:
             raise ConfigError(f"{source}: could not parse config ({exc})") from None
         if not isinstance(data, dict):
             raise ConfigError(f"{source}: the config must be a mapping of settings")
     user = _normalize(expand_env(copy.deepcopy(data or {})))
+    _validate(user, source)
     cfg = Config(deep_merge(DEFAULTS, user))
     if source is not None:
         base = source.resolve().parent

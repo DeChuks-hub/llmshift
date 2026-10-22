@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import string
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -23,7 +24,7 @@ from .jsonschema_lite import describe as describe_schema
 from .jsonschema_lite import get_path, validate
 from .templating import render, render_text
 from .testset import TestCase
-from .textutil import detect_language, language_name, shorten, similarity, tokenize, vector_cosine, word_count
+from .textutil import detect_language, language_name, normalize, rouge_l, shorten, similarity, tokenize, vector_cosine, word_count
 
 DEFAULT_SEVERITY = {
     "not_empty": "error",
@@ -158,6 +159,8 @@ class CheckContext:
     resolve_model: Callable[[str], Any] | None = None  # spec -> Provider (for graders naming their own model)
     judge_cache: Any = None
     judge_calls: int = 0
+    judge_mode: str = "auto"  # auto: ask the judge only when rule-based checks cannot decide
+    judge_skipped: int = 0
 
 
 @dataclass
@@ -836,5 +839,48 @@ def evaluate(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> 
     return CheckResult(ctype, category, severity, outcome.status, outcome.message, outcome.score, check.get("name"), outcome.details)
 
 
+# The open-ended equivalence judge; imported graders (llm_label, llm_score, modelgraded)
+# are criteria in their own right and always run.
+GATED_JUDGES = ("llm_judge",)
+NEAR_IDENTICAL = 0.9
+_SKIPPED_LOCK = threading.Lock()
+
+
+def _judge_unneeded(check: dict, decided: list[CheckResult], case: TestCase, sample: Sample) -> tuple[str, str] | None:
+    """(status, message) when the rule-based results already settle the case, else None."""
+    if any(r.status in ("fail", "error") and r.severity == "error" for r in decided):
+        return "skip", "not needed: the rule-based checks already failed this case"
+    reference = check.get("reference", case.baseline_output)
+    text = sample.text or ""
+    if not reference or not text.strip():
+        return None
+    if normalize(text) == normalize(reference):
+        return "pass", "identical to the reference answer (no judge call needed)"
+    if not any(r.status in ("fail", "error") for r in decided):
+        score = rouge_l(text, reference)
+        if score >= NEAR_IDENTICAL:
+            return "pass", f"near-identical to the reference (similarity {score:.2f}; no judge call needed)"
+    return None
+
+
 def run_checks(case: TestCase, sample: Sample, ctx: CheckContext) -> list[CheckResult]:
-    return [evaluate(check, sample, case, ctx) for check in case.checks]
+    results: list[CheckResult | None] = [None] * len(case.checks)
+    gated = []
+    for i, check in enumerate(case.checks):
+        if check.get("type") in GATED_JUDGES and ctx.judge_mode == "auto" and not check.get("always"):
+            gated.append(i)
+        else:
+            results[i] = evaluate(check, sample, case, ctx)
+    for i in gated:
+        check = case.checks[i]
+        decided = _judge_unneeded(check, [r for r in results if r is not None], case, sample)
+        if decided is None:
+            results[i] = evaluate(check, sample, case, ctx)
+            continue
+        with _SKIPPED_LOCK:
+            ctx.judge_skipped += 1
+        status, message = decided
+        details = {"skip_reason": "decided_by_rules"} if status == "skip" else {"judge": "not needed"}
+        ctype = check["type"]
+        results[i] = CheckResult(ctype, check.get("category") or CATEGORY.get(ctype, "semantics"), severity_of(check, ctx), status, message, None, check.get("name"), details)
+    return [r for r in results if r is not None]

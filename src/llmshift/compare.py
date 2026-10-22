@@ -24,8 +24,16 @@ from .messages import request_preview
 from .providers import resolve
 from .providers.base import Provider, Response
 from .runner import adaptations, run_cases
+from .stats import cases_needed, mcnemar_p, pass_rate_interval
 from .testset import TestCase, unique_ids
 from .textutil import word_count
+
+
+_OPTIONAL_FIELDS = (
+    "candidate_tool_calls", "error", "latency_ms", "usage", "finish_reason", "model", "fingerprint", "unstable",
+    "baseline_live_output", "baseline_latency_ms", "baseline_model", "baseline_live_status", "raw_status",
+    "runs", "pass_fraction", "run_statuses", "flaky",
+)
 
 
 @dataclass
@@ -48,6 +56,12 @@ class CaseResult:
     baseline_live_output: str | None = None
     baseline_latency_ms: float | None = None
     baseline_model: str | None = None
+    baseline_live_status: str | None = None  # the old model, checked the same way
+    raw_status: str | None = None  # before failures shared with the old model were set aside
+    runs: int = 1
+    pass_fraction: float | None = None  # share of repeated runs that passed
+    run_statuses: list[str] = field(default_factory=list)
+    flaky: bool = False
 
     @property
     def failing(self) -> list[CheckResult]:
@@ -63,16 +77,16 @@ class CaseResult:
             "candidate_output": self.candidate_output,
             "checks": [c.to_dict() for c in self.checks],
         }
-        for key in ("candidate_tool_calls", "error", "latency_ms", "usage", "finish_reason", "model", "fingerprint", "unstable", "baseline_live_output", "baseline_latency_ms", "baseline_model"):
+        for key in _OPTIONAL_FIELDS:
             value = getattr(self, key)
-            if value not in (None, [], {}):
+            if value not in (None, [], {}, False) and not (key == "runs" and value == 1):
                 d[key] = value
         return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "CaseResult":
         r = cls(id=d["id"], group=d.get("group", ""), status=d.get("status", "error"))
-        for key in ("input_preview", "baseline_output", "candidate_output", "candidate_tool_calls", "error", "latency_ms", "usage", "finish_reason", "model", "fingerprint", "unstable", "baseline_live_output", "baseline_latency_ms", "baseline_model"):
+        for key in ("input_preview", "baseline_output", "candidate_output", *_OPTIONAL_FIELDS):
             if key in d:
                 setattr(r, key, d[key])
         r.checks = [CheckResult.from_dict(c) for c in d.get("checks") or []]
@@ -234,6 +248,11 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
     cand_words = [word_count(c.candidate_output) for c in both]
     base_words = [word_count(c.baseline_output) for c in both]
     total = len(cases)
+    # Each case counts by the share of its runs that passed (0 or 1 without --repeat).
+    # Errors count against the pass rate: a case that could not be checked has not passed.
+    fractions = [c.pass_fraction if c.pass_fraction is not None else float(c.status in ("pass", "warn")) for c in cases]
+    rate, low, high = pass_rate_interval(fractions)
+    flaky = [c.id for c in cases if c.flaky]
     return {
         "total": total,
         "evaluated": evaluated,
@@ -241,8 +260,12 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
         "warned": counts["warn"],
         "failed": counts["fail"],
         "errors": counts["error"],
-        # Errors count against the pass rate: a case that could not be checked has not passed.
-        "pass_rate": round((counts["pass"] + counts["warn"]) / total, 4) if total else 0.0,
+        "pass_rate": round(rate, 4) if total else 0.0,
+        "pass_rate_range": [round(low, 4), round(high, 4)] if total else None,
+        "cases_needed": cases_needed(rate) if total else None,  # for a pass rate accurate to +/- 5 points
+        "repeats": max((c.runs for c in cases), default=1),
+        "flaky": len(flaky),
+        "flaky_cases": flaky[:50],
         "unchanged_rate": round(counts["pass"] / total, 4) if total else 0.0,
         "by_category": {
             k: {
@@ -293,6 +316,27 @@ def build_insights(summary: dict, cases: list[CaseResult], adapt: list[str]) -> 
         out.append(f"{n} check(s) skipped: {reason}.")
     if summary.get("unstable_checks"):
         out.append(f"{summary['unstable_checks']} check failure(s) ignored because the old model fails them too (noise).")
+    runs = summary.get("repeats") or 1
+    if runs > 1:
+        if summary.get("flaky"):
+            ids = ", ".join(summary.get("flaky_cases", [])[:5])
+            out.append(f"Each case ran {runs} times: {summary['flaky']} flaky case(s) passed in some runs and failed in others ({ids}).")
+        else:
+            out.append(f"Each case ran {runs} times and gave the same result every time.")
+    vs = summary.get("vs_baseline")
+    if vs and vs.get("compared"):
+        b, c, p = vs["regressions"], vs["improvements"], vs["p_value"]
+        if vs.get("significantly_worse"):
+            out.append(f"Against the old model run live, {b} case(s) broke and {c} improved: significantly worse (McNemar p={p:.3f}).")
+        elif b or c:
+            out.append(f"Against the old model run live, {b} case(s) broke and {c} improved: not a significant difference (p={p:.2f}).")
+    total, need = summary.get("total") or 0, summary.get("cases_needed") or 0
+    if 0 < total < need:
+        low, high = summary.get("pass_rate_range") or (0, 1)
+        out.append(
+            f"With {total} cases the pass rate is only known to within {low:.0%}-{high:.0%}; "
+            f"about {need} cases would pin it down to +/-5 points."
+        )
     if summary.get("errors") and evaluated == 0:
         out.append("Every request failed - check the model name and API key.")
     return out
@@ -316,6 +360,8 @@ def run_compare(
     min_pass_rate: float | None = None,
     show_progress: bool | None = None,
     label: str = "compare",
+    repeat: int = 1,
+    judge_mode: str = "auto",
 ) -> CompareResult:
     config = config or {}
     cases = unique_ids(cases)
@@ -323,8 +369,19 @@ def run_compare(
     base: Provider | None = resolve(baseline, config) if isinstance(baseline, str) else baseline
     judge_p: Provider | None = resolve(judge, config) if isinstance(judge, str) else judge
     embed_p: Provider | None = resolve(embedder, config) if isinstance(embedder, str) else embedder
+    runs = max(1, int(repeat or 1))
+    if judge_mode not in ("auto", "always"):
+        raise ValueError(f"judge mode must be auto or always, got {judge_mode!r}")
 
-    responses = run_cases(cand, cases, concurrency=concurrency, cache=cache, patches=patches, overrides=overrides, label=cand.spec, show_progress=show_progress)
+    # Run 1 shares cached answers with ordinary runs; the repeats are separate requests.
+    all_responses = [
+        run_cases(
+            cand, cases, concurrency=concurrency, cache=cache, patches=patches, overrides=overrides,
+            label=cand.spec if runs == 1 else f"{cand.spec} (run {i + 1}/{runs})", salt="" if i == 0 else f"repeat-{i}",
+            show_progress=show_progress,
+        )
+        for i in range(runs)
+    ]
     base_responses: dict[str, Response] = {}
     if base is not None:
         base_responses = run_cases(base, cases, concurrency=concurrency, cache=cache, overrides=overrides, label=f"baseline {base.spec}", show_progress=show_progress)
@@ -348,9 +405,10 @@ def run_compare(
         severity=dict(severity or {}),
         resolve_model=resolve_model,
         judge_cache=cache,
+        judge_mode=judge_mode,
     )
 
-    def evaluate(case: TestCase) -> CaseResult:
+    def evaluate(case: TestCase, responses: dict[str, Response]) -> CaseResult:
         resp = responses.get(case.id) or Response(error="no response", error_code="missing")
         live = base_responses.get(case.id)
         eval_case = case
@@ -380,8 +438,10 @@ def run_compare(
             result.status = "error"
             return result
         checks = run_checks(eval_case, Sample.from_response(resp), ctx)
+        result.raw_status = case_status(checks, None)
         if live is not None and live.ok:
             base_checks = run_checks(eval_case, Sample.from_response(live), ctx)
+            result.baseline_live_status = case_status(base_checks, None)
             for i, (c, b) in enumerate(zip(checks, base_checks)):
                 if c.status == "fail" and b.status == "fail":
                     result.unstable.append(c.type)
@@ -390,11 +450,16 @@ def run_compare(
         result.status = case_status(checks, None)
         return result
 
+    def evaluate_all(case: TestCase) -> CaseResult:
+        return combine_runs([evaluate(case, responses) for responses in all_responses])
+
     with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as pool:
-        results = list(pool.map(evaluate, cases))
+        results = list(pool.map(evaluate_all, cases))
 
     adapt = adaptations(cand) + (adaptations(base) if base else [])
     summary = summarize(results)
+    if base is not None:
+        summary["vs_baseline"] = paired_comparison(results)
     recorded_models = sorted({c.baseline_model for c in cases if c.baseline_model})
     base_label = base.spec if base else ("recorded" + (f" ({', '.join(recorded_models[:3])})" if recorded_models else ""))
     res = CompareResult(
@@ -410,6 +475,50 @@ def run_compare(
         label=label,
     )
     res.insights = build_insights(summary, results, adapt)
-    if ctx.judge_calls:
-        res.insights.append(f"{ctx.judge_calls} judge call(s) made.")
+    if ctx.judge_calls or ctx.judge_skipped:
+        note = f"{ctx.judge_calls} judge call(s) made"
+        if ctx.judge_skipped:
+            note += f"; {ctx.judge_skipped} skipped because the rule-based checks already decided"
+        res.insights.append(note + ".")
     return res
+
+
+_ORDER = {"pass": 0, "warn": 1, "fail": 2, "error": 3}
+
+
+def combine_runs(runs: list[CaseResult]) -> CaseResult:
+    """One result per case from repeated runs: the most common outcome (the worse one
+    on a tie), with the share of runs that passed and whether the case is flaky."""
+    if len(runs) == 1:
+        return runs[0]
+    statuses = [r.status for r in runs]
+    counts = Counter(statuses)
+    shown = max(counts, key=lambda st: (counts[st], _ORDER.get(st, 0)))
+    result = next(r for r in runs if r.status == shown)
+    passed = sum(1 for st in statuses if st in ("pass", "warn"))
+    result.runs = len(runs)
+    result.run_statuses = statuses
+    result.pass_fraction = round(passed / len(runs), 4)
+    result.flaky = 0 < passed < len(runs)
+    return result
+
+
+def paired_comparison(results: list[CaseResult]) -> dict:
+    """The new model against the old one on the same cases (McNemar test): did more
+    cases break than got fixed, beyond what chance explains?"""
+    regressions = improvements = compared = 0
+    for c in results:
+        if c.baseline_live_status in (None, "error") or c.raw_status is None:
+            continue
+        compared += 1
+        old_ok, new_ok = c.baseline_live_status in ("pass", "warn"), c.raw_status in ("pass", "warn")
+        regressions += old_ok and not new_ok
+        improvements += new_ok and not old_ok
+    p = mcnemar_p(regressions, improvements)
+    return {
+        "compared": compared,
+        "regressions": regressions,
+        "improvements": improvements,
+        "p_value": round(p, 4),
+        "significantly_worse": regressions > improvements and p < 0.05,
+    }

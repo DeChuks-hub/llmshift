@@ -25,6 +25,19 @@ def _pct(x: float | None) -> str:
     return "n/a" if x is None else f"{x * 100:.1f}%"
 
 
+def range_text(s: dict) -> str:
+    """"95% range 76%-88% over 50 cases x 3 runs; 2 flaky" (empty without a summary)."""
+    rng = s.get("pass_rate_range")
+    if not rng or not s.get("total"):
+        return ""
+    text = f"95% range {_pct(rng[0])}-{_pct(rng[1])} over {s['total']} case{'s' if s['total'] != 1 else ''}"
+    if (s.get("repeats") or 1) > 1:
+        text += f" x {s['repeats']} runs"
+    if s.get("flaky"):
+        text += f"; {s['flaky']} flaky"
+    return text
+
+
 def _cat_title(cat: str) -> str:
     return CATEGORY_TITLES.get(cat, cat.title())
 
@@ -85,6 +98,8 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
         ok = result.passed
         verdict = "  " + (style(f"{sym('pass')} meets the {threshold:.0%} threshold", "green") if ok else style(f"{sym('fail')} below the {threshold:.0%} threshold", "red", "bold"))
     lines.append(f"  pass rate {bar(rate)} {_pct(rate)}{verdict}")
+    if range_text(s):
+        lines.append(style(f"            {range_text(s)}", "grey"))
     cats = s.get("by_category") or {}
     if cats:
         lines.append("")
@@ -159,6 +174,9 @@ def _interleave_groups(cases: list[CaseResult]) -> list[CaseResult]:
 
 def _case_block(case: CaseResult, verbose: bool) -> list[str]:
     out = [f"  {status_label(case.status)}  {style(case.id, 'bold')}  {style(case.group, 'grey')}"]
+    if case.flaky:
+        passed = sum(1 for st in case.run_statuses if st in ("pass", "warn"))
+        out.append(style(f"      Flaky: passed {passed} of {case.runs} runs ({', '.join(case.run_statuses)})", "yellow"))
     if case.input_preview:
         out.append(f"      Input: {truncate(case.input_preview, width() - 14)}")
     if case.status == "error":
@@ -222,6 +240,8 @@ def compare_markdown(result: CompareResult, *, max_cases: int = 15, title: str =
     lines.append("| Pass rate | Unchanged | Changed | Failed | Errors |")
     lines.append("|---|---|---|---|---|")
     lines.append(f"| **{_pct(rate)}**{verdict} | {s.get('passed', 0)} | {s.get('warned', 0)} | {s.get('failed', 0)} | {s.get('errors', 0)} |")
+    if range_text(s):
+        lines += ["", f"_{range_text(s)}_"]
     cats = s.get("by_category") or {}
     rows = [(c, cats[c]) for c in sorted(cats, key=lambda c: CATEGORY_ORDER.index(c) if c in CATEGORY_ORDER else 99) if cats[c].get("fail") or cats[c].get("warn")]
     if rows:
@@ -365,7 +385,8 @@ def compare_html(result: CompareResult) -> str:
     if result.min_pass_rate is not None:
         verdict = f"<div class=\"l\">{'meets' if result.passed else 'below'} the {result.min_pass_rate:.0%} threshold</div>"
     parts.append('<div class="cards">')
-    parts.append(f"<div class=\"card\"><div class=\"l\">Pass rate</div><div class=\"n\">{_pct(s.get('pass_rate'))}</div>{verdict}</div>")
+    rng = f"<div class=\"l\">{e(range_text(s))}</div>" if range_text(s) else ""
+    parts.append(f"<div class=\"card\"><div class=\"l\">Pass rate</div><div class=\"n\">{_pct(s.get('pass_rate'))}</div>{verdict}{rng}</div>")
     for label, key, cls in (("Unchanged", "passed", "pass"), ("Changed", "warned", "warn"), ("Failed", "failed", "fail"), ("Errors", "errors", "error")):
         parts.append(f"<div class=\"card\"><div class=\"l\">{label}</div><div class=\"n\"><span class=\"pill {cls}\">{s.get(key, 0)}</span></div></div>")
     parts.append("</div>")
@@ -396,6 +417,8 @@ def compare_html(result: CompareResult) -> str:
         parts.append(f"<details class=\"case\" data-status=\"{_status(case.status)}\" data-group=\"{e(case.group)}\" data-text=\"{e(text_index)}\">")
         cats_failing = ", ".join(sorted({r.category for r in failing}))
         label = {"warn": "CHANGED"}.get(case.status, case.status.upper())
+        if case.flaky:
+            label += f" (flaky {sum(1 for st in case.run_statuses if st in ('pass', 'warn'))}/{case.runs})"
         parts.append(f"<summary><span class=\"pill {_status(case.status)}\">{e(label)}</span><span class=\"cid\">{e(case.id)}</span><span class=\"grp\">{e(case.group)}</span><span class=\"grp\">{e(cats_failing)}</span><span class=\"prev\">{e(case.input_preview)}</span></summary><div class=\"body\">")
         if case.status == "error":
             parts.append(f"<div class=\"h\">Error</div><pre>{e(case.error or '')}</pre>")

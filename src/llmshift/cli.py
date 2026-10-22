@@ -17,7 +17,7 @@ from .config import SAMPLE_CONFIG, ConfigError, load_config
 from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
 
 # Commands in their own modules; each provides register(subparsers).
-EXTENSIONS: tuple[str, ...] = ()
+EXTENSIONS: tuple[str, ...] = ("calibrate",)
 
 
 # ------------------------------------------------------------------ helpers
@@ -142,6 +142,16 @@ def _refuse_overwrite(paths: list, force: bool) -> None:
     existing = [str(x) for x in paths if Path(x).exists()]
     if existing and not force:
         raise UsageError(f"{', '.join(existing[:3])} already exist{'s' if len(existing) == 1 else ''}; pass --force to replace, or -o to write elsewhere")
+
+
+def _positive(value: Any, what: str) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise UsageError(f"{what} must be a whole number, got {value!r}") from None
+    if number < 1:
+        raise UsageError(f"{what} must be at least 1, got {number}")
+    return number
 
 
 def _show(value: str | None) -> int:
@@ -471,7 +481,15 @@ def cmd_compare(args: argparse.Namespace, cfg: dict) -> int:
         overrides=_overrides(args),
         tests_path=path,
         min_pass_rate=float(min_rate) if min_rate is not None else None,
+        repeat=_positive(args.repeat if args.repeat is not None else cfg.get("repeat", 1), "--repeat"),
+        judge_mode=args.judge_mode or cfg.get("judge_mode") or "auto",
     )
+    if result.judge:
+        from .calibrate import calibration_note
+
+        note = calibration_note(result.judge, cfg)
+        if note:
+            result.insights.append(note)
     con.out(report.compare_terminal(result, show=_show(args.show), verbose=args.verbose))
     written = _write_reports(result, args, cfg, "compare")
     if written:
@@ -878,6 +896,7 @@ def _add_run_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--tag", action="append", help="only cases with this tag (repeatable)")
     p.add_argument("--case", action="append", help="only this case id (repeatable)")
     p.add_argument("--judge", metavar="MODEL", help="model for LLM-judged checks and imported model graders, e.g. openai:gpt-5.6-terra")
+    p.add_argument("--judge-mode", choices=["auto", "always"], help="auto (default): ask the judge only when the rule-based checks cannot decide")
     p.add_argument("--allow-python", action="store_true", help="run imported python graders (executes their code locally)")
     p.add_argument("--severity", action="append", metavar="CHECK=LEVEL", help="override a check's severity, e.g. tone=error or facts=warn")
     p.add_argument("--no-cache", action="store_true", help="do not reuse cached model responses")
@@ -966,6 +985,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--junit", nargs="?", const="", metavar="FILE", help="also write JUnit XML for CI test views")
     p.add_argument("--report-dir", help="where default reports go (default .llmshift/reports)")
     p.add_argument("--no-report", action="store_true", help="do not write the default HTML/JSON reports")
+    p.add_argument("--repeat", type=int, metavar="N", help="run each case N times: finds flaky cases and narrows the pass-rate range")
     _add_run_options(p)
     p.set_defaults(func=cmd_compare)
 

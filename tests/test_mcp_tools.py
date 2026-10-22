@@ -8,7 +8,17 @@ import subprocess
 import pytest
 
 from llmshift import mcp
-from test_mcp import call, payload, project, rpc  # noqa: F401  (fixtures and helpers)
+from llmshift.demo import create_project
+from llmshift.snapshot import build_snapshot
+from llmshift.testset import save_tests
+from test_mcp import call, payload, rpc
+
+
+@pytest.fixture
+def project(tmp_path):
+    root = create_project(str(tmp_path / "proj"))
+    save_tests(build_snapshot([str(root / "logs")]).cases, root / ".llmshift" / "tests.jsonl")
+    return root
 
 
 @pytest.fixture

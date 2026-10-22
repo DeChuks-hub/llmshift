@@ -405,6 +405,7 @@ def cmd_digest(args: argparse.Namespace, cfg: dict) -> int:
                 alerts=[i.to_dict() for i in digest.items],
                 summary=digest.to_dict()["counts"],
                 run_url=run_url(),
+                issue_title="[llmshift] model retirement digest",
             )
             for name, err in deliver(destinations, msg, default_min_severity="info"):
                 if err:

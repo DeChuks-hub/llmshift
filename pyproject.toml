@@ -49,7 +49,7 @@ llmshift = "llmshift.cli:entry"
 packages = ["src/llmshift"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/llmshift", "tests", "examples", "README.md", "CHANGELOG.md", "LICENSE", "action.yml", "pyproject.toml"]
+include = ["src/llmshift", "tests", "examples", "scripts", "README.md", "CHANGELOG.md", "LICENSE", "action.yml", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

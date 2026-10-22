@@ -33,6 +33,7 @@ class AlertMessage:
     alerts: list[dict] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
     run_url: str | None = None
+    issue_title: str | None = None  # GitHub issue to open or update (default: the model's drift issue)
 
     def text(self, markdown: bool = True) -> str:
         bullet = "•"
@@ -134,7 +135,7 @@ def _send_github(dest: dict, msg: AlertMessage) -> None:
         raise ValueError("the github alert needs GITHUB_TOKEN and GITHUB_REPOSITORY (both are set inside GitHub Actions)")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     label = dest.get("label", "llmshift")
-    title = f"[llmshift] {msg.model}: behaviour drift detected"
+    title = msg.issue_title or f"[llmshift] {msg.model}: behaviour drift detected"
     body = "\n".join([f"**{msg.title}**", ""] + [f"- {line}" for line in msg.lines] + (["", f"Run: {msg.run_url}"] if msg.run_url else []))
     issues = http.get_json(f"{api}/repos/{repo}/issues?state=open&labels={label}&per_page=50", headers=headers, timeout=20, max_retries=2)
     existing = next((i for i in issues or [] if isinstance(i, dict) and i.get("title") == title), None)

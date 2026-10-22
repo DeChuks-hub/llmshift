@@ -13,20 +13,23 @@ PROVIDER_ENV = [
     "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GEMINI_BASE_URL",
     "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_AD_TOKEN",
     "LLMSHIFT_REGISTRY", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY", "GITHUB_OUTPUT", "SLACK_WEBHOOK_URL",
-    "OLLAMA_HOST", "LLMSHIFT_LOG",
+    "OLLAMA_HOST", "LLMSHIFT_LOG", "LLMSHIFT_REGISTRY_URL", "LLMSHIFT_PRICES_URL", "LLMSHIFT_HOME",
 ]
 
 
 @pytest.fixture(autouse=True)
-def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Never touch real providers; freeze 'today' so lifecycle statuses are stable."""
+def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Never touch real providers or a developer's downloaded data; freeze 'today' so
+    lifecycle statuses are stable."""
     for name in PROVIDER_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LLMSHIFT_TODAY", "2026-10-21")
     monkeypatch.setenv("NO_COLOR", "1")
-    from llmshift import console
+    monkeypatch.setenv("LLMSHIFT_HOME", str(tmp_path_factory.mktemp("llmshift-home")))
+    from llmshift import console, pricing
 
     console.set_color(False)
+    pricing.reload()
 
 
 @pytest.fixture

@@ -17,7 +17,7 @@ from .config import SAMPLE_CONFIG, ConfigError, load_config
 from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
 
 # Commands in their own modules; each provides register(subparsers).
-EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow", "mcp", "prcheck", "upgrade")
+EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow", "mcp", "prcheck", "upgrade", "embedmig", "feed")
 
 
 # ------------------------------------------------------------------ helpers
@@ -839,7 +839,11 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict) -> int:
     else:
         con.out(f"  config: {cfg_path}" + (" ([tool.llmshift])" if Path(cfg_path).name == "pyproject.toml" else ""))
     reg = Registry.load()
-    con.out(f"  lifecycle registry: {len(reg.entries)} models, updated {reg.updated}")
+    con.out(f"  lifecycle registry: {len(reg.entries)} models, updated {reg.updated}" + ("" if reg.origin == "bundled" else f" (downloaded: {reg.origin})"))
+    from . import pricing
+
+    origin = pricing.table_origin()
+    con.out(f"  model prices: {pricing.table_date()}" + ("" if origin == "bundled" else f" (downloaded: {origin})") + "; refresh both with `llmshift update --prices`")
     tests = cfg.get("tests") or ".llmshift/tests.jsonl"
     if Path(tests).exists():
         from .testset import load_tests

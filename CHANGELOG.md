@@ -40,5 +40,5 @@ First release.
 
 - `mcp`: a Model Context Protocol server (stdio) exposing scan, models, snapshot, compare, fix, pick, safety, check, upgrade and doctor as tools for Claude Code, Cursor, VS Code and other MCP clients.
 - Providers: OpenAI (Chat + Responses), Azure OpenAI, Anthropic, Gemini, OpenAI-compatible presets, local servers, `python:` functions, `command` providers and offline mocks.
-- `llmshift.record` client wrapper (sync, async and streaming, including tool calls and usage; safe for several threads and processes writing one file); GitHub composite action; offline `demo`.
+- `llmshift.record` client wrapper for the OpenAI and Anthropic SDKs: sync, async, streaming and the SDKs' stream helpers, `parse()` with pydantic response formats (logged as JSON schema), tool calls and usage; safe for several threads and processes writing one file. GitHub composite action; offline `demo`.
 - Hardened against hostile input: YAML alias bombs, gzip bombs, huge, truncated or corrupt logs, broken Unicode, wrongly typed config values, oversized or deeply nested provider responses, unwritable paths and interrupted runs.

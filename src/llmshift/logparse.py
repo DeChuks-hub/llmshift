@@ -358,6 +358,10 @@ def anthropic_request(req: dict) -> tuple[list[dict], dict]:
             params[k] = req[k]
     if req.get("stop_sequences"):
         params["stop"] = req["stop_sequences"]
+    output_config = req.get("output_config")
+    fmt = output_config.get("format") if isinstance(output_config, dict) else None
+    if isinstance(fmt, dict) and fmt.get("type") == "json_schema" and isinstance(fmt.get("schema"), dict):
+        params["response_format"] = {"type": "json_schema", "json_schema": {"name": "output", "schema": fmt["schema"]}}
     tools = []
     for t in req.get("tools") or []:
         if isinstance(t, dict) and t.get("name") and "input_schema" in t:

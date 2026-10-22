@@ -182,3 +182,24 @@ def test_every_command_and_flag_in_the_docs_exists():
                         assert flag in known, f"{path.name}: `llmshift {name}` has no {flag} (in {line.strip()!r})"
                         checked += 1
     assert checked > 40  # the docs really were checked
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["scan", "--warn-days", "-5"],
+        ["models", "gpt-4o", "--warn-days", "-1"],
+        ["models", "--retiring-within", "soon"],
+        ["upgrade", "--auto", "--warn-days", "-5"],
+        ["digest", "--within", "-3"],
+        ["calendar", "--out", "site", "--days-back", "-1"],
+    ],
+)
+def test_day_counts_must_not_be_negative(argv, in_tmp, capsys):
+    try:
+        code = cli.main(argv)
+    except SystemExit as exc:  # argparse rejects the value itself
+        code = exc.code
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "zero or more" in err or "whole number of days" in err

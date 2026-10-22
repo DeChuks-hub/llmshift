@@ -140,3 +140,110 @@ def test_bad_config(tmp_path, monkeypatch):
         load_config()
     with pytest.raises(ConfigError):
         load_config("missing.yaml")
+
+
+class FakeMessageStream:
+    """Shaped like anthropic's MessageStream: iterate events, then read the snapshot."""
+
+    def __init__(self, text):
+        self.text = text
+        self.closed = False
+
+    def __iter__(self):
+        yield Obj(type="text", text=self.text)
+
+    @property
+    def current_message_snapshot(self):
+        return Obj(id="m", type="message", role="assistant", model="claude-sonnet-5-5", content=[Obj(type="text", text=self.text)],
+                   stop_reason="end_turn", usage=Obj(input_tokens=5, output_tokens=2))
+
+    def close(self):
+        self.closed = True
+
+
+class FakeStreamManager:
+    def __init__(self, stream=None, error=None):
+        self.stream, self.error, self.exited = stream, error, False
+
+    def __enter__(self):
+        if self.error:
+            raise self.error
+        return self.stream
+
+    def __exit__(self, *exc):
+        self.exited = True
+        self.stream.close()
+
+    async def __aenter__(self):
+        return self.__enter__()
+
+    async def __aexit__(self, *exc):
+        self.__exit__(*exc)
+
+
+class FakeMessages:
+    def __init__(self):
+        self.managers = []
+
+    def stream(self, **kwargs):
+        if kwargs["model"] == "boom":
+            manager = FakeStreamManager(error=RuntimeError("overloaded"))
+        else:
+            manager = FakeStreamManager(FakeMessageStream("streamed " + kwargs["messages"][-1]["content"]))
+        self.managers.append(manager)
+        return manager
+
+    def parse(self, **kwargs):
+        return Obj(id="m", type="message", role="assistant", model="claude-sonnet-5-5", content=[Obj(type="text", text='{"category": "billing"}')], stop_reason="end_turn")
+
+
+class SchemaModel:
+    """Duck-typed like a pydantic model class used as a response format."""
+
+    @classmethod
+    def model_json_schema(cls):
+        return {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}
+
+
+def test_sdk_stream_helpers_are_recorded_when_the_block_ends(tmp_path):
+    path = tmp_path / "helpers.jsonl"
+    messages = FakeMessages()
+    client = wrap(Obj(messages=messages), path=path)
+    with client.messages.stream(model="claude-sonnet-5-5", max_tokens=50, messages=[{"role": "user", "content": "hi"}]) as stream:
+        assert [e.text for e in stream] == ["streamed hi"]  # the app sees the SDK's own stream
+    assert messages.managers[0].exited and messages.managers[0].stream.closed
+    try:
+        with client.messages.stream(model="boom", max_tokens=50, messages=[{"role": "user", "content": "x"}]):
+            pass
+    except RuntimeError:
+        pass
+
+    async def use_async():
+        async with client.messages.stream(model="claude-sonnet-5-5", max_tokens=50, messages=[{"role": "user", "content": "async"}]) as stream:
+            return [e.text for e in stream]
+
+    assert asyncio.run(use_async()) == ["streamed async"]
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 3 and [rec["api"] for rec in lines] == ["messages"] * 3
+    assert lines[0]["response"]["content"][0]["text"] == "streamed hi" and lines[0]["latency_ms"] >= 0
+    assert lines[1]["error"] == "RuntimeError: overloaded" and lines[1]["response"] is None
+    assert lines[2]["response"]["content"][0]["text"] == "streamed async"
+    res = build_snapshot([str(path)])
+    assert sorted(c.baseline_output for c in res.cases) == ["streamed async", "streamed hi"]
+
+
+def test_pydantic_response_formats_are_recorded_as_json_schema(tmp_path):
+    path = tmp_path / "formats.jsonl"
+    messages = FakeMessages()
+    completions = FakeCompletions()
+    completions.parse = lambda **kw: completion('{"category": "billing"}')
+    client = wrap(Obj(chat=Obj(completions=completions), messages=messages), path=path)
+    client.chat.completions.parse(model="gpt-4o", messages=[{"role": "user", "content": "classify"}], response_format=SchemaModel)
+    client.messages.parse(model="claude-sonnet-5-5", max_tokens=50, messages=[{"role": "user", "content": "classify"}], output_format=SchemaModel)
+    chat, claude = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rf = chat["request"]["response_format"]
+    assert rf["type"] == "json_schema" and rf["json_schema"]["schema"]["required"] == ["category"] and rf["json_schema"]["name"] == "SchemaModel"
+    assert claude["request"]["output_config"]["format"]["schema"]["required"] == ["category"] and "output_format" not in claude["request"]
+    res = build_snapshot([str(path)])
+    formats = [c.input["params"].get("response_format") for c in res.cases]
+    assert len(formats) == 2 and all(f and f["json_schema"]["schema"]["required"] == ["category"] for f in formats)  # replayable

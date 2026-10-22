@@ -157,6 +157,17 @@ def _positive(value: Any, what: str) -> int:
     return number
 
 
+def _days(text: str) -> int:
+    """argparse type for a number of days (zero or more)."""
+    try:
+        number = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of days, got {text!r}") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError(f"must be zero or more days, got {number}")
+    return number
+
+
 def _show(value: str | None) -> int:
     if value in (None, ""):
         return 5
@@ -937,7 +948,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--format", choices=["table", "json", "markdown", "sarif"], default="table")
     p.add_argument("--output", "-o", help="write the report to a file")
     p.add_argument("--fail-on", choices=["retired", "retiring", "deprecated", "unknown", "never"], help="exit 1 when models in this state are found (default: retired)")
-    p.add_argument("--warn-days", type=int, help="treat models retiring within N days as urgent (default 180)")
+    p.add_argument("--warn-days", type=_days, help="treat models retiring within N days as urgent (default 180)")
     p.add_argument("--include-docs", action="store_true", help="also scan Markdown/text files")
     p.add_argument("--exclude", action="append", help="glob of paths to skip (repeatable)")
     p.add_argument("--registry", action="append", help="extra lifecycle registry JSON (overrides bundled entries)")
@@ -948,8 +959,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("query", nargs="?", help="substring of a model id, e.g. gpt-4o or claude-3")
     p.add_argument("--provider", help="openai, anthropic, google, google-vertex, mistral, cohere, xai, deepseek")
     p.add_argument("--status", choices=["active", "retiring", "deprecated", "retired"])
-    p.add_argument("--retiring-within", type=int, metavar="DAYS")
-    p.add_argument("--warn-days", type=int, default=180)
+    p.add_argument("--retiring-within", type=_days, metavar="DAYS")
+    p.add_argument("--warn-days", type=_days, default=180)
     p.add_argument("--registry", action="append")
     p.add_argument("--limit", type=int, default=60)
     p.add_argument("--format", choices=["table", "json"], default="table")

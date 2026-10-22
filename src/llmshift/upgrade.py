@@ -713,6 +713,8 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
     configured = sc.get("registry") or []
     registry = Registry.load(list(configured) if isinstance(configured, list) else [configured])
     warn_days = args.warn_days if args.warn_days is not None else int(sc.get("warn_days", 180))
+    if warn_days < 0:
+        raise UsageError("--warn-days must be zero or more days")
     exclude = list(sc.get("exclude") or []) + list(args.exclude or [])
     root = gh.repo_root(os.getcwd())
     if args.pr:

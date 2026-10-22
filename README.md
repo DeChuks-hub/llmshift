@@ -128,7 +128,7 @@ from llmshift.record import wrap
 client = wrap(OpenAI(), path="logs/llm.jsonl")   # works with OpenAI, AsyncOpenAI, Anthropic, AsyncAnthropic, streaming
 ```
 
-Streamed responses are logged whole once the stream ends, including tool calls and token usage. Several threads or processes can log to the same file.
+Streamed responses, including the SDKs' stream helpers (`with client.messages.stream(...)`, `client.chat.completions.stream(...)`), are logged whole once the stream ends, with tool calls and token usage. Pydantic response formats (`parse(response_format=Model)` and friends) are logged as the JSON schema the SDK sends, so the cases replay with the same structured output. Several threads or processes can log to the same file.
 
 The test file is plain JSON Lines that you can read, edit and commit:
 
@@ -486,4 +486,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite (356 tests) runs offline on Python 3.9 to 3.13. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.
+The test suite (365 tests) runs offline on Python 3.9 to 3.13. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.

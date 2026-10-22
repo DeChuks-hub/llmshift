@@ -48,10 +48,18 @@ _ENDPOINTS = {
     ("responses", "create"): "responses",
     ("responses", "parse"): "responses",
     ("messages", "create"): "messages",
+    ("messages", "parse"): "messages",
+}
+# SDK stream helpers (`with client.messages.stream(...) as s:`): recorded when the block ends.
+_STREAM_HELPERS = {
+    ("chat", "completions", "stream"): "chat",
+    ("responses", "stream"): "responses",
+    ("messages", "stream"): "messages",
 }
 # Attribute paths that lead to an endpoint; everything else is returned untouched.
-_ROUTES = {key[:i] for key in _ENDPOINTS for i in range(1, len(key))}
+_ROUTES = {key[:i] for key in (*_ENDPOINTS, *_STREAM_HELPERS) for i in range(1, len(key))}
 _ROUTES |= {("beta",)} | {("beta",) + route for route in _ROUTES}
+_FORMAT_ARGS = ("response_format", "text_format", "output_format")  # may be a pydantic class
 _CLIENT_FACTORIES = ("with_options", "copy")  # methods that return a configured copy of the client
 
 _PATH_LOCKS: dict[str, threading.Lock] = {}
@@ -68,6 +76,13 @@ def _path_lock(path: str | os.PathLike) -> threading.Lock:
         return _PATH_LOCKS.setdefault(_path_key(path), threading.Lock())
 
 
+def _dump(model_dump: Any) -> Any:
+    try:
+        return model_dump(warnings=False)  # pydantic v2: no serializer warnings in the app's output
+    except TypeError:
+        return model_dump()
+
+
 def to_dict(obj: Any) -> Any:
     """Best-effort conversion of SDK objects (pydantic models etc.) to plain data."""
     if obj is None or isinstance(obj, (str, int, float, bool)):
@@ -80,7 +95,7 @@ def to_dict(obj: Any) -> Any:
         fn = getattr(obj, method, None)
         if callable(fn):
             try:
-                return to_dict(fn())
+                return to_dict(_dump(fn) if method == "model_dump" else fn())
             except Exception:
                 continue
     if hasattr(obj, "__dict__"):
@@ -412,6 +427,130 @@ class _StreamProxy:
         return getattr(self._stream, name)
 
 
+def _json_schema(cls: Any, converter: str | None = None) -> Any:
+    """What the SDK sends for a pydantic class given as a response format: its own
+    conversion when the SDK provides one, else the class's JSON schema."""
+    if converter:
+        module, _, name = converter.rpartition(".")
+        try:
+            return getattr(__import__(module, fromlist=[name]), name)(cls)
+        except Exception:
+            pass
+    try:
+        return cls.model_json_schema()
+    except Exception:
+        return None
+
+
+def _wire_request(api: str, kwargs: dict) -> dict:
+    """The request as sent on the wire: pydantic classes passed as `response_format`
+    (chat), `text_format` (responses) or `output_format` (messages) become the JSON
+    schema the SDK derives from them, so recorded cases replay with the same format."""
+    if not any(isinstance(kwargs.get(k), type) for k in _FORMAT_ARGS):
+        return kwargs
+    try:
+        return _wire_formats(api, kwargs)
+    except Exception:  # recording never breaks the app
+        return kwargs
+
+
+def _wire_formats(api: str, kwargs: dict) -> dict:
+    out = dict(kwargs)
+    cls = out.pop("text_format", None) if api == "responses" else out.get("output_format") if api == "messages" else out.get("response_format")
+    if not isinstance(cls, type):
+        return out
+    name = getattr(cls, "__name__", "response")
+    if api == "chat":
+        param = _json_schema(cls, "openai.lib._parsing._completions.type_to_response_format_param")
+        if isinstance(param, dict) and param.get("type") == "json_schema":
+            out["response_format"] = param
+        elif isinstance(param, dict):
+            out["response_format"] = {"type": "json_schema", "json_schema": {"name": name, "schema": param, "strict": True}}
+    elif api == "responses":
+        param = _json_schema(cls, "openai.lib._parsing._responses.type_to_text_format_param")
+        if isinstance(param, dict) and param.get("type") != "json_schema":
+            param = {"type": "json_schema", "name": name, "schema": param, "strict": True}
+        if isinstance(param, dict):
+            out["text"] = {**(out.get("text") or {}), "format": param}
+    elif api == "messages":
+        out.pop("output_format", None)
+        schema = _json_schema(cls)
+        if isinstance(schema, dict):
+            out["output_config"] = {**(out.get("output_config") or {}), "format": {"type": "json_schema", "schema": schema}}
+    return out
+
+
+def _final_snapshot(stream: Any) -> Any:
+    """The answer an SDK stream helper has accumulated so far (reads nothing more)."""
+    readers = (
+        lambda s: s.current_message_snapshot,  # Anthropic MessageStream
+        lambda s: s.current_completion_snapshot,  # OpenAI ChatCompletionStream
+        lambda s: s._state._completed_response,  # OpenAI ResponseStream (set once completed)
+    )
+    for read in readers:
+        try:
+            snapshot = read(stream)
+        except Exception:  # nothing received yet, or another SDK version
+            continue
+        if snapshot is not None:
+            return snapshot
+    return None
+
+
+class _HelperStream:
+    """What an SDK stream helper returns (a context manager that makes the request on
+    entering). Passed through unchanged; the final answer is recorded when the block ends."""
+
+    def __init__(self, manager: Any, done: Any):
+        self._manager = manager
+        self._done = done
+        self._stream: Any = None
+        self._start = time.perf_counter()
+
+    def _record(self, exc: BaseException | None) -> None:
+        try:
+            latency = (time.perf_counter() - self._start) * 1000
+            if exc is not None:
+                self._done(None, f"{exc.__class__.__name__}: {exc}"[:500], latency)
+            else:
+                self._done(_final_snapshot(self._stream), None, latency)
+        except Exception:
+            pass  # recording never breaks the app
+
+    def __enter__(self) -> Any:
+        self._start = time.perf_counter()
+        try:
+            self._stream = self._manager.__enter__()
+        except Exception as exc:
+            self._record(exc)
+            raise
+        return self._stream
+
+    def __exit__(self, *exc: Any) -> Any:
+        try:
+            return self._manager.__exit__(*exc)
+        finally:
+            self._record(exc[1])
+
+    async def __aenter__(self) -> Any:
+        self._start = time.perf_counter()
+        try:
+            self._stream = await self._manager.__aenter__()
+        except Exception as exc:
+            self._record(exc)
+            raise
+        return self._stream
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        try:
+            return await self._manager.__aexit__(*exc)
+        finally:
+            self._record(exc[1])
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager, name)
+
+
 class _Proxy:
     def __init__(self, target: Any, recorder: Recorder | None, provider: str | None, parts: tuple = (), shadow: Any = None):
         object.__setattr__(self, "_target", target)
@@ -426,6 +565,9 @@ class _Proxy:
         api = _ENDPOINTS.get(parts[-3:]) or _ENDPOINTS.get(parts[-2:])
         if api and callable(attr):
             return self._wrap_call(attr, api)
+        helper = _STREAM_HELPERS.get(parts[-3:]) or _STREAM_HELPERS.get(parts[-2:])
+        if helper and callable(attr):
+            return self._wrap_helper(attr, helper)
         if not self._parts and name in _CLIENT_FACTORIES and callable(attr):
             return self._wrap_factory(attr)
         if parts in _ROUTES:
@@ -454,6 +596,31 @@ class _Proxy:
 
         def call(*args: Any, **kwargs: Any) -> Any:
             return _Proxy(fn(*args, **kwargs), recorder, provider, shadow=shadow)
+
+        return call
+
+    def _wrap_helper(self, fn: Any, api: str) -> Any:
+        recorder, provider, shadow = self._recorder, self._provider, self._shadow
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            logging = recorder is not None and recorder.sampled()
+            manager = fn(*args, **kwargs)
+            if not logging and shadow is None:
+                return manager
+            request = _wire_request(api, kwargs)
+
+            def done(snapshot: Any, error: str | None, latency_ms: float) -> None:
+                if snapshot is None and error is None:
+                    return
+                if logging:
+                    recorder.log(request, snapshot, provider=provider, api=api, latency_ms=latency_ms, error=error)
+                if shadow is not None and error is None:
+                    try:
+                        shadow.observe(api, request, snapshot)
+                    except Exception:
+                        pass  # shadowing never breaks the app
+
+            return _HelperStream(manager, done)
 
         return call
 
@@ -506,7 +673,7 @@ class _Proxy:
                 logging = sampled()
                 if not logging and shadow is None:
                     return await fn(*args, **kwargs)
-                return await finish_async(fn(*args, **kwargs), kwargs, time.perf_counter(), logging)
+                return await finish_async(fn(*args, **kwargs), _wire_request(api, kwargs), time.perf_counter(), logging)
 
             return async_call
 
@@ -514,16 +681,17 @@ class _Proxy:
             logging = sampled()
             if not logging and shadow is None:
                 return fn(*args, **kwargs)
+            request = _wire_request(api, kwargs)
             start = time.perf_counter()
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:
-                failed(kwargs, start, exc, logging)
+                failed(request, start, exc, logging)
                 raise
             if inspect.isawaitable(result):
                 # Async SDK methods are often plain functions that return a coroutine.
-                return finish_async(result, kwargs, start, logging)
-            return finished(kwargs, start, result, logging)
+                return finish_async(result, request, start, logging)
+            return finished(request, start, result, logging)
 
         return call
 

@@ -17,7 +17,7 @@ from .config import SAMPLE_CONFIG, ConfigError, load_config
 from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
 
 # Commands in their own modules; each provides register(subparsers).
-EXTENSIONS: tuple[str, ...] = ("calibrate",)
+EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow")
 
 
 # ------------------------------------------------------------------ helpers

@@ -406,11 +406,12 @@ class _StreamProxy:
 
 
 class _Proxy:
-    def __init__(self, target: Any, recorder: Recorder, provider: str | None, parts: tuple = ()):
+    def __init__(self, target: Any, recorder: Recorder | None, provider: str | None, parts: tuple = (), shadow: Any = None):
         object.__setattr__(self, "_target", target)
         object.__setattr__(self, "_recorder", recorder)
         object.__setattr__(self, "_provider", provider)
         object.__setattr__(self, "_parts", parts)
+        object.__setattr__(self, "_shadow", shadow)
 
     def __getattr__(self, name: str) -> Any:
         attr = getattr(self._target, name)
@@ -421,7 +422,7 @@ class _Proxy:
         if not self._parts and name in _CLIENT_FACTORIES and callable(attr):
             return self._wrap_factory(attr)
         if parts in _ROUTES:
-            return _Proxy(attr, self._recorder, self._provider, parts)
+            return _Proxy(attr, self._recorder, self._provider, parts, self._shadow)
         return attr
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -442,62 +443,80 @@ class _Proxy:
         return await self._target.__aexit__(*exc)
 
     def _wrap_factory(self, fn: Any) -> Any:
-        recorder, provider = self._recorder, self._provider
+        recorder, provider, shadow = self._recorder, self._provider, self._shadow
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            return _Proxy(fn(*args, **kwargs), recorder, provider)
+            return _Proxy(fn(*args, **kwargs), recorder, provider, shadow=shadow)
 
         return call
 
     def _wrap_call(self, fn: Any, api: str) -> Any:
-        recorder, provider = self._recorder, self._provider
+        recorder, provider, shadow = self._recorder, self._provider, self._shadow
 
         def elapsed(start: float) -> float:
             return (time.perf_counter() - start) * 1000
 
-        def failed(kwargs: dict, start: float, exc: BaseException) -> None:
-            recorder.log(kwargs, None, provider=provider, api=api, error=f"{exc.__class__.__name__}: {exc}"[:500], latency_ms=elapsed(start))
+        def observe(kwargs: dict, response: Any) -> None:
+            if shadow is not None:
+                try:
+                    shadow.observe(api, kwargs, response)
+                except Exception:
+                    pass  # shadowing never breaks the app
 
-        def finished(kwargs: dict, start: float, result: Any) -> Any:
+        def failed(kwargs: dict, start: float, exc: BaseException, logging: bool) -> None:
+            if logging:
+                recorder.log(kwargs, None, provider=provider, api=api, error=f"{exc.__class__.__name__}: {exc}"[:500], latency_ms=elapsed(start))
+
+        def finished(kwargs: dict, start: float, result: Any, logging: bool) -> Any:
             if kwargs.get("stream"):
 
                 def done(acc: _StreamAccumulator) -> None:
-                    recorder.log(kwargs, acc.response(api), provider=provider, api=api, latency_ms=elapsed(start))
+                    response = acc.response(api)
+                    if logging:
+                        recorder.log(kwargs, response, provider=provider, api=api, latency_ms=elapsed(start))
+                    observe(kwargs, response)
 
                 return _StreamProxy(result, done)
-            recorder.log(kwargs, result, provider=provider, api=api, latency_ms=elapsed(start))
+            if logging:
+                recorder.log(kwargs, result, provider=provider, api=api, latency_ms=elapsed(start))
+            observe(kwargs, result)
             return result
 
-        async def finish_async(awaitable: Any, kwargs: dict, start: float) -> Any:
+        async def finish_async(awaitable: Any, kwargs: dict, start: float, logging: bool) -> Any:
             try:
                 result = await awaitable
             except Exception as exc:
-                failed(kwargs, start, exc)
+                failed(kwargs, start, exc, logging)
                 raise
-            return finished(kwargs, start, result)
+            return finished(kwargs, start, result, logging)
+
+        def sampled() -> bool:
+            return recorder is not None and recorder.sampled()
 
         if inspect.iscoroutinefunction(fn):
 
             async def async_call(*args: Any, **kwargs: Any) -> Any:
-                if not recorder.sampled():
+                logging = sampled()
+                if not logging and shadow is None:
                     return await fn(*args, **kwargs)
-                return await finish_async(fn(*args, **kwargs), kwargs, time.perf_counter())
+                return await finish_async(fn(*args, **kwargs), kwargs, time.perf_counter(), logging)
 
             return async_call
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            if not recorder.sampled():
+            logging = sampled()
+            if not logging and shadow is None:
                 return fn(*args, **kwargs)
             start = time.perf_counter()
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:
-                failed(kwargs, start, exc)
+                failed(kwargs, start, exc, logging)
                 raise
             if inspect.isawaitable(result):
                 # Async SDK methods are often plain functions that return a coroutine.
-                return finish_async(result, kwargs, start)
-            return finished(kwargs, start, result)
+                return finish_async(result, kwargs, start, logging)
+            return finished(kwargs, start, result, logging)
 
         return call
 
@@ -505,8 +524,26 @@ class _Proxy:
         return f"<llmshift recording proxy for {self._target!r}>"
 
 
-def wrap(client: Any, path: str | os.PathLike = "logs/llmshift.jsonl", *, sample_rate: float = 1.0, recorder: Recorder | None = None, metadata: dict | None = None) -> Any:
-    """Return a proxy of an OpenAI/Anthropic client that records every call."""
+def wrap(
+    client: Any,
+    path: str | os.PathLike = "logs/llmshift.jsonl",
+    *,
+    sample_rate: float = 1.0,
+    recorder: Recorder | None = None,
+    metadata: dict | None = None,
+    record: bool = True,
+    shadow: Any = None,
+    shadow_rate: float = 0.05,
+    shadow_path: str | os.PathLike | None = None,
+) -> Any:
+    """Return a proxy of an OpenAI/Anthropic client that records every call. With
+    `shadow` (a model spec or a `llmshift.shadow.Shadow`), a share of the calls is also
+    copied to that model in the background (shadow mode); `record=False` keeps only that."""
     module = type(client).__module__.split(".")[0]
     provider = {"openai": "openai", "anthropic": "anthropic"}.get(module, module)
-    return _Proxy(client, recorder or Recorder(path, sample_rate=sample_rate, metadata=metadata), provider)
+    if shadow is not None and not hasattr(shadow, "observe"):
+        from .shadow import DEFAULT_PATH, Shadow
+
+        shadow = Shadow(shadow, rate=shadow_rate, path=shadow_path or DEFAULT_PATH)
+    rec = (recorder or Recorder(path, sample_rate=sample_rate, metadata=metadata)) if record else None
+    return _Proxy(client, rec, provider, shadow=shadow)

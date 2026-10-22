@@ -162,6 +162,15 @@ def parse_page(html: str, provider: str, url: str, model_words: tuple, date_word
     return rows
 
 
+FIELD_ORDER = ("id", "provider", "status", "deprecated", "retires", "replacement", "source", "note")
+
+
+def _ordered(entry: dict) -> dict:
+    """Fields in the order the data uses, so an added field reads like a hand edit."""
+    known = {k: entry[k] for k in FIELD_ORDER if k in entry}
+    return {**known, **{k: v for k, v in entry.items() if k not in known}}
+
+
 def merge(data: dict, rows: list[Row], today: str) -> list[str]:
     """Apply page rows to the data in place; returns one line per change."""
     by_key = {(m.get("provider"), m.get("id")): m for m in data["models"]}
@@ -188,6 +197,7 @@ def merge(data: dict, rows: list[Row], today: str) -> list[str]:
             continue
         if entry.get("status") == "retired" or (entry.get("retires") or "9999") < today:
             continue  # history stays as curated
+        before = len(changes)
         if r.retires and r.retires != entry.get("retires"):
             changes.append(f"{provider}/{mid}: retires {entry.get('retires') or 'not scheduled'} -> {r.retires}")
             entry["retires"] = r.retires
@@ -196,6 +206,10 @@ def merge(data: dict, rows: list[Row], today: str) -> list[str]:
         if r.replacement and r.replacement != mid and r.replacement != entry.get("replacement"):
             changes.append(f"{provider}/{mid}: replacement {entry.get('replacement') or 'none'} -> {r.replacement}")
             entry["replacement"] = r.replacement
+        if len(changes) > before:  # only entries that change are touched
+            ordered = _ordered(entry)
+            entry.clear()
+            entry.update(ordered)
     return changes
 
 

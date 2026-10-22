@@ -123,3 +123,18 @@ def test_main_writes_only_valid_reviewed_sized_updates(updater, tmp_path, capsys
     assert set(state["pages"]) == {"https://developers.openai.com/api/docs/deprecations", "https://platform.claude.com/docs/en/about-claude/model-deprecations"}
     capsys.readouterr()
     assert updater.main(["--pages", str(pages), "--today", TODAY]) == 0 and "No changes" in capsys.readouterr().out  # idempotent
+
+
+def test_an_added_field_keeps_the_usual_field_order(updater):
+    data = {"updated": "2026-10-21", "models": [{"id": "tts-1", "provider": "openai", "status": "deprecated", "retires": "2027-01-06", "source": "s"}]}
+    rows = [updater.Row("openai", "tts-1", "2027-01-06", "gpt-realtime-2.1-mini", None, "s")]
+    assert updater.merge(data, rows, TODAY) == ["openai/tts-1: replacement none -> gpt-realtime-2.1-mini"]
+    assert list(data["models"][0]) == ["id", "provider", "status", "retires", "replacement", "source"]
+
+
+def test_a_newly_scheduled_date_also_keeps_the_field_order(updater):
+    data = {"updated": "2026-10-21", "models": [{"id": "gemini-3.8-flash-tts", "provider": "google", "status": "active", "source": "s", "note": "rel 2026-09-22"}]}
+    rows = [updater.Row("google", "gemini-3.8-flash-tts", "2027-09-22", None, None, "s")]
+    assert updater.merge(data, rows, TODAY) == ["google/gemini-3.8-flash-tts: retires not scheduled -> 2027-09-22"]
+    assert data["models"][0] == {"id": "gemini-3.8-flash-tts", "provider": "google", "status": "deprecated", "retires": "2027-09-22", "source": "s", "note": "rel 2026-09-22"}
+    assert list(data["models"][0]) == ["id", "provider", "status", "retires", "source", "note"]

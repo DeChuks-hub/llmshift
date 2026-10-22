@@ -925,6 +925,79 @@ def _safety_tool(args: dict, cfg: Any) -> dict:
 
 
 @tool(
+    "llmshift_check",
+    "Test edited prompts: finds the system prompts that changed since a git base (default origin/main) and runs only "
+    "their test cases, with the edited text, on the model in production. Tells you whether a prompt edit changes how "
+    "the model answers. Use it after editing a prompt in the code. Calls the model once per affected test case.",
+    _schema(
+        {
+            "model": {"type": "string", "description": "Model to test with (default: baseline in llmshift.yaml, else candidate)."},
+            "base": {"type": "string", "description": "Git ref to compare against (default: origin/main)."},
+            "files": {**STRINGS, "description": "Only look at these changed files."},
+            "all": {"type": "boolean", "description": "Run every prompt template, not only the edited ones."},
+            "tests": TESTS,
+            "min_pass_rate": {"type": "number", "minimum": 0, "maximum": 1},
+            "no_cache": {"type": "boolean"},
+        }
+    ),
+    title="Test edited prompts",
+    read_only=False,
+    open_world=True,
+)
+def _check_tool(args: dict, cfg: Any) -> dict:
+    from .prcheck import run_check
+
+    cases, _path = _load_cases(cfg, args)
+    model = args.get("model") or cfg.get("baseline") or cfg.get("candidate")
+    if not model:
+        raise ToolError("which model? Pass `model` (or set baseline in llmshift.yaml)")
+    min_rate = args.get("min_pass_rate", cfg.get("min_pass_rate"))
+    run = run_check(
+        cases, str(model), base=args.get("base"), files=args.get("files"), all_groups=bool(args.get("all")), config=cfg,
+        judge=cfg.get("judge"), concurrency=int(cfg.get("concurrency", 4)), cache=_cache(cfg, args),
+        min_pass_rate=float(min_rate) if min_rate is not None else None, show_progress=False,
+    )
+    return run.to_dict()
+
+
+@tool(
+    "llmshift_upgrade",
+    "Plan (and optionally apply) the code changes that move this project off a retiring model: swaps the model ID exactly "
+    "where llmshift_scan finds it, renames max_tokens to max_completion_tokens where OpenAI's newer models need it, and "
+    "lists settings to check by hand. Returns a unified diff. Nothing is written unless apply is true. Use `auto` for every "
+    "retiring model that has a known replacement.",
+    _schema(
+        {
+            "from": {"type": "string", "description": "The model to move off, e.g. gpt-4o-2024-05-13."},
+            "to": {"type": "string", "description": "The replacement (default: the registry's recommended replacement)."},
+            "auto": {"type": "boolean", "description": "Every retired or retiring model found that has a replacement."},
+            "paths": {**STRINGS, "description": "Where to look (default: scan.paths in llmshift.yaml, else the project)."},
+            "apply": {"type": "boolean", "description": "Write the changes to the files (default false: only the diff)."},
+            "force": {"type": "boolean", "description": "Allow swaps across providers (the calling code is never rewritten)."},
+        }
+    ),
+    title="Plan a model upgrade",
+    read_only=False,
+    destructive=True,
+)
+def _upgrade_tool(args: dict, cfg: Any) -> dict:
+    from .upgrade import apply_plan, plan_upgrade
+
+    if not args.get("from") and not args.get("auto"):
+        raise ToolError("pass `from` (the model to move off) or auto=true")
+    sc = cfg.get("scan") or {}
+    plan = plan_upgrade(
+        list(args.get("paths") or sc.get("paths") or ["."]), old=args.get("from"), new=args.get("to"), auto=bool(args.get("auto")),
+        registry=_registry(cfg), warn_days=int(sc.get("warn_days", 180)), exclude=list(sc.get("exclude") or []), force=bool(args.get("force")),
+    )
+    out = plan.to_dict()
+    if args.get("apply"):
+        out["written"] = apply_plan(plan)
+        out["next"] = "Run llmshift_compare with to=<the new model> to prove nothing broke."
+    return out
+
+
+@tool(
     "llmshift_doctor",
     "Check the llmshift setup: version, the config file in use, which provider credential environment variables are set "
     "(names only, never values), whether the test set exists, and whether the configured baseline, candidate and judge "

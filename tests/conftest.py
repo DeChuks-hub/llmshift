@@ -85,6 +85,15 @@ class MockServer:
             def do_GET(self) -> None:
                 self._handle("GET")
 
+            def do_PATCH(self) -> None:
+                self._handle("PATCH")
+
+            def do_PUT(self) -> None:
+                self._handle("PUT")
+
+            def do_DELETE(self) -> None:
+                self._handle("DELETE")
+
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

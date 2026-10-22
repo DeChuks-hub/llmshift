@@ -118,6 +118,12 @@ def registry_problems(data: Any, *, min_models: int = 1) -> list[str]:
 
 
 def bundled_registry() -> dict:
+    """The lifecycle data shipped with llmshift. LLMSHIFT_BUNDLED_REGISTRY names a file to
+    use instead: the test suite pins its data that way, since the shipped copy is updated
+    every day."""
+    override = os.environ.get("LLMSHIFT_BUNDLED_REGISTRY")
+    if override:
+        return json.loads(Path(override).read_text(encoding="utf-8"))
     return json.loads(resources.files("llmshift").joinpath("data/models.json").read_text(encoding="utf-8"))
 
 

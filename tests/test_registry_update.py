@@ -21,7 +21,7 @@ def updater(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "update_registry", module)  # dataclasses look their module up there
     spec.loader.exec_module(module)
     models = tmp_path / "models.json"
-    models.write_bytes((ROOT / "src" / "llmshift" / "data" / "models.json").read_bytes())
+    models.write_bytes((ROOT / "tests" / "data" / "models-2026-10-21.json").read_bytes())  # frozen: the shipped copy moves daily
     monkeypatch.setattr(module, "MODELS", models)
     monkeypatch.setattr(module, "STATE", tmp_path / "sources.json")
     return module
@@ -89,8 +89,18 @@ def test_merge_is_conservative(updater):
 
 
 def test_layout_round_trips(updater):
-    raw = updater.MODELS.read_bytes()
-    assert updater.dump(json.loads(raw)) == raw  # automatic updates make one-line diffs
+    for path in (updater.MODELS, ROOT / "src" / "llmshift" / "data" / "models.json"):
+        raw = path.read_bytes()
+        assert updater.dump(json.loads(raw)) == raw, path  # automatic updates make one-line diffs
+
+
+def test_the_shipped_data_is_valid_today(monkeypatch):
+    # The other tests read a frozen copy; this one checks the data users get, on the real date.
+    from llmshift import registry
+
+    monkeypatch.delenv("LLMSHIFT_BUNDLED_REGISTRY")
+    monkeypatch.delenv("LLMSHIFT_TODAY")
+    assert registry.registry_problems(registry.bundled_registry(), min_models=600) == []
 
 
 def test_main_writes_only_valid_reviewed_sized_updates(updater, tmp_path, capsys):

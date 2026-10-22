@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -25,6 +26,8 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempP
     for name in PROVIDER_ENV:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LLMSHIFT_TODAY", "2026-10-21")
+    # The shipped lifecycle data updates itself daily; tests read a frozen copy of it.
+    monkeypatch.setenv("LLMSHIFT_BUNDLED_REGISTRY", str(Path(__file__).parent / "data" / "models-2026-10-21.json"))
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setenv("LLMSHIFT_HOME", str(tmp_path_factory.mktemp("llmshift-home")))
     from llmshift import console, pricing

@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from . import tone as tonelib
 from .compare import CaseResult, CompareResult, run_compare
 from .jsonschema_lite import describe as describe_schema
@@ -86,6 +87,7 @@ class FixResult:
 
     def to_dict(self) -> dict:
         return {
+            "llmshift_version": __version__,
             "candidate": self.candidate,
             "created_at": self.created_at,
             "before": self.before,

@@ -18,14 +18,19 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import fileio
 from . import messages as msgs
-from .textutil import clean_surrogates, has_surrogate_escape, json_loads
-from .textutil import stable_hash
+from .textutil import (
+    clean_surrogates,
+    has_surrogate_escape,
+    json_loads,
+    jsonl_lines,
+    stable_hash,
+)
 
 
 class TestFileError(ValueError):
@@ -102,7 +107,19 @@ class TestCase:
         prefix = f"{where}: " if where else ""
         if not isinstance(data, dict):
             raise TestFileError(f"{prefix}a test case must be an object, got {type(data).__name__}")
+        try:
+            return cls._from_dict(data, prefix)
+        except TestFileError:
+            raise
+        except (TypeError, AttributeError, ValueError) as exc:  # a field of an unexpected type
+            raise TestFileError(f"{prefix}invalid test case ({exc})") from None
+
+    @classmethod
+    def _from_dict(cls, data: dict, prefix: str) -> "TestCase":
         raw_input = data.get("input")
+        for where, value in (("params", (raw_input or {}).get("params") if isinstance(raw_input, dict) else data.get("params")), ("vars", data.get("vars")), ("metadata", data.get("metadata"))):
+            if value is not None and not isinstance(value, dict):
+                raise TestFileError(f"{prefix}'{where}' must be an object, got {type(value).__name__}")
         try:
             if isinstance(raw_input, dict):
                 messages = msgs.clean_messages(raw_input.get("messages") if raw_input.get("messages") is not None else raw_input.get("prompt", ""))
@@ -139,6 +156,8 @@ class TestCase:
         tags = data.get("tags") or []
         if isinstance(tags, str):
             tags = [tags]
+        if not isinstance(tags, list):
+            raise TestFileError(f"{prefix}'tags' must be a list of strings, got {type(tags).__name__}")
         return cls(
             id=case_id,
             input=inp,
@@ -194,7 +213,7 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
     except UnicodeDecodeError as exc:
         raise TestFileError(f"{path}: not UTF-8 text ({exc})") from None
     if suffix in (".jsonl", ".ndjson"):
-        for lineno, line in enumerate(text.splitlines(), 1):
+        for lineno, line in enumerate(jsonl_lines(text), 1):
             if not line.strip():
                 continue
             try:
@@ -213,6 +232,8 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
             data = yamlsafe.load(text)
         except yaml.YAMLError as exc:
             raise TestFileError(f"{path}: invalid YAML ({exc})") from None
+        except (ValueError, RecursionError) as exc:  # e.g. a date such as 2024-02-30, or a huge number
+            raise TestFileError(f"{path}: invalid YAML value ({exc})") from None
     else:
         try:
             data = json_loads(text)
@@ -279,7 +300,7 @@ def _dedupe_ids(cases: list[TestCase]) -> list[TestCase]:
 def atomic_write(path: str | os.PathLike, text: str) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tmp-", suffix=p.suffix, dir=str(p.parent))
+    fd, tmp = fileio.temp_file(p.parent, suffix=p.suffix)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="\n") as fh:
             fh.write(text)

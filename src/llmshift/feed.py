@@ -16,18 +16,19 @@ import html
 import json
 import os
 import re
-import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import __version__, fileio
 from . import console as con
 from . import registry as reglib
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers import http
 from .providers.base import ProviderError
+from .textutil import json_loads
 
 DEFAULT_REGISTRY_URL = "https://raw.githubusercontent.com/DeChuks-hub/llmshift/main/src/llmshift/data/models.json"
 DEFAULT_PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
@@ -91,8 +92,8 @@ def fetch_json(url: str) -> tuple[Any, bytes]:
     if len(raw) > MAX_DOWNLOAD_BYTES:
         raise UpdateError(f"{url} is unexpectedly large ({len(raw):,} bytes)")
     try:
-        return json.loads(bytes(raw).decode("utf-8-sig")), bytes(raw)
-    except (UnicodeDecodeError, ValueError) as exc:
+        return json_loads(bytes(raw).decode("utf-8-sig")), bytes(raw)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise UpdateError(f"{url} did not return valid JSON ({exc})") from None
 
 
@@ -101,7 +102,7 @@ def save_data(name: str, raw: bytes) -> Path:
     directory = reglib.user_data_dir()
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=str(directory))
+        fd, tmp = fileio.temp_file(directory, prefix=f".{name}.")
     except OSError as exc:
         raise UpdateError(f"cannot write to {directory}: {exc.strerror or exc} (set LLMSHIFT_HOME to another folder)") from None
     try:
@@ -307,6 +308,7 @@ class Digest:
 
     def to_dict(self) -> dict:
         return {
+            "llmshift_version": __version__,
             "kind": "digest",
             "title": self.title(),
             "within_days": self.within,
@@ -371,7 +373,7 @@ def build_digest(paths: list[str], *, within: int = 30, registry: Any = None, ex
 
 
 def cmd_digest(args: argparse.Namespace, cfg: dict) -> int:
-    from .alerts import AlertMessage, deliver, run_url
+    from .alerts import AlertMessage, check_destinations, deliver, run_url
 
     section = cfg.get("digest") if isinstance(cfg.get("digest"), dict) else {}
     scan_cfg = cfg.get("scan") if isinstance(cfg.get("scan"), dict) else {}
@@ -393,6 +395,9 @@ def cmd_digest(args: argparse.Namespace, cfg: dict) -> int:
         con.out(con.style(f"  scanned {digest.files_scanned} files in {', '.join(paths)}; lifecycle data {digest.registry_updated}", "grey"))
     destinations = list(section.get("alerts") or []) + list(args.alert or [])
     code = EXIT_OK
+    problems = check_destinations(destinations) if destinations and not args.dry_run else []
+    if problems:
+        raise UsageError("the digest could not be delivered: " + "; ".join(problems))
     if destinations and (digest.items or args.always):
         if args.dry_run:
             con.out(con.style(f"  (dry run: not sending to {len(destinations)} destination(s))", "grey"), err=True)
@@ -660,6 +665,7 @@ def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int 
         raise UsageError(f"{out} exists and is not a folder")
     out.mkdir(parents=True, exist_ok=True)
     data = {
+        "llmshift_version": __version__,
         "generated": reglib.today().isoformat(),
         "updated": reg.updated,
         "upcoming": [lk.to_dict() for lk in entries["upcoming"]],

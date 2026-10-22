@@ -23,6 +23,7 @@ from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import ProviderError
+from .textutil import parse_python
 
 PROTECTED_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", "vendors", "third_party", "third-party", "site-packages", ".venv", "venv", "dist", "build", ".llmshift"}
 CONFIG_NAMES = {"llmshift.yaml", "llmshift.yml", ".llmshift.yaml", ".llmshift.yml"}
@@ -33,6 +34,7 @@ _PREFIX_RE = re.compile(r"^(?P<prefix>(?:[a-z0-9_.-]+[/:])+)(?P<id>.+)$", re.I)
 _SAFE_PREFIXES = ("openai/", "anthropic/", "google/", "gemini/", "models/", "mistral/", "mistralai/", "deepseek/", "xai/", "x-ai/", "openrouter/", "azure/", "openai:", "anthropic:", "gemini:", "google:", "mistral:", "deepseek:", "xai:", "openrouter:", "azure:")
 BOT_NAME = "github-actions[bot]"
 BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
+MADE_BY = "Made by llmshift upgrade."  # in every commit llmshift pushes: its branch may be overwritten only when the tip has it
 
 
 def needs_completion_tokens(model: str) -> bool:
@@ -43,6 +45,20 @@ def needs_completion_tokens(model: str) -> bool:
 def _bare(model: str) -> str:
     m = _PREFIX_RE.match(model or "")
     return m.group("id") if m else (model or "")
+
+
+def code_id(spec: str) -> str:
+    """A model id as code writes it: without llmshift's provider (openai:gpt-4o) or a
+    router's vendor prefix (openai/gpt-4o); code that has a prefix keeps its own."""
+    from .providers import parse_spec
+
+    model = parse_spec(spec)[1]
+    m = _PREFIX_RE.match(model)
+    return m.group("id") if m and m.group("prefix").lower().startswith(_SAFE_PREFIXES) else model
+
+
+# An id after one of these names a resource you created (an Azure deployment), not a model.
+_DEPLOYMENT_RE = re.compile(r"(?:deployment(?:_name|_id)?|engine)[\"']?\s*[:=]\s*[\"']?\Z", re.I)
 
 
 # ----------------------------------------------------------------- data
@@ -56,6 +72,7 @@ class Swap:
     retires: str | None = None
     message: str = ""
     locations: list[str] = field(default_factory=list)
+    spec: str = ""  # the replacement as given (openai:gpt-5.6-sol), for running tests on it
 
 
 @dataclass
@@ -82,8 +99,8 @@ class FileChange:
     def diff(self) -> str:
         if self.updated is None or self.updated == self.original:
             return ""
-        a = self.text(self.original).splitlines(keepends=True)
-        b = self.text(self.updated).splitlines(keepends=True)
+        a = _lines(self.text(self.original))  # split as git does: \f or   are not line ends
+        b = _lines(self.text(self.updated))
         out = []
         for line in difflib.unified_diff(a, b, f"a/{self.path}", f"b/{self.path}"):
             out.append(line if line.endswith(("\n", "\r")) else line + "\n\\ No newline at end of file\n")
@@ -224,11 +241,12 @@ def _resolve_swaps(scan: Any, registry: Any, old: str | None, new: str | None, a
     notes: list[str] = []
     swaps: list[Swap] = []
     if old:
-        lk = registry.lookup(old, warn_days=warn_days)
+        old_id = code_id(old)
+        lk = registry.lookup(old_id, warn_days=warn_days)
         target = new or lk.replacement
         if not target:
             raise UsageError(f"no known replacement for {old}; pass --to MODEL")
-        swaps.append(Swap(old, target, lk.status, lk.retires.isoformat() if lk.retires else None, lk.message))
+        swaps.append(Swap(old_id, code_id(target), lk.status, lk.retires.isoformat() if lk.retires else None, lk.message, spec=target))
     elif auto:
         seen: set[str] = set()
         for m in scan.models():
@@ -284,6 +302,7 @@ def plan_upgrade(
     scan = scan_paths(list(paths or ["."]), registry=registry, exclude=exclude, warn_days=warn_days)
     swaps, notes = _resolve_swaps(scan, registry, old, new, auto, warn_days)
     plan = UpgradePlan(root=top, notes=notes)
+    built_on: list[tuple[Any, Swap]] = []  # ids that contain a swapped id: noted unless a swap changes them too
     for swap in swaps:
         if swap.status.endswith("|cross-provider"):
             swap.status = swap.status.split("|")[0]
@@ -294,7 +313,7 @@ def plan_upgrade(
             target = _matches(f.model, swap.old)
             if target is None:
                 if f.model.lower() != swap.old.lower() and swap.old.lower() in f.model.lower():
-                    plan.notes.append(f"{f.location}: {f.model} is a fine-tuned or platform-specific id built on {swap.old}; not changed")
+                    built_on.append((f, swap))
                 continue
             if f.via:
                 continue  # the constant's own line is a finding too
@@ -329,20 +348,43 @@ def plan_upgrade(
             if not cols:
                 plan.notes.append(f"{rel}:{line_no}: {swap.old} not found on the line; not changed")
                 continue
+            deployments = [col for col in cols if _DEPLOYMENT_RE.search(body[:col])]
+            if deployments:
+                plan.notes.append(f"{rel}:{line_no}: {target} names an Azure deployment; create a {swap.new} deployment, then rename it here; not changed")
+                cols = [col for col in cols if col not in deployments]
+                if not cols:
+                    continue
             for col in cols:
                 change.edits.append(Edit(line_no, col, body[col:col + len(target)], swap.new, "model"))
             loc = f"{rel}:{line_no}"
             if loc not in swap.locations:
                 swap.locations.append(loc)
-    for swap in plan.swaps:
-        if needs_completion_tokens(swap.new) and not needs_completion_tokens(swap.old):
-            for change in plan.files.values():
-                if any(e.reason == "model" and e.new == swap.new for e in change.edits):
-                    _rename_max_tokens(change, swap, plan.notes)
+    swapped = {f.model.lower() for f in scan.findings for s in plan.swaps if _matches(f.model, s.old) is not None}
+    for f, swap in built_on:
+        if f.model.lower() not in swapped:
+            plan.notes.append(f"{f.location}: {f.model} is a fine-tuned or platform-specific id built on {swap.old}; not changed")
+    needing = [s for s in plan.swaps if needs_completion_tokens(s.new) and not needs_completion_tokens(s.old)]
+    for swap in needing:
+        for change in plan.files.values():
+            if any(e.reason == "model" and e.new == swap.new for e in change.edits):
+                _rename_max_tokens(change, swap, plan.notes)
+    if needing:
+        left = _max_tokens_left(list(paths or ["."]), plan)
+        if left:
+            shown = ", ".join(left[:8]) + (f" and {len(left) - 8} more" if len(left) > 8 else "")
+            plan.notes.append(
+                f"max_tokens is still set at {shown}: {', '.join(sorted({s.new for s in needing}))} rejects it (it takes max_completion_tokens). "
+                "llmshift renames it only in calls that name the model; check these calls by hand"
+            )
     _finish(plan)
     if not plan.swaps and not plan.notes:
         plan.notes.append("no retiring models with a known replacement were found")
     return plan
+
+
+def _parses(data: bytes) -> bool:
+    decoded = _decode_exact(data)
+    return decoded is not None and parse_python(decoded[0]) is not None
 
 
 def _finish(plan: UpgradePlan) -> None:
@@ -352,16 +394,45 @@ def _finish(plan: UpgradePlan) -> None:
         updated, problems = apply_edits(change.original, change.edits)
         for p in problems:
             plan.notes.append(f"{change.path}: {p}")
-        if updated is not None and change.path.endswith((".py", ".pyi")):
-            try:
-                ast.parse(_decode_exact(updated)[0])  # type: ignore[index]
-            except (SyntaxError, ValueError, TypeError):
-                plan.notes.append(f"{change.path}: the edit would not parse; left unchanged")
-                updated = None
+        # Python files must still parse; one this Python cannot parse to begin with (newer
+        # syntax) cannot be checked, and an id inside a string literal is safe to swap.
+        if updated is not None and change.path.endswith((".py", ".pyi")) and _parses(change.original) and not _parses(updated):
+            plan.notes.append(f"{change.path}: the edit would not parse; left unchanged")
+            updated = None
         change.updated = updated
 
 
 # ------------------------------------------------- max_tokens renames
+
+
+def _max_tokens_left(paths: list[str], plan: UpgradePlan) -> list[str]:
+    """file:line of every `max_tokens` left in OpenAI-using Python and JS/TS files: a
+    model set in one file and used in another is swapped, but its calls are not renamed."""
+    from .scanner import iter_source_files
+
+    renamed = {(c.path, e.line) for c in plan.files.values() for e in c.edits if e.reason == "max_completion_tokens"}
+    try:
+        files = [f for _root, f in iter_source_files(paths)]
+    except FileNotFoundError:
+        return []
+    out = []
+    for path in files:
+        if path.suffix.lower() not in (".py", ".pyi") and path.suffix.lower() not in JS_SUFFIXES:
+            continue
+        try:
+            rel = path.resolve().relative_to(plan.root).as_posix()
+        except ValueError:
+            continue
+        data = _read(path)
+        if _protected(rel) or data is None or b"max_tokens" not in data:
+            continue
+        decoded = _decode_exact(data)
+        if decoded is None or not re.search(r"openai|chat\.completions|responses\.create", decoded[0], re.I):
+            continue  # Anthropic and others require max_tokens
+        for n, line in enumerate(_lines(decoded[0]), 1):
+            if re.search(r"(?<![\w$])max_tokens\b", line) and (rel, n) not in renamed:
+                out.append(f"{rel}:{n}")
+    return out
 
 
 def _rename_max_tokens(change: FileChange, swap: Swap, notes: list[str]) -> None:
@@ -377,9 +448,8 @@ def _rename_max_tokens(change: FileChange, swap: Swap, notes: list[str]) -> None
 
 
 def _rename_python(change: FileChange, text: str, swap: Swap, notes: list[str]) -> None:
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    tree = parse_python(text)
+    if tree is None:
         return
     lines = _lines(text)
     constants = {}
@@ -542,9 +612,8 @@ def _prompt_edits(rel: str, data: bytes, prompt: str, addition: str) -> list[Edi
         return [Edit(last, len(_body(lines[last - 1])), "", addition.replace("\n", _ending(lines)), "prompt")]
     if suffix not in (".py", ".pyi"):
         return []
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    tree = parse_python(text)
+    if tree is None:
         return []
     out = []
     for node in ast.walk(tree):
@@ -553,13 +622,9 @@ def _prompt_edits(rel: str, data: bytes, prompt: str, addition: str) -> list[Edi
             col = _char_col(line, node.end_col_offset)
             edit = Edit(node.end_lineno, col, "", " " + repr(addition), "prompt")
             updated, problems = apply_edits(data, [edit])
-            try:  # the literal must now hold exactly the suggested prompt
-                ok = not problems and updated is not None and any(
-                    isinstance(n, ast.Constant) and n.value == prompt + addition for n in ast.walk(ast.parse(_decode_exact(updated)[0]))  # type: ignore[index]
-                )
-            except (SyntaxError, ValueError, TypeError):
-                ok = False
-            if ok:
+            # The literal must now hold exactly the suggested prompt.
+            after = parse_python(_decode_exact(updated)[0]) if updated is not None and not problems and _decode_exact(updated) else None
+            if after is not None and any(isinstance(n, ast.Constant) and n.value == prompt + addition for n in ast.walk(after)):
                 out.append(edit)
     return out
 
@@ -574,18 +639,28 @@ def _ending(lines: list[str]) -> str:
 
 
 def apply_plan(plan: UpgradePlan) -> list[str]:
-    """Write the planned edits; returns the files written (relative paths)."""
-    written = []
-    for change in plan.changed:
-        path = plan.root / change.path
+    """Write the planned edits; returns the files written (relative paths). Every file is
+    checked first, so a read-only one stops the upgrade before anything is changed."""
+    targets = [(change, plan.root / change.path) for change in plan.changed]
+    blocked = [change.path for change, path in targets if not path.is_file() or not os.access(path, os.W_OK)]
+    if blocked:
+        raise UsageError(f"cannot write {', '.join(blocked)} (read-only or missing); nothing was changed")
+    written: list[str] = []
+    for change, path in targets:
         tmp = path.with_name(f".{path.name}.llmshift-tmp")
         try:
             tmp.write_bytes(change.updated or b"")
             shutil.copymode(path, tmp)  # an executable script stays executable
             os.replace(tmp, path)
+        except OSError as exc:
+            done = f"; already updated: {', '.join(written)}" if written else "; nothing was changed"
+            raise UsageError(f"could not write {change.path} ({exc.strerror or exc}){done}") from None
         finally:
-            if tmp.exists():
-                tmp.unlink()
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
         written.append(change.path)
     return written
 
@@ -682,11 +757,11 @@ def register(sub: Any) -> None:
     p.add_argument("--pr", action="store_true", help="commit to a branch, push and open a pull request")
     p.add_argument("--branch", help="branch name for --pr (default: llmshift/upgrade-OLD-to-NEW)")
     p.add_argument("--base", metavar="BRANCH", help="pull request base (default: the repository's default branch)")
-    p.add_argument("--allow-dirty", action="store_true", help="allow --pr with uncommitted changes (only the edited files are committed)")
+    p.add_argument("--allow-dirty", action="store_true", help="allow --pr while other files have uncommitted changes (uncommitted work is never pushed)")
     p.add_argument("--force", action="store_true", help="also swap ids across providers")
     p.add_argument("--warn-days", type=int, help="with --auto: models retiring within N days (default: scan.warn_days)")
     p.add_argument("--exclude", action="append", help="glob of paths to skip (repeatable)")
-    p.add_argument("--min-pass-rate", type=float, help="threshold shown with --compare (default from llmshift.yaml)")
+    p.add_argument("--min-pass-rate", type=cli.rate_arg, help="threshold shown with --compare (default from llmshift.yaml)")
     p.add_argument("--markdown", nargs="?", const="", metavar="FILE", help="write the pull request text (default: in the reports directory)")
     cli._add_run_options(p)
     p.set_defaults(func=cmd_upgrade)
@@ -720,9 +795,9 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
     root = gh.repo_root(os.getcwd())
     if args.pr:
         if root is None:
-            raise UsageError("--pr needs a git repository")
+            raise UsageError(f"--pr needs a git repository ({gh.no_repo_reason(os.getcwd())})")
         if gh.is_dirty(root) and not args.allow_dirty:
-            raise UsageError("the working tree has uncommitted changes; commit or stash them first, or pass --allow-dirty")
+            raise UsageError("the working tree has uncommitted changes; commit or stash them first, or pass --allow-dirty (they are never pushed)")
     plan = plan_upgrade(args.paths or sc.get("paths") or ["."], old=args.old, new=args.new, auto=args.auto, registry=registry, warn_days=warn_days, exclude=exclude, force=args.force)
     min_rate = args.min_pass_rate if args.min_pass_rate is not None else cfg.get("min_pass_rate")
     min_rate = float(min_rate) if min_rate is not None else None
@@ -735,7 +810,7 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
             common = dict(config=cfg, judge=args.judge or cfg.get("judge"), concurrency=args.concurrency or int(cfg.get("concurrency", 4)), cache=cli._cache(cfg, args), allow_python=args.allow_python or bool(cfg.get("allow_python_checks")), severity=cli._severity(cfg, args))
             for swap in plan.swaps:
                 subset = _cases_for(cases, swap)
-                model = args.compare_with or swap.new
+                model = args.compare_with or swap.spec or swap.new
                 if not subset:
                     plan.notes.append(f"no test cases were recorded on {swap.old}; nothing to compare for {swap.new}")
                     continue
@@ -787,9 +862,50 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
     return EXIT_FAIL if below else EXIT_OK
 
 
+def _tip_is_ours(root: Path, ctx: gh.Context, branch: str, sha: str) -> bool | None:
+    """Whether the remote branch's tip is a commit llmshift made (None: cannot tell).
+    llmshift puts one commit on top of the base, so a tip it did not make means
+    someone added to the branch."""
+    message = gh.commit_message(root, sha)
+    if message is None and ctx.token and ctx.repo:
+        try:
+            data = gh.api(ctx, "GET", f"/repos/{ctx.repo}/git/commits/{sha}")
+            message = data.get("message") if isinstance(data, dict) else None
+        except (ProviderError, UsageError):
+            message = None
+    if message is None:
+        try:
+            gh.git("fetch", "-q", "--no-tags", "origin", f"refs/heads/{branch}", cwd=root)
+        except gh.GitError:
+            return None
+        message = gh.commit_message(root, sha)
+    return None if message is None else MADE_BY in message
+
+
+def _pr_failure(exc: ProviderError, repo: str | None) -> str:
+    text = str(exc)
+    if "not permitted to create" in text:
+        return (
+            "GitHub does not let GITHUB_TOKEN open pull requests in this repository. Turn on Settings > Actions > General > "
+            "Workflow permissions > \"Allow GitHub Actions to create and approve pull requests\", or pass a personal access "
+            "token or GitHub App token as GITHUB_TOKEN."
+        )
+    if "rate limit" in text.lower():
+        return f"GitHub's API rate limit stopped the pull request ({exc}); try again later."
+    if exc.status == 401:
+        return f"GitHub rejected the token ({exc})."
+    if exc.status == 403:
+        return f"the token cannot open pull requests in {repo} ({exc}); the workflow needs `permissions: pull-requests: write`."
+    if exc.status == 404:
+        return f"{repo} was not found, or the token cannot see it ({exc})."
+    return f"GitHub could not open the pull request ({exc})."
+
+
 def _open_pr(plan: UpgradePlan, args: argparse.Namespace, body: str, root: Path) -> int:
+    """Commit the edits on top of HEAD and push them to the upgrade branch, without
+    touching the working tree, the index or any local branch; then open the PR."""
     ctx = gh.context()
-    ctx.repo = ctx.repo or gh.remote_repo(cwd=root)
+    ctx.repo = ctx.repo or gh.remote_repo(cwd=root, host=ctx.host)
     identity: list[str] = []
     if not gh.has_identity(root):
         if not ctx.in_actions:
@@ -797,38 +913,49 @@ def _open_pr(plan: UpgradePlan, args: argparse.Namespace, body: str, root: Path)
         identity = ["-c", f"user.name={BOT_NAME}", "-c", f"user.email={BOT_EMAIL}"]
     branch = _branch_name(plan, args.branch)
     start = gh.current_branch(root)
-    base = args.base or gh.default_branch(ctx) if ctx.token and ctx.repo else (args.base or start or "main")
-    base = base or start or "main"
+    default = gh.default_branch(ctx) if ctx.token and ctx.repo else None
+    base = args.base or default or start or "main"
+    if branch in {b for b in (base, default, start) if b}:
+        raise UsageError(f"--branch {branch} is the base, default or current branch; the upgrade goes to a branch of its own")
+    files = {c.path: c.updated or b"" for c in plan.changed}
     title = "Upgrade " + ", ".join(f"{s.old} to {s.new}" for s in plan.swaps[:3]) + ("..." if len(plan.swaps) > 3 else "")
     try:
-        gh.git("checkout", "-q", "-B", branch, cwd=root)
-        try:
-            written = apply_plan(plan)
-            gh.git("add", "--", *written, cwd=root)
-            gh.git(*identity, "commit", "-q", "-m", f"{title}\n\nMade by llmshift upgrade.", cwd=root)
-            gh.git("push", "-q", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=root)
-        finally:
-            if start:
-                gh.git("checkout", "-q", start, cwd=root, check=False)
+        modes = gh.tracked_modes(root, list(files))
+        untracked = [p for p in files if p not in modes]
+        if untracked:
+            raise UsageError(f"not committed yet: {', '.join(untracked)}; commit first (the pull request starts from your last commit)")
+        special = [p for p, mode in modes.items() if not mode.startswith("100")]
+        if special:
+            raise UsageError(f"{', '.join(special)}: a symbolic link or submodule; upgrade the file it points to")
+        dirty = gh.modified_paths(root, list(files))
+        if dirty:
+            raise UsageError(f"{', '.join(dirty)} {'has' if len(dirty) == 1 else 'have'} uncommitted changes; commit or stash them first (uncommitted work is never pushed)")
+        commit = gh.commit_files(root, files, modes, f"{title}\n\n{MADE_BY}\n", config=identity)
+        current = gh.remote_branch(root, branch)
+        if current is not None:
+            ours = _tip_is_ours(root, ctx, branch, current)
+            if not ours:
+                why = "has commits llmshift did not make" if ours is False else "could not be checked"
+                raise UsageError(
+                    f"branch {branch} on origin {why}, so it is not overwritten. Merge or close its pull request and delete the "
+                    "branch, or pass --branch NEW"
+                )
+        # The lease: overwrite only the commit checked above (or create the branch).
+        gh.git("push", "-q", f"--force-with-lease=refs/heads/{branch}:{current or ''}", "origin", f"{commit}:refs/heads/{branch}", cwd=root)
     except gh.GitError as exc:
         raise UsageError(f"git failed while preparing the pull request: {exc}") from None
-    con.out(f"{con.style(con.sym('pass'), 'green')} pushed {len(written)} file(s) to branch {branch}")
+    con.out(f"{con.style(con.sym('pass'), 'green')} pushed {len(files)} file(s) to branch {branch}")
     if not (ctx.token and ctx.repo):
-        where = f"https://github.com/{ctx.repo}/compare/{base}...{branch}?expand=1" if ctx.repo else f"branch {branch}"
-        con.warn(f"no GITHUB_TOKEN: open the pull request yourself: {where}")
+        if ctx.repo:
+            con.warn(f"no GITHUB_TOKEN: open the pull request yourself: {ctx.compare_url(base, branch)}")
+        elif ctx.token:
+            con.warn(f"cannot tell which GitHub repository origin is (set GITHUB_REPOSITORY=owner/name); open the pull request for branch {branch} yourself")
+        else:
+            con.warn(f"no GITHUB_TOKEN: open the pull request for branch {branch} yourself")
         return EXIT_OK
     try:
         pr = gh.open_pull_request(ctx, head=branch, base=base, title=title, body=body)
     except ProviderError as exc:
-        if exc.status not in (401, 403, 404):
-            raise
-        manual = f"The branch is pushed; open the pull request yourself: https://github.com/{ctx.repo}/compare/{base}...{branch}?expand=1"
-        if "not permitted to create" in str(exc):
-            raise UsageError(
-                "GitHub does not let GITHUB_TOKEN open pull requests in this repository. Turn on Settings > Actions > General > "
-                "Workflow permissions > \"Allow GitHub Actions to create and approve pull requests\", or pass a personal access "
-                f"token or GitHub App token as GITHUB_TOKEN. {manual}"
-            ) from None
-        raise UsageError(f"the token cannot open pull requests in {ctx.repo} ({exc}); the workflow needs `permissions: pull-requests: write`. {manual}") from None
+        raise UsageError(f"{_pr_failure(exc, ctx.repo)} The branch is pushed; open the pull request yourself: {ctx.compare_url(base, branch)}") from None
     con.out(f"{con.style(con.sym('pass'), 'green')} pull request: {pr.get('html_url') or pr.get('number')}")
     return EXIT_OK

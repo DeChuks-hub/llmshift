@@ -3,12 +3,15 @@ language detection. Pure standard library, deterministic."""
 
 from __future__ import annotations
 
+import ast
 import difflib
 import hashlib
 import json
 import math
 import re
+import threading
 import unicodedata
+import warnings
 from collections import Counter
 from typing import Any, Iterable
 
@@ -63,8 +66,19 @@ def word_count(text: Any) -> int:
 
 
 def stable_hash(obj: Any, length: int = 12) -> str:
-    data = obj if isinstance(obj, str) else json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str)
+    try:
+        data = obj if isinstance(obj, str) else json.dumps(obj, sort_keys=True, ensure_ascii=False, default=str)
+    except TypeError:  # keys of mixed types (YAML allows {1: a, "b": c}) cannot be sorted together
+        data = json.dumps(_str_keys(obj), sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(data.encode("utf-8", "surrogatepass")).hexdigest()[:length]
+
+
+def _str_keys(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): _str_keys(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_str_keys(v) for v in obj]
+    return obj
 
 
 _SURROGATE_RE = re.compile("[\ud800-\udfff]")
@@ -90,6 +104,21 @@ def clean_surrogates(value: Any) -> Any:
 # Deeper JSON is refused everywhere. The C parser's own limit depends on the OS and the
 # Python version (5000 levels parse on Linux with 3.12, not on Windows), and nested
 # values are walked recursively afterwards.
+_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
+
+
+def source_lines(text: str) -> list[str]:
+    """Lines as Python, git and editors number them: split at \\n, \\r\\n and \\r only,
+    not at the form feeds, U+2028 and others that str.splitlines() also splits at."""
+    return _LINE_BREAK_RE.split(text)
+
+
+def jsonl_lines(text: str) -> list[str]:
+    """The lines of a JSON Lines file. Only "\\n" (or "\\r\\n") ends a line: str.splitlines()
+    also splits at U+2028, U+0085 and other characters JSON keeps unescaped in strings."""
+    return [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+
+
 MAX_JSON_DEPTH = 200
 _JSON_SCAN_RE = re.compile(r'["\[\]{}]')
 
@@ -132,6 +161,22 @@ def json_loads(text: str) -> Any:
     if isinstance(text, str) and json_too_deep(text):
         raise RecursionError(f"JSON nested more than {MAX_JSON_DEPTH} levels deep")
     return json.loads(text)
+
+
+_PARSE_LOCK = threading.Lock()  # catch_warnings swaps process-wide state before Python 3.14
+
+
+def parse_python(source: str) -> ast.Module | None:
+    """The syntax tree of Python code llmshift reads (never runs), or None when this
+    Python cannot parse it: a syntax error, newer syntax, or nesting too deep. The
+    compiler's warnings about that code ("invalid escape sequence" on 3.12+) are not
+    llmshift's to print, and under PYTHONWARNINGS=error they must not fail the parse."""
+    with _PARSE_LOCK, warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return ast.parse(source)
+        except (SyntaxError, ValueError, TypeError, RecursionError, MemoryError):
+            return None
 
 
 def shorten(text: Any, limit: int = 120) -> str:

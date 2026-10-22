@@ -43,7 +43,7 @@ def infer(value: Any, *, depth: int = 0) -> dict:
             s = infer(item, depth=depth + 1)
             item_schema = s if item_schema is None else merge(item_schema, s)
         schema: dict = {"type": "array"}
-        if item_schema:
+        if item_schema is not None:  # {} (a null item: anything goes) must stay, or a merge narrows it
             schema["items"] = item_schema
         return schema
     if t in ("integer", "number"):
@@ -90,17 +90,16 @@ def merge(a: dict, b: dict) -> dict:
             if key in pa and key in pb:
                 props[key] = merge(pa[key], pb[key])
             else:
-                props[key] = pa.get(key) or pb.get(key) or {}
+                props[key] = pa[key] if key in pa else pb[key]
         out["properties"] = props
         ra = set(a.get("required", [])) if "object" in ta else set()
         rb = set(b.get("required", [])) if "object" in tb else set()
         out["required"] = sorted(ra & rb) if ("object" in ta and "object" in tb) else sorted(ra | rb)
-    if "array" in types:
-        ia, ib = a.get("items"), b.get("items")
-        if ia and ib:
-            out["items"] = merge(ia, ib)
-        elif ia or ib:
-            out["items"] = ia or ib
+    if "array" in types:  # by presence: {} (anything) is a real answer, not a missing one
+        if "items" in a and "items" in b:
+            out["items"] = merge(a["items"], b["items"])
+        elif "items" in a or "items" in b:
+            out["items"] = a["items"] if "items" in a else b["items"]
     return out
 
 

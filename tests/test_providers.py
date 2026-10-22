@@ -233,3 +233,44 @@ def test_mock_provider_unknown():
     with pytest.raises(ProviderError):
         resolve("mock:nope")
     assert resolve("mock:echo").complete(req("same")).text == "same"
+
+
+# ----------------------------------------------------------------- secrets
+
+
+def test_keys_with_stray_characters_never_appear_in_errors(server, monkeypatch):
+    """A key from a CRLF .env file ends in \\r\\n: it is stripped. A key with an invisible
+    character inside cannot be sent: the error names the header, never the key."""
+    server.route("POST", "/v1/chat/completions", lambda r: chat_response("ok"))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-AUDITSECRET\r\n")
+    p = resolve("openai:gpt-test", {"providers": {"openai": {"base_url": server.url + "/v1"}}})
+    assert p.complete(req()).text == "ok" and server.requests[-1]["headers"]["authorization"] == "Bearer sk-test-AUDITSECRET"
+    for key in ("sk-test-AUDIT​SECRET", "sk-test-AUDIT\nSECRET"):
+        for spec, options in (("openai:gpt-test", {"base_url": server.url + "/v1"}), ("anthropic:claude-test", {"base_url": server.url}), ("gemini:gemini-test", {"base_url": server.url})):
+            provider = resolve(spec, {"providers": {spec.split(":")[0]: {**options, "api_key": key}}, "max_retries": 0})
+            with pytest.raises(ProviderError) as info:
+                provider.complete(req())
+            assert "SECRET" not in str(info.value) and info.value.fatal and info.value.code == "invalid_api_key", spec
+
+
+def test_an_empty_base_url_never_falls_back_to_the_public_api(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    for kind in ("openai", "anthropic", "gemini"):
+        with pytest.raises(ProviderError) as info:
+            resolve("local:m", {"providers": {"local": {"type": kind, "base_url": ""}}})
+        assert "base_url is empty" in str(info.value) and info.value.code == "invalid_config", kind
+
+
+def test_urls_with_secrets_stay_out_of_messages():
+    from llmshift.providers import http
+
+    with pytest.raises(ProviderError) as info:
+        http.request("POST", "hooks.slack.com/services/T0SECRET/B0SECRET/xyzSECRET", body={"text": "hi"}, max_retries=0)
+    assert "SECRET" not in str(info.value) and info.value.code == "invalid_url"
+    with pytest.raises(ProviderError) as info:
+        http.request("GET", "http://user:hunter2SECRET@127.0.0.1:9/", max_retries=0, timeout=2)
+    assert "SECRET" not in str(info.value) and "127.0.0.1:9" in str(info.value)
+    for url in ("file:///etc/passwd", "ftp://example.com/x"):  # urllib would read local files for file://
+        with pytest.raises(ProviderError) as info:
+            http.request("GET", url, max_retries=0)
+        assert info.value.code == "invalid_url"

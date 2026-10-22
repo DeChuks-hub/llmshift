@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from . import fileio
-from .alerts import AlertMessage, SEVERITY_RANK, deliver, run_url
+from .alerts import SEVERITY_RANK, AlertMessage, deliver, run_url
 from .compare import CompareResult, run_compare
 from .registry import Registry
 from .stats import mcnemar_p, two_proportion_p
 from .testset import TestCase, unique_ids
-from .textutil import rouge_l, stable_hash
+from .textutil import json_loads, jsonl_lines, rouge_l, stable_hash
 
 KEEP_RUNS = 60
 MIN_INTERVAL = 60.0  # seconds between scheduled runs
@@ -85,12 +85,12 @@ def load_history(history_dir: str | Path, model: str) -> list[dict]:
     if not hist_file.exists():
         return []
     out = []
-    for line in hist_file.read_text(encoding="utf-8").splitlines():
+    for line in jsonl_lines(hist_file.read_text(encoding="utf-8")):
         line = line.strip()
         if line:
             try:
-                out.append(json.loads(line))
-            except ValueError:
+                out.append(json_loads(line))
+            except (ValueError, RecursionError):
                 continue
     return out
 
@@ -98,8 +98,8 @@ def load_history(history_dir: str | Path, model: str) -> list[dict]:
 def _load_run(runs_dir: Path, run_id: str) -> dict:
     path = runs_dir / f"{run_id}.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        return json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
         return {}
 
 

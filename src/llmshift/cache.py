@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import threading
 from pathlib import Path
 
+from . import fileio
 from .providers.base import Response
 from .textutil import stable_hash
 
@@ -59,7 +59,7 @@ class ResponseCache:
             data = response.to_dict()
             data.pop("cached", None)
             text = json.dumps(data, ensure_ascii=False, default=str)
-            fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=str(path.parent))
+            fd, tmp = fileio.temp_file(path.parent)
             with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as fh:
                 fh.write(text)
             os.replace(tmp, path)

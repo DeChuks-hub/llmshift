@@ -11,6 +11,7 @@ from llmshift import cli
 from llmshift.demo import create_project
 from llmshift.errors import UsageError
 from llmshift.pick import parse_volume, run_pick, split_models
+from llmshift.pricing import money
 from llmshift.providers import mock, resolve
 from llmshift.testset import load_tests
 
@@ -57,11 +58,40 @@ def test_recommends_the_cheapest_model_that_keeps_quality(demo, capsys):
     low, high = cand["mock:frugal"]["pass_rate_range"]
     assert 0.75 < low < 1.0 and high == 1.0
     assert [c["model"] for c in data["candidates"]] == ["mock:frugal", "mock:nextgen"]  # cheapest first
-    saved = round((today - frugal) * 100_000)
+    saving = (today - frugal) * 100_000
     assert data["recommendation"] == (
         f"Switch to mock:frugal: same quality (all 18 cases unchanged), {(today - frugal) / today:.0%} cheaper - "
-        f"about ${saved:,} a month saved at 100,000 requests a month."
+        f"about {money(saving)} a month saved at 100,000 requests a month."
     )
+    assert data["today"]["cost_source"] == "recorded"
+    # The demo logs record the usage the simulated model reports, so today's model costs the same when tested.
+    legacy = sum(_cost(mock.legacy({"messages": c.messages, "params": c.params}).usage, LEGACY) for c in cases) / len(cases)
+    assert today == pytest.approx(legacy, rel=1e-9)
+
+
+def test_todays_model_among_the_candidates_is_measured_on_the_same_tests(demo, capsys):
+    code, out, _ = pick(capsys, "--models", "mock:legacy,mock:frugal", "--format", "json")
+    data = json.loads(out)
+    cand = {c["model"]: c for c in data["candidates"]}
+    assert code == 0 and data["recommended"] == "mock:frugal"
+    assert data["today"]["cost_source"] == "tests" and data["today"]["unpriced_models"] == []
+    assert data["today"]["cost_per_1k_requests"] == cand["mock:legacy"]["cost_per_1k_requests"]
+    assert cand["mock:legacy"]["saving_pct"] == 0 and cand["mock:legacy"]["saving_per_1k_requests"] == 0
+    legacy, frugal = cand["mock:legacy"]["cost_per_1k_requests"], cand["mock:frugal"]["cost_per_1k_requests"]
+    assert cand["mock:frugal"]["saving_pct"] == pytest.approx((legacy - frugal) / legacy, abs=1e-4)
+    code, out, _ = pick(capsys, "--models", "mock:legacy,mock:frugal")
+    row = next(line for line in out.splitlines() if "mock:legacy" in line and "%" in line)
+    assert "same" in row and "measured on these tests" in out and "today mock:legacy" not in out
+    code, out, _ = pick(capsys, "--models", "mock:legacy", "--format", "json")
+    assert code == 0 and json.loads(out)["recommendation"] == "Keep mock:legacy: no cheaper candidate keeps quality."
+
+
+def test_the_same_model_written_two_ways():
+    from llmshift.pick import same_model
+
+    assert same_model("gpt-4o", "openai:gpt-4o") and same_model("MOCK:legacy", "mock:legacy")
+    assert not same_model("gpt-4o", "gpt-4o-mini") and not same_model("openai:gpt-4o", "anthropic:gpt-4o")
+    assert not same_model("", "") and same_model("gpt-4o-2024-05-13", "gpt-4o-2024-05-13")
 
 
 def test_terminal_table_and_saving_per_1000_without_volume(demo, capsys):
@@ -160,9 +190,9 @@ def test_reports_markdown_and_github_outputs(demo, capsys, monkeypatch):
 def test_library_api_with_provider_objects(demo):
     cases = load_tests(".llmshift/tests.jsonl")[:5]
     seen = []
-    res = run_pick(cases, [resolve("mock:frugal"), resolve("mock:nextgen")], baseline="mock:legacy", min_pass_rate=0.9, volume=2000, progress=lambda c: seen.append(c.spec))
+    res = run_pick(cases, [resolve("mock:frugal"), resolve("mock:nextgen")], baseline="mock:legacy", min_pass_rate=0.9, volume="2k", progress=lambda c: seen.append(c.spec))
     assert sorted(seen) == ["mock:frugal", "mock:nextgen"] and res.recommended == "mock:frugal"
-    assert res.to_dict()["kind"] == "pick" and res.monthly_saving > 0 and res.best.spec == "mock:frugal"
+    assert res.to_dict()["kind"] == "pick" and res.monthly_saving > 0 and res.best.spec == "mock:frugal" and res.volume == 2000
     with pytest.raises(UsageError):
         run_pick(cases, [])
 

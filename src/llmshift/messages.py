@@ -8,11 +8,10 @@ and parts are {"type": "text", "text": ...} or {"type": "image_url", ...}.
 from __future__ import annotations
 
 import copy
-import json
 import re
 from typing import Any
 
-from .textutil import normalize, stable_hash
+from .textutil import json_loads, normalize, stable_hash
 
 SYSTEM_ROLES = ("system", "developer")
 
@@ -118,6 +117,8 @@ def normalize_tool_call(tc: Any) -> dict | None:
         name, args = tc.get("name"), tc.get("input")
     elif "functionCall" in tc or "function_call" in tc:
         fc = tc.get("functionCall") or tc.get("function_call") or {}
+        if not isinstance(fc, dict):  # an odd shape: not a call llmshift can read
+            return None
         name, args = fc.get("name"), fc.get("args", fc.get("arguments"))
     else:
         name = tc.get("name")
@@ -126,8 +127,8 @@ def normalize_tool_call(tc: Any) -> dict | None:
         return None
     if isinstance(args, str):
         try:
-            args = json.loads(args) if args.strip() else {}
-        except ValueError:
+            args = json_loads(args) if args.strip() else {}
+        except (ValueError, RecursionError):  # kept as text: not JSON, or nested too deeply
             pass
     out = {"name": name, "arguments": args if args is not None else {}}
     if call_id:
@@ -220,9 +221,12 @@ def template_key(messages: list[dict], params: dict | None = None) -> str:
         first = re.sub(r"\d", "#", first)
         base = "usr:" + first[:48]
         label = _slug(first)
-    tools = sorted(
-        (t.get("function") or {}).get("name") or t.get("name") or "" for t in (params.get("tools") or []) if isinstance(t, dict)
-    )
+    names = []
+    for t in params.get("tools") if isinstance(params.get("tools"), list) else []:
+        if isinstance(t, dict):  # logs hold all sorts: tolerate odd shapes rather than fail the import
+            fn = t.get("function")
+            names.append(str((fn.get("name") if isinstance(fn, dict) else None) or t.get("name") or ""))
+    tools = sorted(names)
     rf = params.get("response_format")
     rf_type = rf.get("type") if isinstance(rf, dict) else (rf or "")
     return f"{label}-{stable_hash({'base': base, 'tools': tools, 'rf': rf_type}, 6)}"

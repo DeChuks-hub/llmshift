@@ -4,7 +4,8 @@ cheaper models at once and recommends the cheapest one that still passes.
 Each candidate goes through the same checks as `llmshift compare`. Costs come from
 the token usage each provider reports (estimated from the text when it reports
 none) and the prices in pricing.py; today's cost comes from the usage recorded
-with the baseline answers.
+with the baseline answers or, when today's model is one of the candidates, from
+its run on the same tests.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__, pricing
 from . import console as con
 from . import messages as msgs
-from . import pricing
 from .checks import CATEGORY_TITLES
 from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .pricing import Price, money
@@ -53,6 +54,7 @@ class CandidateResult:
     error: str | None = None
     seconds: float = 0.0
     compare: Any = None  # the CompareResult (not serialised)
+    case_costs: dict = field(default_factory=dict)  # case id -> USD in this run (not serialised)
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -88,6 +90,8 @@ class PickResult:
     baseline_cost_per_1k: float | None = None
     baseline_estimated: bool = False
     baseline_unpriced: list[str] = field(default_factory=list)
+    baseline_measured: bool = False  # today's model was a candidate: its cost comes from this run
+    today_spec: str | None = None  # the candidate that is today's model
     volume: int | None = None
     recommended: str | None = None
     recommendation: str = ""
@@ -102,6 +106,7 @@ class PickResult:
 
     def to_dict(self) -> dict:
         return {
+            "llmshift_version": __version__,
             "kind": "pick",
             "created_at": self.created_at,
             "tests": self.tests_path,
@@ -112,6 +117,7 @@ class PickResult:
                 "model": self.baseline,
                 "cost_per_1k_requests": _round(self.baseline_cost_per_1k),
                 "cost_estimated": self.baseline_estimated,
+                "cost_source": "tests" if self.baseline_measured else "recorded",
                 "prices": self.baseline_prices,
                 "unpriced_models": self.baseline_unpriced,
             },
@@ -200,7 +206,16 @@ def _baseline_costs(cases: list[TestCase], baseline: str | None, overrides: dict
     return costs, estimated, unpriced, prices
 
 
-def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, TestCase], overrides: dict, threshold: float, base_costs: dict[str, float]) -> None:
+def same_model(a: str, b: str, config: dict | None = None) -> bool:
+    """Whether two specs name the same model: "gpt-4o" matches "openai:gpt-4o"."""
+    from .providers import parse_spec
+
+    pa, ma = parse_spec(a, config)
+    pb, mb = parse_spec(b, config)
+    return bool(ma) and ma.lower() == mb.lower() and (pa is None or pb is None or pa == pb)
+
+
+def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, TestCase], overrides: dict, threshold: float) -> None:
     s = result.summary
     cand.compare = result
     cand.total = s.get("total", 0)
@@ -228,13 +243,19 @@ def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, Tes
         costs[c.id] = cand.price.cost(inp, out)
     if not costs:
         return
+    cand.case_costs = costs
     cand.cost_per_1k = 1000 * sum(costs.values()) / len(costs)
-    common = [cid for cid in costs if cid in base_costs]
-    if common:
-        base = sum(base_costs[cid] for cid in common) / len(common)
-        mine = sum(costs[cid] for cid in common) / len(common)
-        cand.saving_per_1k = 1000 * (base - mine)
-        cand.saving_pct = (base - mine) / base if base > 0 else None
+
+
+def _apply_saving(cand: CandidateResult, base_costs: dict[str, float]) -> None:
+    """The saving against today's cost, on the cases both have a cost for."""
+    common = [cid for cid in cand.case_costs if cid in base_costs]
+    if not common:
+        return
+    base = sum(base_costs[cid] for cid in common) / len(common)
+    mine = sum(cand.case_costs[cid] for cid in common) / len(common)
+    cand.saving_per_1k = 1000 * (base - mine)
+    cand.saving_pct = (base - mine) / base if base > 0 else None
 
 
 def _rank(c: CandidateResult) -> tuple:
@@ -267,14 +288,14 @@ def _recommend(res: PickResult) -> None:
     best = min(passing, key=_rank)
     res.recommended = best.spec
     quality = _quality(best, threshold)
+    if best.spec in (res.today_spec, res.baseline):
+        res.recommendation = f"Keep {best.spec}: no cheaper candidate keeps quality."
+        return
     if best.cost_per_1k is None:
         res.recommendation = (
             f"Switch to {best.spec}: {quality}. Its price is unknown, so the saving can't be worked out: "
             f"set it with --price {best.spec}=INPUT/OUTPUT (USD per 1M tokens) or under pricing: in llmshift.yaml."
         )
-        return
-    if best.spec == res.baseline:
-        res.recommendation = f"Keep {best.spec}: no cheaper candidate keeps quality."
         return
     if best.saving_per_1k is None:
         res.recommendation = (
@@ -338,6 +359,7 @@ def run_pick(
     except ValueError as exc:
         raise UsageError(str(exc)) from None
     threshold = DEFAULT_MIN_PASS_RATE if min_pass_rate is None else float(min_pass_rate)
+    volume = parse_volume(volume)  # "100k" from llmshift.yaml works for every caller, not just the CLI
     by_id = {c.id: c for c in cases}
     base_costs, base_estimated, unpriced, base_prices = _baseline_costs(cases, baseline, overrides)
     recorded = sorted({c.baseline_model for c in cases if c.baseline_model})
@@ -354,12 +376,6 @@ def run_pick(
         tests_path=tests_path,
         created_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
     )
-    if unpriced:
-        covered = len(base_costs)
-        res.notes.append(
-            f"Today's price is unknown for {', '.join(unpriced)}; savings use the {covered} of {len(cases)} cases with a known price. "
-            "Set it with --price MODEL=INPUT/OUTPUT or pricing: in llmshift.yaml."
-        )
 
     def run_one(candidate: Any, spec: str) -> CandidateResult:
         cand = CandidateResult(spec=spec)
@@ -373,7 +389,7 @@ def run_pick(
                 first = next((c.error for c in result.cases if c.error), "every request failed")
                 cand.error = first
             else:
-                _evaluate_candidate(cand, result, by_id, overrides, threshold, base_costs)
+                _evaluate_candidate(cand, result, by_id, overrides, threshold)
         except Exception as exc:  # one broken candidate must not stop the others
             message = str(exc) or exc.__class__.__name__
             cand.error = message[len(spec) + 2:] if message.startswith(f"{spec}: ") else message
@@ -402,6 +418,23 @@ def run_pick(
             pool.shutdown(wait=True)
     order = {s: i for i, s in enumerate(specs)}
     res.candidates.sort(key=lambda c: (_rank(c), order.get(c.spec, 0)))
+    today_model = baseline or (recorded[0] if len(recorded) == 1 else None)
+    if today_model:
+        res.today_spec = next((c.spec for c in res.candidates if same_model(c.spec, today_model, config)), None)
+    today = next((c for c in res.candidates if c.spec == res.today_spec and c.error is None and c.case_costs), None)
+    if today is not None:
+        # Today's model ran on the same tests: measure today's cost there too, so every
+        # saving compares like with like (logged usage can differ from a test run).
+        base_costs = today.case_costs
+        res.baseline_cost_per_1k, res.baseline_estimated, res.baseline_measured = today.cost_per_1k, today.estimated, True
+        res.baseline_prices, res.baseline_unpriced = [{"model": today.spec, **(_price_dict(today.price) or {})}], []
+    elif unpriced:
+        res.notes.append(
+            f"Today's price is unknown for {', '.join(unpriced)}; savings use the {len(base_costs)} of {len(cases)} cases with a known price. "
+            "Set it with --price MODEL=INPUT/OUTPUT or pricing: in llmshift.yaml."
+        )
+    for c in res.candidates:
+        _apply_saving(c, base_costs)
     for c in res.candidates:
         if c.error is None and c.price is None:
             res.notes.append(f"No price known for {c.spec}: set it with --price {c.spec}=INPUT/OUTPUT (USD per 1M tokens) or pricing: in llmshift.yaml.")
@@ -418,6 +451,13 @@ def _cost_cell(cost: float | None, estimated: bool) -> str:
     if cost is None:
         return "?"
     return ("~" if estimated else "") + money(cost)
+
+
+def _today_cost(res: PickResult) -> str:
+    if res.baseline_cost_per_1k is None:
+        return "cost unknown"
+    source = "measured on these tests" if res.baseline_measured else "from your recorded usage"
+    return f"{_cost_cell(res.baseline_cost_per_1k, res.baseline_estimated)} per 1,000 requests ({source})"
 
 
 def _vs_today(c: CandidateResult) -> str:
@@ -448,14 +488,15 @@ def _price_line(res: PickResult) -> str:
         if c.price is not None:
             bits.append(f"{c.spec} {money(c.price.input)}/{money(c.price.output)} ({c.price.source})")
     for p in res.baseline_prices:
-        bits.append(f"today {p['model']} {money(p['input_per_1m'])}/{money(p['output_per_1m'])} ({p['source']})")
+        if p["model"] != res.today_spec:  # already listed as a candidate
+            bits.append(f"today {p['model']} {money(p['input_per_1m'])}/{money(p['output_per_1m'])} ({p['source']})")
     return "Prices per 1M tokens (input/output): " + "; ".join(bits) if bits else ""
 
 
 def pick_terminal(res: PickResult) -> str:
     lines = [
         con.style("LLMShift pick", "bold") + f"  {res.cases} test case(s), {len(res.candidates)} candidate(s), quality bar {res.min_pass_rate:.0%}",
-        f"Today: {res.baseline}  " + (f"{_cost_cell(res.baseline_cost_per_1k, res.baseline_estimated)} per 1,000 requests" if res.baseline_cost_per_1k is not None else "cost unknown"),
+        f"Today: {res.baseline}  {_today_cost(res)}",
         "",
     ]
     rows = []
@@ -493,8 +534,7 @@ def pick_markdown(res: PickResult) -> str:
     lines = [
         "## LLMShift pick",
         "",
-        f"{res.cases} test case(s), quality bar {res.min_pass_rate:.0%}. Today: `{_md(res.baseline)}`, "
-        + (f"{_cost_cell(res.baseline_cost_per_1k, res.baseline_estimated)} per 1,000 requests." if res.baseline_cost_per_1k is not None else "cost unknown."),
+        f"{res.cases} test case(s), quality bar {res.min_pass_rate:.0%}. Today: `{_md(res.baseline)}`, {_today_cost(res)}.",
         "",
         f"**{_md(res.recommendation)}**",
         "",
@@ -531,7 +571,7 @@ def register(sub: Any) -> None:
     )
     p.add_argument("--models", "--model", dest="models", action="append", metavar="MODEL[,MODEL...]", help="candidate models (repeatable or comma-separated); default pick.models in llmshift.yaml")
     p.add_argument("--baseline", metavar="MODEL", help="the model you use today, for today's cost (default: baseline in llmshift.yaml, else the recorded model)")
-    p.add_argument("--min-pass-rate", type=float, help="quality bar a candidate must reach (default min_pass_rate in llmshift.yaml: 0.95)")
+    p.add_argument("--min-pass-rate", type=cli.rate_arg, help="quality bar a candidate must reach (default min_pass_rate in llmshift.yaml: 0.95)")
     p.add_argument("--volume", metavar="N", help="requests per month, for a monthly saving, e.g. 100000 or 100k (default pick.volume)")
     p.add_argument("--price", action="append", metavar="MODEL=IN/OUT", help="price in USD per 1M tokens, e.g. azure:prod=2.5/10 (repeatable; wins over pricing: in llmshift.yaml)")
     p.add_argument("--format", choices=["table", "json", "markdown"], default="table", help="output on the terminal")

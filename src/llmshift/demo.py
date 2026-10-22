@@ -122,13 +122,14 @@ llm:
 def _openai_pair(system: str, user: str, params: dict, ts: str) -> dict:
     request = {"model": "gpt-4o-2024-05-13", "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}], **params}
     out = legacy({"messages": request["messages"], "params": params})
+    inp, outp = out.usage["input_tokens"], out.usage["output_tokens"]  # what the simulated model reports when tested
     response = {
         "id": "chatcmpl-demo",
         "object": "chat.completion",
         "created": 1760000000,
         "model": "gpt-4o-2024-05-13",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": out.text}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 120, "completion_tokens": 60, "total_tokens": 180},
+        "usage": {"prompt_tokens": inp, "completion_tokens": outp, "total_tokens": inp + outp},
     }
     return {"timestamp": ts, "request": request, "response": response}
 
@@ -143,7 +144,7 @@ def _anthropic_pair(system: str, user: str, ts: str) -> dict:
         "model": "claude-3-5-haiku-20241022",
         "content": [{"type": "text", "text": out.text}],
         "stop_reason": "end_turn",
-        "usage": {"input_tokens": 90, "output_tokens": 50},
+        "usage": {"input_tokens": out.usage["input_tokens"], "output_tokens": out.usage["output_tokens"]},
     }
     return {"timestamp": ts, "request": request, "response": response}
 

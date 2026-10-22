@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import copy
 import datetime as _dt
 import inspect
 import json
@@ -36,11 +37,13 @@ import threading
 import time
 import uuid
 import warnings
+import weakref
 from pathlib import Path
 from typing import Any
 
 from . import fileio
 from .redact import Redactor
+from .textutil import json_loads
 
 _ENDPOINTS = {
     ("chat", "completions", "create"): "chat",
@@ -83,24 +86,53 @@ def _dump(model_dump: Any) -> Any:
         return model_dump()
 
 
+_MAX_DEPTH = 64
+_MAX_VALUES = 200_000
+_PLAIN = (dict, list, tuple, str, int, float, bool, type(None))
+
+
+def _sentinel(value: Any) -> bool:
+    """The SDKs' "argument not given" markers (openai.NOT_GIVEN, omit; the same in
+    anthropic and other generated SDKs): no value at all, never part of a request."""
+    return type(value).__name__ in ("NotGiven", "Omit")
+
+
 def to_dict(obj: Any) -> Any:
-    """Best-effort conversion of SDK objects (pydantic models etc.) to plain data."""
+    """Best-effort conversion of SDK objects (pydantic models etc.) to plain data.
+    "Not given" sentinels are dropped; past 64 levels or 200,000 values (a Mock in an
+    app's tests invents attributes without end) the rest becomes text."""
+    return _plain(obj, 0, [_MAX_VALUES])
+
+
+def _plain(obj: Any, depth: int, budget: list) -> Any:
+    budget[0] -= 1
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
+    if depth > _MAX_DEPTH or budget[0] <= 0:
+        return _text(obj)
     if isinstance(obj, dict):
-        return {k: to_dict(v) for k, v in obj.items()}
+        return {k: _plain(v, depth + 1, budget) for k, v in obj.items() if not _sentinel(v)}
     if isinstance(obj, (list, tuple)):
-        return [to_dict(v) for v in obj]
+        return [_plain(v, depth + 1, budget) for v in obj if not _sentinel(v)]
     for method in ("model_dump", "to_dict", "dict"):
         fn = getattr(obj, method, None)
         if callable(fn):
             try:
-                return to_dict(_dump(fn) if method == "model_dump" else fn())
+                data = _dump(fn) if method == "model_dump" else fn()
             except Exception:
                 continue
-    if hasattr(obj, "__dict__"):
-        return {k: to_dict(v) for k, v in vars(obj).items() if not k.startswith("_")}
-    return str(obj)
+            if isinstance(data, _PLAIN):  # a Mock's model_dump() returns another Mock
+                return _plain(data, depth + 1, budget)
+    if hasattr(obj, "__dict__") and not type(obj).__module__.startswith("unittest.mock"):
+        return {k: _plain(v, depth + 1, budget) for k, v in vars(obj).items() if not k.startswith("_") and not _sentinel(v)}
+    return _text(obj)
+
+
+def _text(obj: Any) -> str:
+    try:
+        return str(obj)[:1000]
+    except Exception:
+        return f"<{type(obj).__name__}>"
 
 
 _AGENT_RUN: contextvars.ContextVar = contextvars.ContextVar("llmshift_agent_run", default=None)
@@ -120,12 +152,16 @@ def agent_run(name: str | None = None, run_id: str | None = None) -> Any:
 
 class Recorder:
     def __init__(self, path: str | os.PathLike = "logs/llmshift.jsonl", *, sample_rate: float = 1.0, redact_secrets: bool = True, metadata: dict | None = None):
-        self.path = Path(path)
-        self.sample_rate = max(0.0, min(1.0, float(sample_rate)))
+        self.path = Path(path).expanduser()
+        rate = float(sample_rate)
+        if rate != rate:  # NaN would otherwise record every call
+            raise ValueError("sample_rate must be a number between 0 and 1")
+        self.sample_rate = max(0.0, min(1.0, rate))
         self.redactor = Redactor(secrets=True, pii=False) if redact_secrets else None
         self.metadata = dict(metadata or {})
         self._lock = _path_lock(self.path)
         self._warned = False
+        _ALL_RECORDERS.add(self)
 
     def sampled(self) -> bool:
         return self.sample_rate >= 1.0 or random.random() < self.sample_rate
@@ -165,17 +201,28 @@ class Recorder:
         except Exception as exc:  # recording must never break the app
             if not self._warned:
                 self._warned = True
-                warnings.warn(f"llmshift: could not record an LLM call ({exc})", RuntimeWarning, stacklevel=2)
+                _warn(f"llmshift: could not record an LLM call ({exc})")
+
+
+def _warn(message: str) -> None:
+    """A warning that can never break the app: under -W error (or pytest's
+    filterwarnings = error) warnings.warn would raise into the app's own call."""
+    try:
+        warnings.warn(message, RuntimeWarning, stacklevel=3)
+    except Exception:
+        pass
 
 
 _recorders: dict[str, Recorder] = {}
 _recorders_lock = threading.Lock()
+_ALL_RECORDERS: weakref.WeakSet = weakref.WeakSet()
 
 
 def _release_after_fork() -> None:
     # Only the forking thread survives a fork; a lock another thread held at that moment
     # would stay locked in the child forever.
-    for lock in (_PATH_LOCKS_GUARD, _recorders_lock, *_PATH_LOCKS.values()):
+    redactor_locks = [r.redactor._lock for r in list(_ALL_RECORDERS) if r.redactor is not None]
+    for lock in (_PATH_LOCKS_GUARD, _recorders_lock, *_PATH_LOCKS.values(), *redactor_locks):
         if lock.locked():
             lock.release()
 
@@ -214,8 +261,8 @@ def _get(obj: Any, *path: Any) -> Any:
 
 def _arguments(text: str) -> Any:
     try:
-        return json.loads(text) if text.strip() else {}
-    except ValueError:
+        return json_loads(text) if text.strip() else {}
+    except (ValueError, RecursionError):
         return {"_raw": text}
 
 
@@ -229,7 +276,13 @@ class _StreamAccumulator:
         self.finish: str | None = None
         self.usage: dict = {}
         self.calls: dict[tuple, dict] = {}
+        self.choices: dict[int, dict] = {}  # chat: each choice (n > 1) on its own
         self.final: dict | None = None  # Responses API: the whole response arrives at the end
+
+    @property
+    def complete(self) -> bool:
+        """Whether the stream reached its end: a finish reason, or the final response."""
+        return self.final is not None or self.finish is not None
 
     def add(self, chunk: Any) -> None:
         try:
@@ -258,23 +311,28 @@ class _StreamAccumulator:
             self.finish = _get(cand, "finishReason") or _get(cand, "finish_reason") or self.finish
             if (_get(chunk, "usageMetadata") or _get(chunk, "usage_metadata")) is not None:
                 self._usage(_get(chunk, "usageMetadata") or _get(chunk, "usage_metadata"))
-        elif ctype is None:  # OpenAI chat completion chunks
-            choice = _get(chunk, "choices", 0)
-            delta = _get(choice, "delta")
-            content = _get(delta, "content")
-            if isinstance(content, str):
-                self.text.append(content)
-            for tc in _get(delta, "tool_calls") or []:
-                index = _get(tc, "index")
-                slot = self.calls.setdefault(("chat", index if isinstance(index, int) else len(self.calls)), {"id": None, "name": "", "arguments": ""})
-                slot["id"] = slot["id"] or _get(tc, "id")
-                slot["name"] = slot["name"] or _get(tc, "function", "name") or ""
-                args = _get(tc, "function", "arguments")
-                if isinstance(args, str):
-                    slot["arguments"] += args
-            fin = _get(choice, "finish_reason")
-            if fin:
-                self.finish = fin
+        elif ctype is None:  # OpenAI chat completion chunks: each choice (n > 1) by its index
+            for choice in _get(chunk, "choices") or []:
+                index = _get(choice, "index")
+                index = index if isinstance(index, int) else 0
+                slot = self.choices.setdefault(index, {"text": [], "refusal": [], "calls": {}, "finish": None})
+                delta = _get(choice, "delta")
+                for key in ("text", "refusal"):
+                    piece = _get(delta, "content" if key == "text" else "refusal")
+                    if isinstance(piece, str):
+                        slot[key].append(piece)
+                for tc in _get(delta, "tool_calls") or []:
+                    tindex = _get(tc, "index")
+                    call = slot["calls"].setdefault(tindex if isinstance(tindex, int) else len(slot["calls"]), {"id": None, "name": "", "arguments": ""})
+                    call["id"] = call["id"] or _get(tc, "id")
+                    call["name"] = call["name"] or _get(tc, "function", "name") or ""
+                    args = _get(tc, "function", "arguments")
+                    if isinstance(args, str):
+                        call["arguments"] += args
+                fin = _get(choice, "finish_reason")
+                if fin:
+                    slot["finish"] = fin
+                    self.finish = self.finish or fin
             if _get(chunk, "usage") is not None:  # sent last with stream_options.include_usage
                 self._usage(_get(chunk, "usage"))
         elif ctype == "message_start":  # Anthropic
@@ -325,19 +383,33 @@ class _StreamAccumulator:
         elif api == "responses":
             out = {"object": "response", "model": self.model, "status": "completed", "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
         else:
-            message: dict = {"role": "assistant", "content": text if text or not calls else None}
-            if calls:
-                message["tool_calls"] = [
-                    {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}} for c in calls
-                ]
-            out = {"object": "chat.completion", "model": self.model, "choices": [{"index": 0, "message": message, "finish_reason": self.finish}]}
+            choices = []
+            for index in sorted(self.choices) or [0]:
+                slot = self.choices.get(index) or {"text": [], "refusal": [], "calls": {}, "finish": self.finish}
+                said = "".join(slot["text"])
+                chat_calls = [slot["calls"][k] for k in sorted(slot["calls"])]
+                message: dict = {"role": "assistant", "content": said if said or not chat_calls else None}
+                if slot["refusal"]:
+                    message["refusal"] = "".join(slot["refusal"])
+                if chat_calls:
+                    message["tool_calls"] = [
+                        {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}} for c in chat_calls
+                    ]
+                choices.append({"index": index, "message": message, "finish_reason": slot["finish"]})
+            out = {"object": "chat.completion", "model": self.model, "choices": choices}
         if self.usage:
             out["usage"] = dict(self.usage)
         return out
 
 
+def _failure(exc: BaseException) -> str:
+    return f"{exc.__class__.__name__}: {exc}"[:500]
+
+
 class _StreamProxy:
-    """Passes a stream through unchanged and records the whole response once it ends."""
+    """Passes a stream through unchanged and records the whole response once it ends.
+    A stream that failed, was closed or abandoned part-way, or ended without a finish
+    reason is recorded with an error, so it never becomes a test's expected answer."""
 
     def __init__(self, stream: Any, done: Any):
         self._stream = stream
@@ -347,10 +419,12 @@ class _StreamProxy:
         self._it: Any = None
         self._ait: Any = None
 
-    def _finish(self) -> None:
+    def _finish(self, error: str | None = None) -> None:
         if not self._finished:
             self._finished = True
-            self._done(self._acc)
+            if error is None and not self._acc.complete:
+                error = "the stream ended without a finish reason (cut off?)"
+            self._done(self._acc, error)
 
     def __iter__(self) -> Any:
         return self
@@ -360,8 +434,11 @@ class _StreamProxy:
             self._it = iter(self._stream)
         try:
             chunk = next(self._it)
-        except BaseException:  # StopIteration, or the connection failed mid-stream
+        except StopIteration:
             self._finish()
+            raise
+        except BaseException as exc:  # the connection failed, or the SDK raised an error event
+            self._finish(_failure(exc))
             raise
         self._acc.add(chunk)
         return chunk
@@ -374,19 +451,22 @@ class _StreamProxy:
             self._ait = self._stream.__aiter__()
         try:
             chunk = await self._ait.__anext__()
-        except BaseException:
+        except StopAsyncIteration:
             self._finish()
+            raise
+        except BaseException as exc:
+            self._finish(_failure(exc))
             raise
         self._acc.add(chunk)
         return chunk
 
     def close(self) -> Any:
-        self._finish()
+        self._finish("the app closed the stream before its end")
         closer = getattr(self._stream, "close", None)
         return closer() if callable(closer) else None
 
     async def aclose(self) -> Any:
-        self._finish()
+        self._finish("the app closed the stream before its end")
         closer = getattr(self._stream, "aclose", None) or getattr(self._stream, "close", None)
         if callable(closer):
             result = closer()
@@ -401,7 +481,7 @@ class _StreamProxy:
         return self
 
     def __exit__(self, *exc: Any) -> Any:
-        self._finish()
+        self._finish(_failure(exc[1]) if exc[1] is not None else "the app left the stream before its end")
         if hasattr(self._stream, "__exit__"):
             return self._stream.__exit__(*exc)
         return None
@@ -412,14 +492,14 @@ class _StreamProxy:
         return self
 
     async def __aexit__(self, *exc: Any) -> Any:
-        self._finish()
+        self._finish(_failure(exc[1]) if exc[1] is not None else "the app left the stream before its end")
         if hasattr(self._stream, "__aexit__"):
             return await self._stream.__aexit__(*exc)
         return None
 
-    def __del__(self) -> None:  # a stream abandoned part-way is still recorded
+    def __del__(self) -> None:  # a stream abandoned part-way is still recorded, as incomplete
         try:
-            self._finish()
+            self._finish("the stream was abandoned before its end")
         except Exception:
             pass
 
@@ -480,6 +560,28 @@ def _wire_formats(api: str, kwargs: dict) -> dict:
     return out
 
 
+def _complete(snapshot: Any) -> bool:
+    """Whether a stream helper's answer reached its end (a stop or finish reason)."""
+    data = to_dict(snapshot)
+    if not isinstance(data, dict):
+        return False
+    if data.get("stop_reason") or data.get("status") in ("completed", "incomplete", "failed"):
+        return True  # Anthropic; OpenAI Responses (the helper keeps it only once done)
+    choices = data.get("choices")
+    return bool(choices) and all(isinstance(c, dict) and c.get("finish_reason") for c in choices)
+
+
+def _request_copy(api: str, kwargs: dict) -> dict:
+    """The request as sent, copied to plain data when the call starts: an app that
+    appends to its message list before a stream ends must not change the record, and
+    the shadow model gets plain messages, not SDK objects or "not given" markers."""
+    try:
+        data = to_dict(_wire_request(api, kwargs))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # recording never breaks the app
+        return {}
+
+
 def _final_snapshot(stream: Any) -> Any:
     """The answer an SDK stream helper has accumulated so far (reads nothing more)."""
     readers = (
@@ -510,10 +612,13 @@ class _HelperStream:
     def _record(self, exc: BaseException | None) -> None:
         try:
             latency = (time.perf_counter() - self._start) * 1000
-            if exc is not None:
-                self._done(None, f"{exc.__class__.__name__}: {exc}"[:500], latency)
-            else:
-                self._done(_final_snapshot(self._stream), None, latency)
+            snapshot = _final_snapshot(self._stream) if self._stream is not None else None
+            if snapshot is not None and _complete(snapshot):
+                self._done(snapshot, None, latency)  # the answer is whole, whatever the app did afterwards
+            elif exc is not None:
+                self._done(snapshot, _failure(exc), latency)
+            elif snapshot is not None:
+                self._done(snapshot, "the stream block ended before the answer was complete", latency)
         except Exception:
             pass  # recording never breaks the app
 
@@ -551,6 +656,9 @@ class _HelperStream:
         return getattr(self._manager, name)
 
 
+_PROXY_FIELDS = ("_target", "_recorder", "_provider", "_parts", "_shadow")
+
+
 class _Proxy:
     def __init__(self, target: Any, recorder: Recorder | None, provider: str | None, parts: tuple = (), shadow: Any = None):
         object.__setattr__(self, "_target", target)
@@ -559,7 +667,22 @@ class _Proxy:
         object.__setattr__(self, "_parts", parts)
         object.__setattr__(self, "_shadow", shadow)
 
+    @property  # type: ignore[misc]
+    def __class__(self) -> Any:  # isinstance(wrap(OpenAI()), OpenAI) stays true: instructor and others check it
+        return type(self._target)
+
+    def __dir__(self) -> list[str]:
+        return sorted(set(dir(self._target)))
+
+    def __copy__(self) -> Any:
+        return _Proxy(copy.copy(self._target), self._recorder, self._provider, self._parts, self._shadow)
+
+    def __deepcopy__(self, memo: dict) -> Any:
+        return _Proxy(copy.deepcopy(self._target, memo), self._recorder, self._provider, self._parts, self._shadow)
+
     def __getattr__(self, name: str) -> Any:
+        if name in _PROXY_FIELDS:  # not set yet (an instance being built): never ask the target
+            raise AttributeError(name)
         attr = getattr(self._target, name)
         parts = self._parts + (name,)
         api = _ENDPOINTS.get(parts[-3:]) or _ENDPOINTS.get(parts[-2:])
@@ -604,10 +727,10 @@ class _Proxy:
 
         def call(*args: Any, **kwargs: Any) -> Any:
             logging = recorder is not None and recorder.sampled()
-            manager = fn(*args, **kwargs)
             if not logging and shadow is None:
-                return manager
-            request = _wire_request(api, kwargs)
+                return fn(*args, **kwargs)
+            request = _request_copy(api, kwargs)
+            manager = fn(*args, **kwargs)
 
             def done(snapshot: Any, error: str | None, latency_ms: float) -> None:
                 if snapshot is None and error is None:
@@ -644,11 +767,12 @@ class _Proxy:
         def finished(kwargs: dict, start: float, result: Any, logging: bool) -> Any:
             if kwargs.get("stream"):
 
-                def done(acc: _StreamAccumulator) -> None:
+                def done(acc: _StreamAccumulator, error: str | None) -> None:
                     response = acc.response(api)
                     if logging:
-                        recorder.log(kwargs, response, provider=provider, api=api, latency_ms=elapsed(start))
-                    observe(kwargs, response)
+                        recorder.log(kwargs, response, provider=provider, api=api, latency_ms=elapsed(start), error=error)
+                    if error is None:
+                        observe(kwargs, response)
 
                 return _StreamProxy(result, done)
             if logging:
@@ -673,7 +797,7 @@ class _Proxy:
                 logging = sampled()
                 if not logging and shadow is None:
                     return await fn(*args, **kwargs)
-                return await finish_async(fn(*args, **kwargs), _wire_request(api, kwargs), time.perf_counter(), logging)
+                return await finish_async(fn(*args, **kwargs), _request_copy(api, kwargs), time.perf_counter(), logging)
 
             return async_call
 
@@ -681,7 +805,7 @@ class _Proxy:
             logging = sampled()
             if not logging and shadow is None:
                 return fn(*args, **kwargs)
-            request = _wire_request(api, kwargs)
+            request = _request_copy(api, kwargs)
             start = time.perf_counter()
             try:
                 result = fn(*args, **kwargs)
@@ -714,6 +838,8 @@ def wrap(
     """Return a proxy of an OpenAI/Anthropic client that records every call. With
     `shadow` (a model spec or a `llmshift.shadow.Shadow`), a share of the calls is also
     copied to that model in the background (shadow mode); `record=False` keeps only that."""
+    if type(client) is _Proxy:  # wrapping twice would record every call twice
+        client = client._target
     module = type(client).__module__.split(".")[0]
     provider = {"openai": "openai", "anthropic": "anthropic"}.get(module, module)
     if shadow is not None and not hasattr(shadow, "observe"):

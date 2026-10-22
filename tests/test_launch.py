@@ -155,6 +155,18 @@ def test_no_leftovers_of_the_old_name_or_placeholders():
         assert "your-org" not in text and "contributors" not in text.lower(), path
 
 
+def test_readme_links_work_on_pypi():
+    """The README is also the PyPI page, where relative links lead nowhere, so links
+    are absolute and the ones into this repository name files that exist."""
+    links = re.findall(r"\]\(([^)\s]+)\)", (ROOT / "README.md").read_text(encoding="utf-8"))
+    assert links
+    for link in links:
+        assert re.match(r"(https?://|mailto:|#)", link), f"relative link {link!r} breaks on PyPI"
+        m = re.match(r"https://github\.com/DeChuks-hub/llmshift/(?:blob|tree)/main/(.+)", link)
+        if m:
+            assert (ROOT / m.group(1)).exists(), link
+
+
 def _subparsers(parser):
     import argparse
 

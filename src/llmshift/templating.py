@@ -11,6 +11,8 @@ import json
 import re
 from typing import Any
 
+from .textutil import json_loads
+
 _TEMPLATE_RE = re.compile(r"\{\{\s*([A-Za-z_][\w]*(?:\s*(?:\.\s*[A-Za-z_][\w-]*|\[\s*\d+\s*\]|\[\s*['\"][^'\"]*['\"]\s*\]))*)\s*\}\}")
 _STEP_RE = re.compile(r"\.\s*([A-Za-z_][\w-]*)|\[\s*(\d+)\s*\]|\[\s*['\"]([^'\"]*)['\"]\s*\]")
 
@@ -37,8 +39,8 @@ def lookup(path: str, namespaces: dict) -> Any:
         if key is not None:
             if isinstance(node, str):
                 try:
-                    node = json.loads(node)
-                except ValueError:
+                    node = json_loads(node)
+                except (ValueError, RecursionError):
                     raise MissingVariable(path) from None
             if not isinstance(node, dict) or key not in node:
                 raise MissingVariable(path)

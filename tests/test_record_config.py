@@ -247,3 +247,118 @@ def test_pydantic_response_formats_are_recorded_as_json_schema(tmp_path):
     res = build_snapshot([str(path)])
     formats = [c.input["params"].get("response_format") for c in res.cases]
     assert len(formats) == 2 and all(f and f["json_schema"]["schema"]["required"] == ["category"] for f in formats)  # replayable
+
+
+class NotGiven:  # the class of openai.NOT_GIVEN (and of anthropic's, and of other generated SDKs)
+    def __bool__(self):
+        return False
+
+
+def _chunk(text=None, finish=None, index=0, refusal=None):
+    return Obj(model="gpt-4o", choices=[Obj(index=index, delta=Obj(content=text, refusal=refusal), finish_reason=finish)])
+
+
+class StreamingCompletions:
+    def __init__(self, chunks, error=None):
+        self.chunks, self.error = chunks, error
+
+    def create(self, **kwargs):
+        def gen():
+            yield from self.chunks
+            if self.error is not None:
+                raise self.error
+
+        return gen()
+
+
+def _records(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_mocked_client_and_sdk_sentinels(tmp_path):
+    """Apps test with unittest.mock: recording a MagicMock answer must finish at once,
+    and openai.NOT_GIVEN-style arguments are no value at all, never {}."""
+    import time
+    from unittest import mock
+
+    path = tmp_path / "m.jsonl"
+    client = wrap(mock.MagicMock(), path=path)
+    start = time.perf_counter()
+    client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}], temperature=NotGiven(), top_p=NotGiven())
+    assert time.perf_counter() - start < 5
+    rec = _records(path)[0]
+    assert rec["request"] == {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}
+
+
+def test_streams_that_did_not_finish_are_not_expected_answers(tmp_path):
+    path = tmp_path / "s.jsonl"
+    whole = [_chunk("Hel"), _chunk("lo", finish="stop")]
+    for chunks, error, stop_after in ((whole, None, None), (whole[:1], ConnectionError("reset by peer"), None), (whole[:1], None, None), (whole, None, 1)):
+        client = wrap(FakeClient(StreamingCompletions(chunks, error)), path=path)
+        stream = client.chat.completions.create(model="gpt-4o", stream=True, messages=[{"role": "user", "content": "q"}])
+        got = []
+        try:
+            for chunk in stream:
+                got.append(chunk)
+                if stop_after and len(got) >= stop_after:
+                    stream.close()  # the user pressed stop
+                    break
+        except ConnectionError:
+            pass
+    complete, dropped, cut, stopped = _records(path)
+    assert "error" not in complete and complete["response"]["choices"][0]["message"]["content"] == "Hello"
+    assert dropped["error"].startswith("ConnectionError") and "finish reason" in cut["error"] and "closed the stream" in stopped["error"]
+    assert [c.baseline_output for c in build_snapshot([str(path)]).cases] == ["Hello"]  # only the whole answer becomes a test
+
+
+def test_streamed_choices_refusals_and_later_edits(tmp_path):
+    path = tmp_path / "n.jsonl"
+    chunks = [_chunk("A", index=0), _chunk("B", index=1), _chunk("a", index=0, finish="stop"), _chunk(None, index=1, refusal="I can't."), _chunk("b", index=1, finish="stop")]
+    client = wrap(FakeClient(StreamingCompletions(chunks)), path=path)
+    messages = [{"role": "user", "content": "q"}]
+    stream = client.chat.completions.create(model="gpt-4o", stream=True, n=2, messages=messages)
+    messages.append({"role": "assistant", "content": "(typing...)"})  # the app edits its list while the stream runs
+    list(stream)
+    rec = _records(path)[0]
+    assert [c["message"]["content"] for c in rec["response"]["choices"]] == ["Aa", "Bb"]
+    assert rec["response"]["choices"][1]["message"]["refusal"] == "I can't."
+    assert rec["request"]["messages"] == [{"role": "user", "content": "q"}]
+
+
+def test_recording_failures_never_raise_even_as_errors(tmp_path):
+    blocked = tmp_path / "a_directory"
+    blocked.mkdir()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # pytest's filterwarnings = error, or python -W error
+        client = wrap(FakeClient(FakeCompletions()), path=blocked)
+        assert client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}]).choices[0].message.content == "echo hi"
+
+
+def test_a_broken_last_line_and_server_side_context(tmp_path):
+    from llmshift import fileio
+
+    path = tmp_path / "log.jsonl"
+    path.write_bytes(b'{"llmshift_record": 1, "request": {"model": "gpt-4o", "messages": [{"role"')  # a writer died mid-line
+    rec = {"llmshift_record": 1, "api": "chat", "request": {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}, "response": completion("hello").model_dump()}
+    fileio.append(path, (json.dumps(rec) + "\n").encode())
+    follow_up = {"llmshift_record": 1, "api": "responses", "request": {"model": "gpt-5", "input": "And my name?", "previous_response_id": "resp_1"}, "response": {"object": "response", "output": []}}
+    fileio.append(path, (json.dumps(follow_up) + "\n").encode())
+    res = build_snapshot([str(path)])
+    assert [c.baseline_output for c in res.cases] == ["hello"]  # the record after the broken line is whole
+    assert any("context stored by OpenAI" in reason for reason in res.stats.skipped)
+
+
+def test_the_wrapped_client_still_looks_like_the_client(tmp_path):
+    import copy
+
+    import pytest
+
+    path = tmp_path / "c.jsonl"
+    raw = FakeClient(FakeCompletions())
+    client = wrap(wrap(raw, path=path), path=path)  # wrapping twice records once
+    assert isinstance(client, FakeClient) and "chat" in dir(client)
+    assert isinstance(copy.copy(client), FakeClient)
+    client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}])
+    assert len(_records(path)) == 1
+    with pytest.raises(ValueError):
+        Recorder(tmp_path / "x.jsonl", sample_rate=float("nan"))

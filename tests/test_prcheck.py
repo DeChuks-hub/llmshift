@@ -176,18 +176,19 @@ def test_committed_changes_and_all_groups(repo, capsys):
 
 
 def test_pull_request_comment_is_created_then_updated(repo, capsys, server, monkeypatch):
-    comments: list[dict] = []
+    # Anyone can paste the marker: a comment by someone else is never taken over.
+    comments: list[dict] = [{"id": 5, "body": f"{gh.CHECK_MARKER}\nlooks fine to me", "user": {"login": "mallory", "type": "User"}}]
 
     def list_comments(req):
         return 200, comments
 
     def create(req):
-        comments.append({"id": 11, "body": req["json"]["body"]})
+        comments.append({"id": 11, "body": req["json"]["body"], "user": {"login": "github-actions[bot]", "type": "Bot"}})
         return 201, comments[-1]
 
     def update(req):
-        comments[0]["body"] = req["json"]["body"]
-        return 200, comments[0]
+        comments[-1]["body"] = req["json"]["body"]
+        return 200, comments[-1]
 
     server.route("GET", "/repos/acme/app/issues/7/comments", list_comments)
     server.route("POST", "/repos/acme/app/issues/7/comments", create)
@@ -199,9 +200,10 @@ def test_pull_request_comment_is_created_then_updated(repo, capsys, server, monk
     monkeypatch.setattr(server.httpd.RequestHandlerClass, "do_PATCH", lambda self: self._handle("PATCH"), raising=False)
     _edit(repo / "app" / "triage.py", "(one short sentence).'", "(one short sentence). Return raw JSON only.'")
     assert run(capsys, "check", "--model", "mock:nextgen", "--min-pass-rate", "0.7")[0] == 0
-    assert len(comments) == 1 and comments[0]["body"].startswith(gh.CHECK_MARKER) and "pass" in comments[0]["body"]
+    assert len(comments) == 2 and comments[1]["body"].startswith(gh.CHECK_MARKER) and "pass" in comments[1]["body"]
     assert run(capsys, "check", "--model", "mock:nextgen", "--min-pass-rate", "0.9")[0] == 1
-    assert len(comments) == 1 and "below 90%" in comments[0]["body"]  # edited, not a second comment
+    assert len(comments) == 2 and "below 90%" in comments[1]["body"]  # edited, not a second comment
+    assert comments[0]["body"].endswith("looks fine to me")
     methods = [r["method"] for r in server.requests]
     assert methods.count("POST") == 1 and methods.count("PATCH") == 1
     assert all(r["headers"]["authorization"] == "Bearer t0k" for r in server.requests)
@@ -220,3 +222,51 @@ def test_helpful_errors(tmp_path, monkeypatch, capsys, repo):
     assert code == 2 and "not a git repository" in err
     code, out, _ = run(capsys, "check", "--files", "p.txt", "--no-cache")
     assert code == 0 and "p.txt" in out and "pass rate 100%" in out
+
+
+def test_a_prompt_rewritten_to_a_few_words_is_tested(repo, capsys):
+    _edit(repo / "app" / "summaries.py", SUMMARY_PROMPT, "Be brief.")
+    _edit(repo / "prompts" / "summary.txt", SUMMARY_PROMPT, "Be brief.")
+    code, _, _ = run(capsys, "check", "--model", "mock:legacy", "--base", "main", "--min-pass-rate", "0", "--json", "short.json")
+    changed = [c for c in json.loads((repo / "short.json").read_text(encoding="utf-8"))["changes"] if c["status"] == "changed"]
+    assert code == 0 and [c["new_prompt"] for c in changed] == ["Be brief."] and changed[0]["summary"]["total"] == 4
+
+
+def test_a_group_holding_two_prompts_tracks_both(repo, capsys):
+    path = repo / ".llmshift" / "tests.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    summary = [r for r in rows if r["input"]["messages"][0]["content"] == SUMMARY_PROMPT]
+    triage = [r for r in rows if r["input"]["messages"][0]["content"] == TRIAGE_PROMPT]
+    for r in summary + triage[:1]:
+        r["group"] = "mixed"  # a hand-written group: 4 summary cases and 1 triage case
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    _edit(repo / "app" / "triage.py", "(one short sentence).'", "(one short sentence). Return raw JSON only.'")
+    code, _, _ = run(capsys, "check", "--model", "mock:legacy", "--base", "main", "--json", "mixed.json")
+    changes = {c["group"]: c for c in json.loads((repo / "mixed.json").read_text(encoding="utf-8"))["changes"]}
+    assert changes["mixed (prompt 2 of 2)"]["status"] == "changed" and changes["mixed (prompt 2 of 2)"]["summary"]["total"] == 1
+    assert "mixed (prompt 1 of 2)" not in changes  # the summary prompt was not edited
+
+
+def test_file_arguments_must_exist(repo, capsys):
+    code, _, err = run(capsys, "check", "--model", "mock:legacy", "--files", "app/triage_typo.py")
+    assert code == 2 and "app/triage_typo.py not found" in err
+    code, _, err = run(capsys, "check", "--model", "mock:legacy", "--files", "app")
+    assert code == 2 and "is a directory" in err
+
+
+def test_comment_markers_and_an_explicit_pull_request(repo, capsys, server, monkeypatch):
+    from llmshift.prcheck import comment_marker
+
+    assert comment_marker(None) == gh.CHECK_MARKER and comment_marker("services/a/tests.jsonl") == "<!-- llmshift:check key=services/a/tests.jsonl -->"
+    assert comment_marker("x --> <script>") == "<!-- llmshift:check key=x-script -->"
+    posted: list[dict] = []
+    server.route("GET", "/repos/acme/app/issues/9/comments", lambda r: [])
+    server.route("POST", "/repos/acme/app/issues/9/comments", lambda r: (posted.append(r["json"]) or 201, {"id": 1}))
+    for key in ("GITHUB_ACTIONS", "GITHUB_EVENT_PATH"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in {"GITHUB_REPOSITORY": "acme/app", "GITHUB_TOKEN": "t0k", "GITHUB_API_URL": server.url}.items():
+        monkeypatch.setenv(key, value)
+    _edit(repo / "app" / "triage.py", "(one short sentence).'", "(one short sentence). Return raw JSON only.'")
+    code, out, _ = run(capsys, "check", "--model", "mock:nextgen", "--min-pass-rate", "0.7", "--pr", "9", "--comment-key", "triage")
+    assert code == 0 and "commented on pull request #9" in out
+    assert len(posted) == 1 and posted[0]["body"].startswith("<!-- llmshift:check key=triage -->")

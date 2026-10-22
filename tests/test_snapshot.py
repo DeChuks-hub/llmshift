@@ -146,3 +146,46 @@ def test_select_fields_rules():
     value = {"id": "ORD-1", "ok": True, "count": 3, "confidence": 0.93, "ratio": 0.5, "price": 12.5, "note": "a longer free text note here", "tags": ["a", "b"], "created_at": "2026-01-01"}
     fields = select_fields(value)
     assert fields == {"$.id": "ORD-1", "$.ok": True, "$.count": 3, "$.price": 12.5, "$.tags": ["a", "b"]}
+
+
+def test_test_files_keep_line_separator_characters(tmp_path):
+    """U+2028, U+2029 and U+0085 stay unescaped in JSON strings; reading the test file
+    must not take them for line ends (str.splitlines() does)."""
+    from llmshift.testset import load_tests, save_tests
+
+    weird = "first second third\x85fourth"
+    log = tmp_path / "log.jsonl"
+    write_jsonl(log, [{"request": {"model": "gpt-4o", "messages": [{"role": "user", "content": weird}]}, "response": chat_response(weird)}])
+    cases = build_snapshot([str(log)]).cases
+    save_tests(cases, tmp_path / "tests.jsonl")
+    loaded = load_tests(tmp_path / "tests.jsonl")
+    assert [c.baseline_output for c in loaded] == [weird] and loaded[0].messages[-1]["content"] == weird
+
+
+def test_utf16_logs_corrupt_gzip_and_odd_tools(tmp_path):
+    """PowerShell 5.1's `>` writes UTF-16; a .gz can be cut short; tools come in odd
+    shapes. Each file or record that cannot be read is counted, never fatal."""
+    def rec(q, a, **kw):
+        return {"request": {"model": "gpt-4o", "messages": [{"role": "user", "content": q}], **kw}, "response": chat_response(a)}
+
+    (tmp_path / "ps.jsonl").write_bytes(("\n".join(json.dumps(rec(f"q{i}", f"a{i}")) for i in range(3)) + "\n").encode("utf-16"))
+    (tmp_path / "doc.json").write_bytes(json.dumps([rec("doc q", "doc a")]).encode("utf-16"))
+    (tmp_path / "excel.csv").write_bytes("input,output\nhello there,hi back\n".encode("utf-16"))
+    (tmp_path / "cut.jsonl.gz").write_bytes(gzip.compress(b'{"x": 1}\n')[:-12] + b"garbage!!!!!")
+    (tmp_path / "tools.jsonl").write_text(json.dumps(rec("t q", "t a", tools=[{"function": "x"}, {"name": 5}, 7])) + "\n" + json.dumps(rec("u q", "u a", tools=5)) + "\n", encoding="utf-8")
+    res = build_snapshot([str(tmp_path)])
+    assert sorted(c.baseline_output for c in res.cases) == ["a0", "a1", "a2", "doc a", "hi back", "t a", "u a"]
+    assert dict(res.stats.skipped) == {"unreadable file": 1}
+
+
+def test_null_items_in_arrays_do_not_fail_their_own_baseline():
+    from llmshift.checks import CheckContext, Sample, evaluate
+    from llmshift.testset import TestCase
+
+    outputs = ['{"rows": [["Alice", 30], ["Bob", null]]}', '{"tags": ["a"]}', '{"tags": [null]}']
+    stats = group_stats(outputs)
+    for out in outputs:
+        case = TestCase(id="c", input={"messages": [{"role": "user", "content": "q"}], "params": {"response_format": {"type": "json_object"}}}, baseline={"output": out})
+        for check in infer_checks(case.messages, case.params, out, [], stats):
+            result = evaluate(check, Sample(text=out), case, CheckContext())
+            assert result.status in ("pass", "skip"), (check["type"], result.message)

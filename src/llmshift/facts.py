@@ -31,10 +31,10 @@ _TIME_RES = [
     re.compile(r"\b(\d{1,2})()\s?([ap])\.?\s?m\b\.?", re.I),  # 9am, 5 p.m.
 ]
 _URL_RE = re.compile(r"\bhttps?://[^\s<>\"'`)\]]+", re.I)
-_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b")
+_EMAIL_RE = re.compile(r"\b[\w.+-]{1,64}@[\w-]+(?:\.[\w-]+)+\b")  # bounded: a long a-a-a... run stays linear
 _CODE_RE = re.compile(r"`([^`\n]{1,60})`")
 _FENCED_RE = re.compile(r"```.*?(```|$)", re.S)
-_LIST_MARKER_RE = re.compile(r"(?m)^(\s*)(\d{1,3}[.)])(\s+)")
+_LIST_MARKER_RE = re.compile(r"(?m)^([^\S\n]*)(\d{1,3}[.)])(\s+)")  # indentation never spans lines: no quadratic blank runs
 _ID_RES = [
     re.compile(r"(?<![\w-])(?:\+?1[ .-])?\(?\d{3}\)?[ .-]?\d{3}[ .-]\d{4}(?![\w-])"),  # phone (NANP)
     re.compile(r"(?<![\w-])\+\d{1,3}(?:[ .-]?\(?\d{1,4}\)?){2,5}(?![\w-])"),  # phone (international)

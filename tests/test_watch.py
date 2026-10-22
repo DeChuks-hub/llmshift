@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 
 import pytest
 
 from llmshift.alerts import AlertMessage, deliver, parse_destination
+from llmshift.providers.base import ProviderError
 from llmshift.providers.mock import MockProvider
 from llmshift.testset import TestCase
 from llmshift.watch import load_history, mcnemar_p, parse_every, run_watch, seconds_until
@@ -138,6 +140,66 @@ def test_github_issue_alert(server, monkeypatch):
     assert deliver(["github"], msg) == [("github", None)]
     assert deliver(["github"], msg) == [("github", None)]
     assert issues[0][0] == "issue" and issues[0][1]["labels"] == ["llmshift"] and issues[1][0] == "comment"
+
+
+def test_alerts_keep_secrets_and_never_ping_everyone(server, monkeypatch):
+    from llmshift.alerts import check_destinations
+
+    received = []
+    server.route("POST", "/hook", lambda r: (received.append(r) or (200, "ok")))
+    msg = AlertMessage(title="Drift <!channel>", severity="warning", model="m", lines=["answer was <@U123> & <https://evil.example|click>"])
+    assert all(err is None for _, err in deliver([f"slack:{server.url}/hook", {"type": "discord", "url": server.url + "/hook"}], msg))
+    slack, discord = received[0]["json"]["text"], received[1]["json"]
+    assert "<!channel>" not in slack and "&lt;!channel&gt;" in slack and "&amp;" in slack and "<https://evil" not in slack
+    assert discord["allowed_mentions"] == {"parse": []}
+    # A destination is named by its type in errors, never by its (secret) URL.
+    assert "SECRET" not in repr(deliver([{"url": "https://hooks.slack.com/services/T0SECRET"}], msg))
+    for key in ("GITHUB_TOKEN", "GH_TOKEN", "GITHUB_REPOSITORY", "LLMSHIFT_SMTP_HOST", "SLACK_WEBHOOK_URL"):
+        monkeypatch.delenv(key, raising=False)
+    problems = check_destinations(["slak:https://x", {"type": "slack", "url": "hooks.slack.com/services/T0SECRET"}, "github", "email:ops@example.com", "slack", f"file:{server.url}"])
+    assert [p.split(" ", 3)[:3] for p in problems] == [["unknown", "alert", "type"], ["the", "slack", "alert"], ["the", "github", "alert"], ["the", "email", "alert"], ["no", "URL", "for"]]
+    assert not any("SECRET" in p for p in problems)
+    # A POST whose answer timed out is not sent again: the alert may have arrived.
+    server.route("POST", "/slow", lambda r: (time.sleep(2.5) or (200, "ok")))
+    from llmshift.providers import http
+    before = len(server.requests)
+    with pytest.raises(ProviderError) as info:
+        http.post_json(f"{server.url}/slow", {"text": "x"}, timeout=1, max_retries=2, raw=True, idempotent=False)
+    assert info.value.code == "timeout" and len(server.requests) - before == 1
+
+
+def test_email_alerts_never_send_a_password_unencrypted(monkeypatch):
+    import socketserver
+    import threading
+
+    seen: list[str] = []
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            self.wfile.write(b"220 fake ESMTP\r\n")
+            for raw in self.rfile:
+                line = raw.decode("ascii", "replace").strip()
+                seen.append(line)
+                verb = line.split(" ", 1)[0].upper()
+                if verb in ("EHLO", "HELO"):
+                    self.wfile.write(b"250-fake\r\n250 AUTH PLAIN LOGIN\r\n")  # no STARTTLS
+                elif verb == "QUIT":
+                    self.wfile.write(b"221 bye\r\n")
+                    return
+                else:
+                    self.wfile.write(b"250 ok\r\n")
+
+    srv = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv("LLMSHIFT_SMTP_PASSWORD", "hunter2")
+        dest = {"type": "email", "to": "ops@example.com", "host": "127.0.0.1", "port": srv.server_address[1], "user": "alice"}
+        results = deliver([dest], AlertMessage(title="Drift", severity="critical", model="m"))
+        assert results[0][1] and "no encryption" in results[0][1]
+        assert not any(line.upper().startswith("AUTH") for line in seen)
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 def test_parse_destination_and_schedule():

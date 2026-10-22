@@ -25,7 +25,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from . import __version__
 from .registry import SEVERITY_ORDER, Lookup, Registry
+from .textutil import source_lines
 
 CODE_EXT = {
     ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".java", ".kt", ".kts", ".scala",
@@ -88,9 +90,10 @@ _MODEL_KEY_RE = re.compile(
     re.I,
 )
 _KEY_VALUE_RE = re.compile(
-    r"""(?P<key>[A-Za-z_][\w-]*)["']?\s*(?::|=|=>|:=)\s*(?P<q>["'`]?)(?P<val>[A-Za-z0-9][\w.:/@\-]{1,100})(?P=q)""",
+    # A key starts at a word start and is at most 64 long: a long word is not retried at every position.
+    r"""(?<![\w])(?P<key>[A-Za-z_][\w-]{0,63})["']?\s*(?::|=|=>|:=)\s*(?P<q>["'`]?)(?P<val>[A-Za-z0-9][\w.:/@\-]{1,255})(?P=q)""",
 )
-_LITERAL_RE = re.compile(r"""(["'`])((?:(?!\1).){2,120}?)\1""")
+_LITERAL_RE = re.compile(r"""(["'`])((?:(?!\1).){2,256}?)\1""")
 _BAD_VALUES = {
     "true", "false", "none", "null", "nil", "auto", "default", "string", "str", "int", "float", "model", "models", "name",
     "id", "text", "json", "object", "any", "required", "optional", "undefined", "env", "self", "this", "value", "type",
@@ -181,9 +184,29 @@ def has_trigger(text_lower: str) -> bool:
     return any(t in text_lower for t in _TRIGGERS)
 
 
+MAX_ID = 256  # a Bedrock inference-profile ARN alone is over 100 characters
+# provider:model as pydantic-ai, LangChain's init_chat_model, LiteLLM and llmshift write it
+_SPEC_PREFIX_RE = re.compile(
+    r"^(?:openai(?:-chat|-responses)?|anthropic|gemini|google(?:-gla|-vertex|_genai|_vertexai)?|vertex(?:ai)?|azure(?:_openai)?"
+    r"|mistral(?:ai)?|cohere|xai|deepseek|openrouter|bedrock(?:_converse)?|groq|ollama|together|fireworks|huggingface):",
+    re.I,
+)
+_ARN_MODEL_RE = re.compile(r"^arn:aws[\w-]*:bedrock:[^/\s]*/(?P<model>[^/\s]+)$", re.I)
+# Families whose real ids are always lower case: "GPT-4" or "Claude-3" in text is a label.
+_LOWERCASE_FAMILY_RE = re.compile(r"(?i)^(?:gpt-|o\d|claude-|gemini-|text-|dall-e|whisper|tts-|chatgpt)")
+
+
 def looks_like_known_model(value: str, *, in_model_context: bool = False) -> bool:
     v = value.strip()
-    if not 2 <= len(v) <= 120 or " " in v or "\n" in v:
+    if not 2 <= len(v) <= MAX_ID or " " in v or "\n" in v:
+        return False
+    spec = _SPEC_PREFIX_RE.match(v)
+    if spec:
+        return looks_like_known_model(v[spec.end():], in_model_context=True)
+    arn = _ARN_MODEL_RE.match(v)
+    if arn:
+        return looks_like_known_model(arn.group("model"), in_model_context=True)
+    if len(v) > 120:
         return False
     if in_model_context and _BARE_O_SERIES_RE.fullmatch(v):
         return True
@@ -192,9 +215,15 @@ def looks_like_known_model(value: str, *, in_model_context: bool = False) -> boo
     return bool(KNOWN_RE.fullmatch(v)) and not _NOT_MODEL_SUFFIX_RE.search(v)
 
 
+def is_label(value: str) -> bool:
+    """A display name such as "GPT-4" or "Claude-3": the API ids of these families are
+    always lower case, so a bare string with capitals is text, not a model id."""
+    return value != value.lower() and bool(_LOWERCASE_FAMILY_RE.match(value))
+
+
 def plausible_model_value(value: str) -> bool:
     v = value.strip()
-    if not v or len(v) > 100 or " " in v:
+    if not v or len(v) > MAX_ID or " " in v:
         return False
     if v.lower() in _BAD_VALUES or v.isdigit():
         return False
@@ -284,6 +313,7 @@ class ScanResult:
 
     def to_dict(self) -> dict:
         return {
+            "llmshift_version": __version__,
             "root": self.root,
             "files_scanned": self.files_scanned,
             "registry_updated": self.registry_updated,
@@ -584,18 +614,22 @@ class _PyVisitor(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, str) and id(node) not in self.docstrings:
             key = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
-            if key not in self.claimed and looks_like_known_model(node.value.strip()):
+            if key not in self.claimed and looks_like_known_model(node.value.strip()) and not is_label(node.value.strip()):
                 self._add(node, node.value.strip(), "string")
 
 
 def scan_python(text: str, llm_hint: bool | None = None) -> list[tuple[int, int, str, str, str | None, str | None]]:
+    from .textutil import parse_python
+
     llm_hint = has_llm_hint(text) if llm_hint is None else llm_hint
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    tree = parse_python(text)
+    if tree is None:  # a syntax error, newer syntax than this Python, or too deep to parse
         return scan_generic(text, code=True, llm_hint=llm_hint)
-    visitor = _PyVisitor(text.splitlines(), llm_hint=llm_hint)
-    visitor.visit(tree)
+    visitor = _PyVisitor(source_lines(text), llm_hint=llm_hint)
+    try:
+        visitor.visit(tree)
+    except RecursionError:  # e.g. a 500-branch elif ladder: read it line by line instead
+        return scan_generic(text, code=True, llm_hint=llm_hint)
     # The catch-all string pass runs during traversal; drop duplicates it produced.
     seen = set()
     out = []
@@ -612,24 +646,99 @@ def scan_python(text: str, llm_hint: bool | None = None) -> list[tuple[int, int,
 
 _COMMENT_RE = re.compile(r"^\s*(//|#(?!!)|/\*|\*\s|\*$|<!--)")
 
+# Comment syntax by file type: a model named in a comment is not one the code calls.
+_HASH, _SLASH, _BLOCK, _SEMI, _DASH = "#", "//", "/*", ";", "--"
+_C_LIKE = (_SLASH, _BLOCK)
+COMMENT_SYNTAX: dict[str, tuple[str, ...]] = {
+    **dict.fromkeys((".yaml", ".yml", ".toml", ".env", ".sh", ".bash", ".zsh", ".rb", ".r", ".jl", ".ex", ".exs", ".ps1", ".tfvars", "dockerfile", "makefile", "procfile"), (_HASH,)),
+    **dict.fromkeys((".ini", ".cfg", ".conf"), (_HASH, _SEMI)),
+    ".properties": (_HASH, "!"),
+    **dict.fromkeys((".tf", ".hcl"), (_HASH, *_C_LIKE)),
+    **dict.fromkeys((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".java", ".kt", ".kts", ".scala", ".cs", ".rs", ".swift", ".dart",
+                     ".c", ".cc", ".cpp", ".h", ".hpp", ".m", ".jsonc", ".json5", ".vue", ".svelte", ".astro"), _C_LIKE),
+    ".php": (_HASH, *_C_LIKE),
+    ".sql": (_DASH, _BLOCK),
+    ".lua": (_DASH,),
+}
+
+
+def is_llmshift_output(path: Path, text: str) -> bool:
+    """A report llmshift wrote (JSON, SARIF, JUnit): the models it names are its findings,
+    not models the code calls, so scanning it would only echo earlier results."""
+    if path.suffix.lower() not in (".json", ".sarif", ".xml"):
+        return False
+    head = text[:4096]
+    return '"llmshift_version"' in head or '<testsuites name="llmshift"' in head or bool(re.search(r'"driver":\s*\{\s*"name":\s*"llmshift"', head))
+
+
+def comment_syntax(path: Path) -> tuple[str, ...] | None:
+    name = path.name.lower()
+    if name.startswith(".env"):
+        return COMMENT_SYNTAX[".env"]
+    return COMMENT_SYNTAX.get(path.suffix.lower()) or COMMENT_SYNTAX.get(name)
+
+
+def strip_comment(line: str, markers: tuple[str, ...], state: dict) -> str:
+    """The line without its comment (text outside quotes after a marker), and without the
+    part inside a /* block */ that `state` carries from line to line. "#" and ";" count
+    only at the start or after a space, so a URL's #fragment or a value's ";" stays."""
+    out: list[str] = []
+    i, n, quote = 0, len(line), ""
+    while i < n:
+        if state.get("block"):
+            end = line.find("*/", i)
+            if end < 0:
+                break
+            state["block"] = False
+            out.append(" " * (end + 2 - i))  # keep the columns of what follows
+            i = end + 2
+            continue
+        ch = line[i]
+        if quote:
+            if ch == "\\":
+                out.append(line[i : i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'`":
+            quote = ch
+        else:
+            if _BLOCK in markers and line.startswith("/*", i):
+                state["block"] = True
+                out.append("  ")
+                i += 2
+                continue
+            for marker in markers:
+                if marker != _BLOCK and line.startswith(marker, i) and (marker not in (_HASH, _SEMI, "!") or i == 0 or line[i - 1].isspace()):
+                    return "".join(out)
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
 
 def scan_generic(
-    text: str, *, code: bool, shell: bool = False, llm_hint: bool | None = None
+    text: str, *, code: bool, shell: bool = False, llm_hint: bool | None = None, comments: tuple[str, ...] | None = None
 ) -> list[tuple[int, int, str, str, str | None, str | None]]:
     """Scan non-Python text line by line. `shell`: values may be unquoted (MODEL=gpt-4o)
-    and bare model IDs count (--model gpt-4o)."""
+    and bare model IDs count (--model gpt-4o). `comments`: the file type's comment
+    markers (see COMMENT_SYNTAX); text in comments is not scanned."""
     llm_hint = has_llm_hint(text) if llm_hint is None else llm_hint
     out = []
-    for lineno, line in enumerate(text.splitlines(), 1):
+    block: dict = {}
+    for lineno, line in enumerate(source_lines(text), 1):
         if len(line) > MAX_LINE:
             if has_trigger(line.lower()):
                 found: dict[str, int] = {}
                 for m in KNOWN_SEARCH_RE.finditer(line):
-                    if not _NOT_MODEL_SUFFIX_RE.search(m.group(0)):
-                        found.setdefault(m.group(0), m.start() + 1)
+                    val = m.group(0).rstrip(".-:")  # the end of a sentence is not part of the id
+                    if not _NOT_MODEL_SUFFIX_RE.search(val) and not is_label(val):
+                        found.setdefault(val, m.start() + 1)
                 out.extend((lineno, col, val, "string" if code else "config", None, None) for val, col in found.items())
             continue
-        if code and _COMMENT_RE.match(line):
+        if comments:
+            line = strip_comment(line, comments, block)
+        elif code and _COMMENT_RE.match(line):
             continue
         lower = line.lower()
         keyed = "model" in lower or "engine" in lower or "deployment" in lower
@@ -650,12 +759,12 @@ def scan_generic(
                 hits.setdefault(val, (m.start("val") + 1, "call" if code else "config"))
         for m in _LITERAL_RE.finditer(line) if triggered else ():
             val = m.group(2).strip()
-            if looks_like_known_model(val):
+            if looks_like_known_model(val) and (model_ctx or not is_label(val)):
                 hits.setdefault(val, (m.start(2) + 1, "call" if (code and model_ctx) else ("string" if code else "config")))
         if (shell or not code) and triggered:
             for m in KNOWN_SEARCH_RE.finditer(line):
-                val = m.group(0)
-                if not _NOT_MODEL_SUFFIX_RE.search(val):
+                val = m.group(0).rstrip(".-:")  # the end of a sentence is not part of the id
+                if not _NOT_MODEL_SUFFIX_RE.search(val) and not is_label(val):
                     hits.setdefault(val, (m.start() + 1, "string" if code else "config"))
         for val, (col, kind) in hits.items():
             out.append((lineno, col, val, kind, None, None))
@@ -699,7 +808,7 @@ def scan_notebook(text: str) -> list[tuple[int, int, str, str, str | None, str |
     if v3:
         cells = [c for ws in nb.get("worksheets") or [] if isinstance(ws, dict) for c in ws.get("cells") or []]
     cells = [c for c in cells or [] if isinstance(c, dict)]
-    key_lines = [] if v3 else [(n, bool(m.group(1))) for n, ln in enumerate(text.splitlines(), 1) for m in [_SOURCE_KEY_RE.match(ln)] if m]
+    key_lines = [] if v3 else [(n, bool(m.group(1))) for n, ln in enumerate(source_lines(text), 1) for m in [_SOURCE_KEY_RE.match(ln)] if m]
     if len(key_lines) != len(cells):
         key_lines = []
     code_cells = [(idx, cell) for idx, cell in enumerate(cells, 1) if cell.get("cell_type") == "code"]
@@ -752,7 +861,7 @@ def scan_paths(
         text, skipped = _read_text(path)
         if skipped:
             result.errors.append(f"{rel}: {skipped}")
-        if text is None:
+        if text is None or is_llmshift_output(path, text):
             continue
         result.files_scanned += 1
         hint = platform_hint(text)
@@ -765,7 +874,7 @@ def scan_paths(
             else:
                 is_code = ext in CODE_EXT
                 shell = ext in (".sh", ".bash", ".zsh")
-                items = [i + (None, None) for i in scan_generic(text, code=is_code, shell=shell)]
+                items = [i + (None, None) for i in scan_generic(text, code=is_code, shell=shell, comments=comment_syntax(path))]
         except RecursionError:
             result.errors.append(f"{rel}: too deeply nested to analyse")
             continue
@@ -773,7 +882,7 @@ def scan_paths(
             message = str(exc) if isinstance(exc, ValueError) else f"could not analyse ({exc.__class__.__name__}: {exc})"
             result.errors.append(f"{rel}: {message}")
             continue
-        lines = text.splitlines()
+        lines = source_lines(text)
         for line, col, value, kind, call, via, cell, file_line in items:
             key = (rel, line, value, cell)
             if key in seen:

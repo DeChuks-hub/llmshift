@@ -21,9 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from . import console as con
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import ProviderError
+from .textutil import json_loads, jsonl_lines
 
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".json", ".jsonl", ".ndjson"}
 TEXT_FIELDS = ("text", "content", "body", "page_content", "chunk", "document", "passage", "summary")
@@ -75,6 +77,7 @@ class EmbeddingReport:
 
     def to_dict(self) -> dict:
         return {
+            "llmshift_version": __version__,
             "kind": "embeddings",
             "old": self.old,
             "new": self.new,
@@ -166,17 +169,17 @@ def _first_field(record: dict, names: tuple) -> Any:
 def _json_records(text: str, suffix: str) -> list:
     if suffix in (".jsonl", ".ndjson"):
         out = []
-        for line in text.splitlines():
+        for line in jsonl_lines(text):
             line = line.strip()
             if line:
                 try:
-                    out.append(json.loads(line))
-                except ValueError:
+                    out.append(json_loads(line))
+                except (ValueError, RecursionError):
                     continue
         return out
     try:
-        data = json.loads(text)
-    except ValueError:
+        data = json_loads(text)
+    except (ValueError, RecursionError):
         return []
     if isinstance(data, dict):
         for name in LIST_FIELDS:
@@ -275,7 +278,7 @@ def load_queries(path: str) -> list[str]:
     if suffix in (".json", ".jsonl", ".ndjson"):
         queries = [q for rec in _json_records(text, suffix) for q in _query_strings(rec)]
     else:
-        queries = text.splitlines()
+        queries = jsonl_lines(text)
     return _dedupe(queries)
 
 
@@ -289,8 +292,8 @@ def _embedding_inputs(record: Any) -> list[str]:
         cand = record.get(key)
         if isinstance(cand, str):
             try:
-                cand = json.loads(cand)
-            except ValueError:
+                cand = json_loads(cand)
+            except (ValueError, RecursionError):
                 cand = None
         if isinstance(cand, dict) and "input" in cand:
             request = cand
@@ -357,11 +360,13 @@ def _unit(vector: Any, spec: str) -> list[float]:
 
 def embed_all(provider: Any, texts: list[str]) -> tuple[list[list[float]], float]:
     """Unit vectors for `texts` (in batches) and the seconds it took."""
+    from .runner import interruptible_map
+
     vectors: list[list[float]] = []
     start = time.perf_counter()
-    for i in range(0, len(texts), BATCH):
-        batch = texts[i : i + BATCH]
-        got = provider.embed(batch)
+    batches = [texts[i : i + BATCH] for i in range(0, len(texts), BATCH)]
+    answers = interruptible_map(provider.embed, batches, 1)  # one at a time, off the main thread: Ctrl+C works
+    for batch, got in zip(batches, answers):
         if not isinstance(got, list) or len(got) != len(batch):
             count = len(got) if isinstance(got, list) else "no"
             raise ProviderError(f"{provider.spec} returned {count} embeddings for {len(batch)} texts", code="invalid_response")
@@ -624,6 +629,8 @@ def cmd_embeddings(args: argparse.Namespace, cfg: dict) -> int:
 
 
 def register(sub: Any) -> None:
+    from . import cli
+
     p = sub.add_parser(
         "embeddings",
         help="see how search results change before switching embedding models",
@@ -636,7 +643,7 @@ def register(sub: Any) -> None:
     q = p.add_mutually_exclusive_group()
     q.add_argument("--queries", metavar="FILE", help="real search queries: one per line, or JSON/JSONL records")
     q.add_argument("--queries-from", nargs="+", action="extend", metavar="LOGS", help="take queries from embedding requests in usage logs")
-    p.add_argument("--k", type=int, default=10, help="how many top results to compare per query (default 10)")
+    p.add_argument("--k", type=cli.positive_int, default=10, help="how many top results to compare per query (default 10)")
     p.add_argument("--max-docs", type=int, default=1000, help="document chunks to embed for the comparison (default 1000)")
     p.add_argument("--max-queries", type=int, default=200, help="queries to compare (default 200)")
     p.add_argument("--chunk-chars", type=int, default=1500, help="split documents into chunks of this many characters (default 1500)")

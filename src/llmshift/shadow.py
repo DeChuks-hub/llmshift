@@ -30,7 +30,7 @@ from . import console as con
 from . import fileio
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import Response
-from .textutil import stable_hash
+from .textutil import json_loads, jsonl_lines
 
 DEFAULT_PATH = "logs/llmshift-shadow.jsonl"
 IDLE_SECONDS = 10.0  # a worker with nothing to do for this long stops (a new one starts with the next copy)
@@ -52,11 +52,29 @@ def _reset_after_fork() -> None:
         shadow._queue = queue.SimpleQueue()
         shadow._threads = []
         shadow._pending = 0
+        shadow._pending_bytes = 0
 
 
 atexit.register(_close_all)
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_after_fork)
+
+
+MAX_PENDING_BYTES = 64 * 1024 * 1024  # copies waiting for a slow shadow model, in characters of text
+
+
+def _approx_size(value: Any, limit: int) -> int:
+    """The characters of text in JSON-like data, counted up to `limit`."""
+    total, stack = 0, [value]
+    while stack and total <= limit:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
 
 
 def _canonical(api: str, request: dict) -> dict | None:
@@ -111,6 +129,7 @@ class Shadow:
         self._rng = random.Random(seed)
         self._lock = threading.Lock()
         self._pending = 0
+        self._pending_bytes = 0
         self._provider: Any = None
         self._provider_error: str | None = None
         self._warned = False
@@ -141,11 +160,18 @@ class Shadow:
                     self.stats["dropped"] += 1
                     return
                 self._pending += 1
-            canonical, answer = _canonical(api, request), _answer(api, response)
+            from .record import to_dict
+
+            canonical, answer = _canonical(api, to_dict(request) or {}), _answer(api, response)
             if canonical is None or answer is None:
                 self._done(None)
                 return
+            size = _approx_size(canonical, MAX_PENDING_BYTES)
             with self._lock:
+                if self._pending_bytes + size > MAX_PENDING_BYTES:  # copies wait in memory: a slow model must not fill it
+                    self.stats["dropped"] += 1
+                    self._pending = max(0, self._pending - 1)
+                    return
                 if len(self._threads) < self.max_workers:
                     try:
                         worker = threading.Thread(target=self._work, name="llmshift-shadow", daemon=True)
@@ -154,7 +180,8 @@ class Shadow:
                     except RuntimeError:  # "can't start new thread": fine while another worker runs
                         if not self._threads:
                             raise
-                self._queue.put((api, canonical, answer))
+                self._pending_bytes += size
+                self._queue.put((api, canonical, answer, size))
         except Exception as exc:  # shadowing must never break the app
             self._done(exc)
 
@@ -180,14 +207,29 @@ class Shadow:
             from .providers import resolve
 
             try:
-                self._provider = resolve(self.model, self.config or {}) if isinstance(self.model, str) else self.model
+                config = self.config
+                if config is None and isinstance(self.model, str):  # providers defined in the project's llmshift.yaml
+                    from .config import load_config
+
+                    try:
+                        config = load_config(None)
+                    except Exception:
+                        config = {}
+                self._provider = resolve(self.model, config or {}) if isinstance(self.model, str) else self.model
             except Exception as exc:
                 self._provider_error = str(exc)
         if self._provider is None:
             raise RuntimeError(self._provider_error or "shadow model unavailable")
         return self._provider
 
-    def _run(self, api: str, request: dict, answer: dict) -> None:
+    def _run(self, api: str, request: dict, answer: dict, size: int = 0) -> None:
+        try:
+            self._send(api, request, answer)
+        finally:
+            with self._lock:
+                self._pending_bytes = max(0, self._pending_bytes - size)
+
+    def _send(self, api: str, request: dict, answer: dict) -> None:
         shadow: dict = {"spec": self.spec}
         try:
             start = time.perf_counter()
@@ -230,7 +272,10 @@ class Shadow:
                 self.stats["errors"] += 1
         if exc is not None and not self._warned:
             self._warned = True
-            warnings.warn(f"llmshift shadow: {exc}", RuntimeWarning, stacklevel=2)
+            try:  # under -W error a warning would raise into the app (or end this worker)
+                warnings.warn(f"llmshift shadow: {exc}", RuntimeWarning, stacklevel=2)
+            except Exception:
+                pass
 
     def flush(self, timeout: float = 30.0) -> bool:
         """Wait (up to `timeout` seconds) until the copies in flight are written."""
@@ -255,15 +300,16 @@ class Shadow:
 
 
 class ReplayProvider:
-    """Answers each request with the shadow answer recorded for it."""
+    """Answers each test case with the shadow answer recorded with it. By case, not by
+    request: the same question asked twice has two real answers and two shadow answers,
+    and each pair must stay together whatever order the runner's threads take."""
 
     kind = "replay"
 
-    def __init__(self, spec: str, answers: dict[str, list[Response]]):
+    def __init__(self, spec: str, answers: dict[str, Response]):
         self.model = spec
         self.name = "shadow"
-        self._answers = answers
-        self._lock = threading.Lock()
+        self._answers = answers  # case id -> shadow answer
         self.adaptations: list[str] = []
 
     @property
@@ -273,11 +319,11 @@ class ReplayProvider:
     def identity(self) -> dict:
         return {"kind": "replay", "model": self.model}
 
+    def complete_case(self, case: Any, request: dict) -> Response:
+        return self._answers.get(case.id) or Response(error="no shadow answer recorded for this request", error_code="missing")
+
     def complete(self, request: dict) -> Response:
-        key = stable_hash({"messages": request.get("messages"), "params": request.get("params") or {}}, 24)
-        with self._lock:
-            queue = self._answers.get(key) or []
-            return queue.pop(0) if queue else Response(error="no shadow answer recorded for this request", error_code="missing")
+        return Response(error="shadow answers are replayed per test case", error_code="missing")
 
 
 def load_shadow_logs(paths: list[str]) -> list[dict]:
@@ -285,12 +331,12 @@ def load_shadow_logs(paths: list[str]) -> list[dict]:
 
     records = []
     for path in iter_files(paths):
-        for n, line in enumerate(path.read_text(encoding="utf-8-sig", errors="replace").splitlines(), 1):
+        for n, line in enumerate(jsonl_lines(path.read_text(encoding="utf-8-sig", errors="replace")), 1):
             if not line.strip():
                 continue
             try:
-                rec = json.loads(line)
-            except ValueError:
+                rec = json_loads(line)
+            except (ValueError, RecursionError):
                 continue
             if isinstance(rec, dict) and rec.get("llmshift_shadow") and isinstance(rec.get("request"), dict):
                 rec["_where"] = f"{path.as_posix()}:{n}"
@@ -298,9 +344,9 @@ def load_shadow_logs(paths: list[str]) -> list[dict]:
     return records
 
 
-def build_cases(records: list[dict]) -> tuple[list, dict[str, list[Response]], str]:
-    """Test cases (real answers as baselines, checks inferred as in snapshot) and the
-    shadow answers to replay; plus the shadow model's name."""
+def build_cases(records: list[dict]) -> tuple[list, dict[str, Response], str]:
+    """Test cases (real answers as baselines, checks inferred as in snapshot), the
+    shadow answer for each case id, and the shadow model's name."""
     from . import messages as msgs
     from .infer import group_stats, infer_checks
     from .testset import TestCase, case_id_for
@@ -332,7 +378,7 @@ def build_cases(records: list[dict]) -> tuple[list, dict[str, list[Response]], s
                 usage=shadow.get("usage") or {}, latency_ms=shadow.get("latency_ms"),
                 error=shadow.get("error"), error_code="shadow_error" if shadow.get("error") else None,
             )
-            answers.setdefault(stable_hash(req, 24), []).append(resp)
+            answers[cid] = resp
     return cases, answers, ", ".join(sorted(specs)) or "shadow"
 
 
@@ -375,16 +421,18 @@ def cmd_shadow_report(args: Any, cfg: dict) -> int:
 
 
 def register(sub: Any) -> None:
+    from . import cli
+
     p = sub.add_parser("shadow", help="report on live traffic shadowed to a new model (see llmshift.record.wrap)")
     ssub = p.add_subparsers(dest="shadow_command", metavar="<report>")
     ssub.required = True
     rp = ssub.add_parser("report", help="check the shadow answers against the real ones")
     rp.add_argument("logs", nargs="*", help=f"shadow logs (default {DEFAULT_PATH})")
-    rp.add_argument("--min-pass-rate", type=float, help="exit 1 below this pass rate (default from config)")
+    rp.add_argument("--min-pass-rate", type=cli.rate_arg, help="exit 1 below this pass rate (default from config)")
     rp.add_argument("--judge", metavar="MODEL", help="LLM judge for meaning checks")
     rp.add_argument("--format", choices=["table", "json", "markdown"], default="table")
     rp.add_argument("--html", nargs="?", const="", metavar="FILE", help="also write an HTML report")
-    rp.add_argument("--show", help="how many changed cases to print (number or 'all')")
+    rp.add_argument("--show", type=cli.show_arg, help="how many changed cases to print (number or 'all')")
     rp.add_argument("--verbose", "-v", action="store_true")
-    rp.add_argument("--concurrency", type=int)
+    rp.add_argument("--concurrency", type=cli.positive_int)
     rp.set_defaults(func=cmd_shadow_report)

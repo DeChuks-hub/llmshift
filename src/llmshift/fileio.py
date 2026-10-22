@@ -9,7 +9,9 @@ data itself.
 
 from __future__ import annotations
 
+import errno
 import os
+import secrets
 import time
 from pathlib import Path
 
@@ -45,14 +47,35 @@ else:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
+def temp_file(directory: str | os.PathLike, prefix: str = ".tmp-", suffix: str = "") -> tuple[int, str]:
+    """A new file in `directory`, open for writing: (fd, path), as tempfile.mkstemp
+    returns. A folder that refuses new files fails at once: on Windows, mkstemp before
+    Python 3.13 takes that PermissionError for a name clash and retries ~2 billion times."""
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    for _ in range(100):
+        name = os.path.join(str(directory), f"{prefix}{secrets.token_hex(8)}{suffix}")
+        try:
+            return os.open(name, flags, 0o600), name
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, "could not create a temporary file", str(directory))
+
+
 def append(path: str | os.PathLike, data: bytes) -> None:
-    """Append `data` (complete lines) without interleaving with other writers."""
+    """Append `data` (complete lines) without interleaving with other writers. When the
+    file ends mid-line (a writer killed, or a full disk), a new line is started first,
+    so the broken line never swallows this record."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(target), os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    fd = os.open(str(target), os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
     try:
         _lock(fd)
         try:
+            end = os.lseek(fd, 0, os.SEEK_END)
+            if end > 0:
+                os.lseek(fd, end - 1, os.SEEK_SET)
+                if os.read(fd, 1) != b"\n":
+                    data = b"\n" + data
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view):]

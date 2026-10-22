@@ -25,6 +25,33 @@ class RunAborted(RuntimeError):
 _REPEATING = ("connection_error", "redirect")
 
 
+def interruptible_map(fn: Callable[[Any], Any], items: Any, concurrency: int = 4) -> list:
+    """`pool.map` that Ctrl+C stops at once: it waits in short slices (an untimed wait
+    blocks Ctrl+C on Windows) and, when interrupted, drops queued work, tells requests
+    in flight to stop retrying and ends child processes. Results keep the input order."""
+    items = list(items)
+    results: list = [None] * len(items)
+    pool = ThreadPoolExecutor(max_workers=max(1, int(concurrency)))
+    interrupted = False
+    try:
+        index = {pool.submit(fn, item): i for i, item in enumerate(items)}
+        pending = set(index)
+        while pending:
+            done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
+            for fut in done:
+                results[index[fut]] = fut.result()
+    except KeyboardInterrupt:
+        interrupted = True
+        http.CANCEL.set()
+        kill_running()
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    finally:
+        if not interrupted:
+            pool.shutdown(wait=True)
+    return results
+
+
 def build_request(case: TestCase, patch: dict | None = None, overrides: dict | None = None) -> dict:
     messages = msgs.apply_patch(case.messages, patch)
     params = dict(case.params)
@@ -81,7 +108,12 @@ def run_cases(
                     state["ok"] += 1
                 return case.id, hit
         try:
-            resp = run_agent(provider, case, request) if case.agent else provider.complete(request)
+            if case.agent:
+                resp = run_agent(provider, case, request)
+            elif hasattr(provider, "complete_case"):  # a replay answers by test case, not by request
+                resp = provider.complete_case(case, request)
+            else:
+                resp = provider.complete(request)
         except ProviderError as exc:
             resp = Response.failure(exc)
             if exc.fatal or exc.code in _REPEATING:

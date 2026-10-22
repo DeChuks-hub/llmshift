@@ -20,9 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import __version__
 from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
+from .textutil import source_lines
 
 MIN_PROMPT = 15  # shorter strings are not prompts
 LIVES_RATIO = 0.85  # how close a string in the base version must be to the recorded prompt
@@ -54,7 +56,10 @@ def _unescape(body: str) -> str:
                 return esc
         return _ESCAPES.get(esc, esc)
 
-    return re.sub(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", sub, body, flags=re.S)
+    text = re.sub(r"\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", sub, body, flags=re.S)
+    if re.search("[\ud800-\udfff]", text):  # "😀" is one emoji written as a surrogate pair
+        text = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+    return text
 
 
 def _quoted_strings(text: str) -> list[str]:
@@ -76,6 +81,10 @@ def _quoted_strings(text: str) -> list[str]:
     return out
 
 
+def _is_add(node: ast.AST) -> bool:
+    return isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+
+
 def _render(node: ast.AST) -> str | None:
     """The runtime text of a Python string expression (f-string fields kept as {expr})."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -91,22 +100,38 @@ def _render(node: ast.AST) -> str | None:
                 except Exception:
                     parts.append("{...}")
         return "".join(parts)
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left, right = _render(node.left), _render(node.right)
-        if left is not None and right is not None:
-            return left + right
+    if _is_add(node):  # "a" + "b" + "c" is ((a + b) + c): walk down the left side, not recursively
+        pieces = []
+        while _is_add(node):
+            right = _render(node.right)  # type: ignore[attr-defined]
+            if right is None:
+                return None
+            pieces.append(right)
+            node = node.left  # type: ignore[attr-defined]
+        left = _render(node)
+        if left is None:
+            return None
+        pieces.append(left)
+        return "".join(reversed(pieces))
     return None
 
 
 def _python_nodes(text: str) -> list[tuple[str, int, int]] | None:
     """(string, first line, last line) for each string expression in Python source."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError):
+    from .textutil import parse_python
+
+    tree = parse_python(text)
+    if tree is None:
         return None
+    inner = {id(n.left) for n in ast.walk(tree) if _is_add(n)}  # a chain is rendered once, from its top
     out: list[tuple[str, int, int]] = []
     for node in ast.walk(tree):
-        value = _render(node)
+        if id(node) in inner and _is_add(node):
+            continue
+        try:
+            value = _render(node)
+        except RecursionError:  # e.g. a right-nested a + (b + (c + ...)) thousands deep
+            value = None
         if value is not None:
             out.append((value, getattr(node, "lineno", 0), getattr(node, "end_lineno", None) or getattr(node, "lineno", 0)))
     return out
@@ -118,15 +143,16 @@ def _python_strings(text: str) -> list[str] | None:
 
 
 def _data_strings(value: Any, out: list[str]) -> None:
-    if isinstance(value, str):
-        out.append(value)
-    elif isinstance(value, dict):
-        for k, v in value.items():
-            _data_strings(k, out)
-            _data_strings(v, out)
-    elif isinstance(value, list):
-        for v in value:
-            _data_strings(v, out)
+    stack = [value]  # iterative: data files can nest deeper than Python's recursion limit
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            for k, v in reversed(list(item.items())):
+                stack.extend((v, k))
+        elif isinstance(item, list):
+            stack.extend(reversed(item))
 
 
 def prompt_candidates(text: str, path: str) -> list[str]:
@@ -145,10 +171,12 @@ def prompt_candidates(text: str, path: str) -> list[str]:
         except Exception:
             found = None
     elif suffix == ".json":
+        from .textutil import json_loads
+
         try:
             found = []
-            _data_strings(json.loads(text), found)
-        except ValueError:
+            _data_strings(json_loads(text), found)
+        except (ValueError, RecursionError):
             found = None
     elif suffix in TEXT_SUFFIXES:
         found = [text]
@@ -198,7 +226,7 @@ def _spans(text: str, path: str) -> list[tuple[str, int, int]]:
         return [(text, 1, text.count("\n") + 1)] if len(text.strip()) >= MIN_PROMPT else []
     nodes = _python_nodes(text) if Path(path).suffix.lower() in (".py", ".pyi") else None
     if nodes is None:  # other languages and data files: place each string by its first line
-        lines = text.splitlines()
+        lines = source_lines(text)
         nodes = []
         for value in prompt_candidates(text, path):
             probe = next((ln.strip() for ln in value.splitlines() if ln.strip()), "")[:40]
@@ -210,6 +238,54 @@ def _spans(text: str, path: str) -> list[tuple[str, int, int]]:
     return [n for n in nodes if len(n[0].strip()) >= MIN_PROMPT]
 
 
+def _python_slots(text: str) -> dict[str, list[str]] | None:
+    """Strings by the place that holds them: `NAME = "..."` assignments (slot "=NAME")
+    and keyword arguments (slot "call(keyword=)")."""
+    from .textutil import parse_python
+
+    tree = parse_python(text)
+    if tree is None:
+        return None
+    slots: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = _render(node.value)
+            for t in targets:
+                if value is not None and isinstance(t, ast.Name):
+                    slots.setdefault(f"={t.id}", []).append(value)
+        elif isinstance(node, ast.Call):
+            try:
+                func = ast.unparse(node.func)  # type: ignore[attr-defined]
+            except Exception:
+                continue
+            for kw in node.keywords:
+                value = _render(kw.value) if kw.arg else None
+                if value is not None:
+                    slots.setdefault(f"{func}({kw.arg}=)", []).append(value)
+    return slots
+
+
+def short_rewrite(base_text: str, base_path: str, new_text: str, new_path: str, base_prompt: str, exclude: set[str]) -> str | None:
+    """A prompt rewritten to a few words ("Be brief."), which is too short to be found
+    as a prompt anywhere: the new text of a whole prompt file, or the string that now
+    fills the same assignment or keyword argument the prompt filled."""
+    if Path(new_path).suffix.lower() in TEXT_SUFFIXES and Path(base_path).suffix.lower() in TEXT_SUFFIXES:
+        return new_text if new_text.strip() and norm(new_text) != norm(base_prompt) else None
+    if Path(base_path).suffix.lower() not in (".py", ".pyi") or Path(new_path).suffix.lower() not in (".py", ".pyi"):
+        return None
+    old, new = _python_slots(base_text), _python_slots(new_text)
+    if old is None or new is None:
+        return None
+    found = set()
+    for slot, values in old.items():
+        if any(norm(v) == norm(base_prompt) for v in values) and len(new.get(slot, [])) == 1:
+            value = new[slot][0]
+            if value.strip() and norm(value) != norm(base_prompt) and norm(value) not in exclude:
+                found.add(value)
+    return found.pop() if len(found) == 1 else None
+
+
 def positional_edit(base_text: str, base_path: str, new_text: str, new_path: str, base_prompt: str, exclude: set[str]) -> str | None:
     """The string that took a prompt's place, however different its wording: the prompt's
     lines in the base file are mapped through a line diff into the new file. None when
@@ -219,7 +295,7 @@ def positional_edit(base_text: str, base_path: str, new_text: str, new_path: str
         return None
     first, last = where[0] - 1, where[1]  # 0-based, half-open
     lo = hi = None
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, base_text.splitlines(), new_text.splitlines(), autojunk=False).get_opcodes():
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, source_lines(base_text), source_lines(new_text), autojunk=False).get_opcodes():
         if tag == "insert":
             overlaps = first <= i1 <= last
             start, end = j1, j2
@@ -377,6 +453,8 @@ def find_prompt_changes(
                 old_text, new_text = base_text(d.old_path), current_text(d.new_path)
                 if old_text is not None and new_text is not None:
                     edited = positional_edit(old_text, d.old_path, new_text, d.new_path, base_prompt, others)
+                    if edited is None:
+                        edited = short_rewrite(old_text, d.old_path, new_text, d.new_path, base_prompt, others)
                     positional = edited is not None
             if edited is None:  # gone from this file: moved elsewhere in the change?
                 for other in diffs:
@@ -448,6 +526,7 @@ class CheckRun:
 
     def to_dict(self) -> dict:
         return {
+            "llmshift_version": __version__,
             "model": self.model,
             "base": self.base,
             "min_pass_rate": self.min_pass_rate,
@@ -527,7 +606,10 @@ def run_check(
             if not files:
                 raise
     elif not files:
-        raise UsageError("not a git repository: run llmshift check inside your checkout, or pass --files FILE...")
+        reason = gh.no_repo_reason(cwd) or "not a git repository"
+        if "not a git repository" in reason.lower():  # rather than unsafe ownership or no git at all
+            reason = "not a git repository"
+        raise UsageError(f"{reason}: run llmshift check inside your checkout, or pass --files FILE...")
     top = git_root or cwd
 
     if files:
@@ -539,7 +621,13 @@ def run_check(
                 rel = p.resolve().relative_to(top).as_posix()
             except ValueError:
                 raise UsageError(f"{f} is outside the repository") from None
-            diffs.append(gh.FileDiff("M", rel, rel if p.exists() else None))
+            if p.is_dir():
+                raise UsageError(f"--files takes files, and {f} is a directory")
+            now = p.is_file()
+            before = base_commit is None or gh.show(base_commit, rel, cwd=top) is not None
+            if not now and not (base_commit and before):
+                raise UsageError(f"{f} not found" + (f" (nor in {base_label})" if base_commit else ""))
+            diffs.append(gh.FileDiff("M" if now and before else ("A" if now else "D"), rel if before else None, rel if now else None))
     else:
         diffs = gh.changed_files(base_commit, cwd=top) if base_commit else []
     diffs = [d for d in diffs if _is_source(d.new_path or d.old_path or "")]
@@ -557,20 +645,30 @@ def run_check(
     groups: dict[str, list] = {}
     for case in cases:
         groups.setdefault(group_key(case), []).append(case)
-    prompts = {g: Counter(c.system_prompt for c in members).most_common(1)[0][0] for g, members in groups.items()}
+    # A hand-written group can hold cases with different system prompts: each prompt is
+    # tracked on its own, so editing the less common one is noticed too.
+    units: dict[str, tuple[str, list]] = {}  # name -> (group, its cases with one prompt)
+    prompts: dict[str, str] = {}
+    for group, members in groups.items():
+        by_prompt = Counter(c.system_prompt for c in members).most_common()
+        for i, (prompt, _) in enumerate(by_prompt):
+            name = group if len(by_prompt) == 1 else f"{group} (prompt {i + 1} of {len(by_prompt)})"
+            units[name] = (group, [c for c in members if c.system_prompt == prompt])
+            prompts[name] = prompt
     changes = find_prompt_changes(prompts, diffs, read_base if base_commit else None, read_current)
     run = CheckRun(provider.spec, base_label, changes, min_pass_rate, sorted({d.new_path or d.old_path or "" for d in diffs}), all_groups)
     common = dict(config=config, judge=judge, concurrency=concurrency, cache=cache, allow_python=allow_python, severity=severity, show_progress=show_progress, min_pass_rate=min_pass_rate)
     for change in changes:
         if change.status != "changed":
             continue
-        change.result = run_compare(groups[change.group], provider, patches={change.group: {"system": change.new}}, label="check", **common)
+        group, members = units[change.group]
+        change.result = run_compare(members, provider, patches={group: {"system": change.new}}, label="check", **common)
     if all_groups:
         edited = {c.group for c in changes if c.status == "changed"}
-        for group, members in sorted(groups.items()):
-            if group in edited:
+        for name, (_group, members) in sorted(units.items()):
+            if name in edited:
                 continue
-            change = PromptChange(group, prompts[group], None, [], "unchanged", "prompt unchanged; run because of --all")
+            change = PromptChange(name, prompts[name], None, [], "unchanged", "prompt unchanged; run because of --all")
             change.result = run_compare(members, provider, label="check", **common)
             changes.append(change)
     return run
@@ -604,10 +702,17 @@ def _rate(change: PromptChange) -> str:
     return f"{s.get('pass_rate', 0.0):.0%}"
 
 
-def check_markdown(run: CheckRun) -> str:
+def comment_marker(key: str | None = None) -> str:
+    """The hidden first line that finds this check's comment again. Each key has its own
+    comment, so two check jobs on one pull request (two test sets) do not overwrite each other."""
+    safe = re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9._/-]+", "-", key or "")).strip("-")[:100]  # no "--" inside an HTML comment
+    return f"<!-- llmshift:check key={safe} -->" if safe else gh.CHECK_MARKER
+
+
+def check_markdown(run: CheckRun, marker: str = gh.CHECK_MARKER) -> str:
     threshold = f"{run.min_pass_rate:.0%}" if run.min_pass_rate is not None else "the threshold"
     tested = run.tested
-    lines = [gh.CHECK_MARKER]
+    lines = [marker]
     if not run.changes:
         lines.append("## LLMShift prompt check: no prompt changes")
         lines.append("")
@@ -700,12 +805,13 @@ def register(sub: Any) -> None:
     p.add_argument("--base", metavar="REF", help="git ref to compare with (default: the pull request's base in GitHub Actions, else origin/main)")
     p.add_argument("--files", nargs="+", metavar="FILE", help="only look at these files")
     p.add_argument("--all", action="store_true", help="also run the groups whose prompts did not change")
-    p.add_argument("--min-pass-rate", type=float, help="fail below this pass rate (default from llmshift.yaml: 0.95)")
+    p.add_argument("--min-pass-rate", type=cli.rate_arg, help="fail below this pass rate (default from llmshift.yaml: 0.95)")
     p.add_argument("--markdown", nargs="?", const="", metavar="FILE", help="also write the Markdown report (default: in the reports directory)")
     p.add_argument("--json", metavar="FILE", help="write the results as JSON")
     p.add_argument("--comment", action="store_true", help="post or update a comment on the pull request (automatic in GitHub Actions)")
     p.add_argument("--no-comment", action="store_true", help="never comment on the pull request")
-    p.add_argument("--pr", type=int, metavar="NUMBER", help="pull request to comment on (default: from the GitHub event)")
+    p.add_argument("--pr", type=int, metavar="NUMBER", help="pull request to comment on (implies --comment; default: from the GitHub event)")
+    p.add_argument("--comment-key", metavar="KEY", help="keeps one comment per key, for several check jobs on one pull request (default: the test file, when it is not .llmshift/tests.jsonl)")
     cli._add_run_options(p)
     p.set_defaults(func=cmd_check)
 
@@ -736,7 +842,16 @@ def cmd_check(args: argparse.Namespace, cfg: dict) -> int:
         ctx=ctx,
     )
     con.out(check_terminal(run))
-    md = check_markdown(run)
+    key = args.comment_key
+    if key is None:
+        root = gh.repo_root(os.getcwd())
+        try:
+            rel = Path(_path).resolve().relative_to(root).as_posix() if root else None
+        except ValueError:
+            rel = None
+        key = None if rel in (None, ".llmshift/tests.jsonl") else rel
+    marker = comment_marker(key)
+    md = check_markdown(run, marker)
     if args.markdown is not None:
         target = args.markdown or Path(cfg.get("reports_dir") or ".llmshift/reports") / f"check-{cli._timestamp()}.md"
         cli._write(target, md)
@@ -749,14 +864,15 @@ def cmd_check(args: argparse.Namespace, cfg: dict) -> int:
         rates = [c.result.summary.get("pass_rate", 0.0) for c in tested]
         cli._github_output("pass_rate", round(min(rates), 4))
     number = args.pr or ctx.pr_number
-    if (args.comment or (ctx.in_actions and ctx.pr_number)) and not args.no_comment:
+    if (args.comment or args.pr is not None or (ctx.in_actions and ctx.pr_number)) and not args.no_comment:
         if not ctx.repo:
-            ctx.repo = gh.remote_repo(cwd=os.getcwd())
+            ctx.repo = gh.remote_repo(cwd=os.getcwd(), host=ctx.host)
         if not (ctx.token and ctx.repo and number):
-            con.warn("not commenting on the pull request: needs GITHUB_TOKEN, the repository and a PR number (--pr)")
+            missing = [what for what, ok in (("GITHUB_TOKEN", ctx.token), ("the repository (GITHUB_REPOSITORY=owner/name)", ctx.repo), ("a PR number (--pr)", number)) if not ok]
+            con.warn(f"not commenting on the pull request: needs {', '.join(missing)}")
         else:
             try:
-                gh.upsert_comment(ctx, int(number), md)
+                gh.upsert_comment(ctx, int(number), md, marker=marker)
                 con.out(con.style(f"  commented on pull request #{number}", "grey"))
             except Exception as exc:  # e.g. read-only tokens on pull requests from forks
                 con.warn(f"could not comment on pull request #{number}: {exc}")

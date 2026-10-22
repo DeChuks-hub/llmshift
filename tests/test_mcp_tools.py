@@ -38,6 +38,13 @@ def test_pick_tool_recommends_the_cheapest_passing_model(server):
     assert data["recommended"] == "mock:frugal" and data["monthly_saving"] > 0
 
 
+def test_pick_tool_reads_the_volume_as_written_in_llmshift_yaml(server, project):
+    with open(project / "llmshift.yaml", "a", encoding="utf-8") as fh:
+        fh.write("pick:\n  volume: 100k\n")
+    data = payload(call(server, "llmshift_pick", {"models": ["mock:frugal"]}))
+    assert data["volume_per_month"] == 100_000 and data["monthly_saving"] > 0
+
+
 def test_safety_tool_finds_the_riskier_model(server):
     data = payload(call(server, "llmshift_safety", {"to": "mock:nextgen", "baseline_model": "mock:legacy", "categories": ["injection"], "probes": 6}))
     assert data["riskier"] == ["injection"]
@@ -77,3 +84,22 @@ def test_upgrade_tool_plans_then_applies(server, project):
     assert applied["written"] and "gpt-5.6-sol" in (project / "app" / "triage.py").read_text(encoding="utf-8")
     result = call(server, "llmshift_upgrade", {})["result"]
     assert result["isError"] is True
+
+
+def test_tools_read_llmshift_yaml_like_the_command_line(server, project, monkeypatch, capsys):
+    import json
+
+    from llmshift import cli
+
+    with open(project / "llmshift.yaml", "a", encoding="utf-8") as fh:
+        fh.write("repeat: 2\nfix:\n  target_pass_rate:\nseverity:\n  json_valid: info\n  json_schema: info\n  json_match: info\n  structure: info\n")
+    data = payload(call(server, "llmshift_compare", {"to": "mock:legacy", "limit": 3}))
+    assert data["summary"]["repeats"] == 2
+    payload(call(server, "llmshift_fix", {"to": "mock:nextgen", "limit": 4}))  # a null target is the default, not a crash
+    mcp_pick = {c["model"]: c["pass_rate"] for c in payload(call(server, "llmshift_pick", {"models": ["mock:nextgen"]}))["candidates"]}
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(cli, "EXTENSIONS", ("pick",))
+    capsys.readouterr()
+    cli.main(["pick", "--models", "mock:nextgen", "--format", "json"])
+    cli_pick = {c["model"]: c["pass_rate"] for c in json.loads(capsys.readouterr().out)["candidates"]}
+    assert mcp_pick == cli_pick and mcp_pick["mock:nextgen"] > 0.4  # the severities apply to both

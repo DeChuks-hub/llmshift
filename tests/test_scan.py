@@ -184,3 +184,55 @@ def test_registry_search():
     retiring = reg.search("gpt-4o", provider="openai", status="retiring")
     assert retiring and all(lk.status == "retiring" and "gpt-4o" in lk.model for lk in retiring)
     assert retiring == sorted(retiring, key=lambda lk: lk.retires)
+
+
+def test_models_named_in_comments_are_not_calls(in_tmp, capsys):
+    """Commented-out settings, trailing notes and /* blocks */ are not what the code
+    calls: scan must not fail CI on them, and upgrade must not rewrite them."""
+    from llmshift import cli
+
+    (in_tmp / "settings.yaml").write_text("# model: gpt-4-turbo (old)\nmodel: gpt-4o-2024-05-13  # was claude-3-opus-20240229\n", encoding="utf-8")
+    (in_tmp / "app.ini").write_text("[llm]\n; model = gpt-4-turbo\nmodel = gpt-4o-2024-05-13 ; old gpt-4-0613\n", encoding="utf-8")
+    (in_tmp / ".env").write_text("OPENAI_MODEL=gpt-4o-2024-05-13\n# OLD_MODEL=gpt-4-turbo\n", encoding="utf-8")
+    (in_tmp / "app.ts").write_text('const a = { model: "gpt-4o-2024-05-13" }; // was "gpt-4-turbo"\n/* old:\n   model: "claude-3-opus-20240229"\n*/\nconst b = { model: "gpt-4o-mini" };\n', encoding="utf-8")
+    result = scan_paths(["."])
+    assert sorted((f.file, f.line, f.model) for f in result.findings) == [
+        (".env", 1, "gpt-4o-2024-05-13"), ("app.ini", 3, "gpt-4o-2024-05-13"), ("app.ts", 1, "gpt-4o-2024-05-13"),
+        ("app.ts", 5, "gpt-4o-mini"), ("settings.yaml", 2, "gpt-4o-2024-05-13"),
+    ]
+    assert cli.main(["upgrade", "--from", "claude-3-opus-20240229", "--to", "claude-opus-4-8", "--apply"]) == 0
+    assert "claude-3-opus-20240229" in (in_tmp / "settings.yaml").read_text(encoding="utf-8")  # the comment is untouched
+
+
+def test_provider_prefixes_arns_routers_and_labels(in_tmp):
+    (in_tmp / "agents.py").write_text(
+        "from pydantic_ai import Agent\nfrom langchain.chat_models import init_chat_model\n"
+        'agent = Agent("openai:gpt-4o-2024-05-13")\nllm = init_chat_model("anthropic:claude-3-7-sonnet-20250219")\n'
+        'other = init_chat_model(model="google_genai:gemini-2.0-flash")\nGPT4_LABEL = "GPT-4"\n', encoding="utf-8")
+    arn = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+    (in_tmp / "config.yaml").write_text(f"llm:\n  modelId: {arn}\n  router: anthropic/claude-3.5-sonnet\n", encoding="utf-8")
+    (in_tmp / "NOTES.md").write_text("We used claude-3-opus-20240229. It worked.\n", encoding="utf-8")
+    found = {f.model: f.lookup for f in scan_paths(["."], include_docs=True).findings}
+    assert set(found) == {"openai:gpt-4o-2024-05-13", "anthropic:claude-3-7-sonnet-20250219", "google_genai:gemini-2.0-flash", arn, "anthropic/claude-3.5-sonnet", "claude-3-opus-20240229"}
+    assert all(lk.status in ("retired", "retiring") for lk in found.values())
+    router = found["anthropic/claude-3.5-sonnet"]
+    assert router.provider == "anthropic" and router.replacement == "claude-sonnet-5-5"  # not Vertex's undated entry
+    assert found[arn].platform == "bedrock"
+
+
+def test_llmshift_reports_are_not_scanned(in_tmp, capsys, monkeypatch):
+    """Calendars, compare results, JUnit and SARIF files name hundreds of models: they are
+    llmshift's own findings, not models the code calls."""
+    from llmshift import cli
+    from llmshift.demo import create_project
+
+    root = create_project(str(in_tmp / "app"))
+    monkeypatch.chdir(root)
+    before = {(f.file, f.model) for f in scan_paths(["."]).findings}
+    assert cli.main(["snapshot", "logs"]) == 0
+    assert cli.main(["calendar", "--out", "site"]) == 0
+    assert cli.main(["compare", "--to", "mock:frugal", "--json", "results.json", "--junit", "junit.xml"]) == 0
+    capsys.readouterr()
+    assert cli.main(["scan", ".", "--format", "sarif"]) in (0, 1)
+    (root / "scan.sarif").write_text(capsys.readouterr().out, encoding="utf-8")
+    assert {(f.file, f.model) for f in scan_paths(["."]).findings} == before

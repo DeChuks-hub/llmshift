@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -19,6 +20,7 @@ class ProviderError(Exception):
         param: str | None = None,
         retryable: bool = False,
         body: Any = None,
+        retry_after: float | None = None,
     ):
         super().__init__(message)
         self.message = message
@@ -27,6 +29,7 @@ class ProviderError(Exception):
         self.param = param
         self.retryable = retryable
         self.body = body
+        self.retry_after = retry_after  # seconds the server asked us to wait, if it said
 
     @property
     def fatal(self) -> bool:
@@ -35,7 +38,38 @@ class ProviderError(Exception):
             return True
         if self.status == 404 or self.code in ("model_not_found", "not_found_error", "NOT_FOUND"):
             return True
-        return self.code in ("insufficient_quota", "invalid_api_key", "authentication_error", "permission_error", "missing_api_key", "ssl_error")
+        return self.code in (
+            "insufficient_quota", "invalid_api_key", "authentication_error", "permission_error", "missing_api_key", "ssl_error",
+            "invalid_header", "invalid_url", "invalid_config",
+        )
+
+
+_INVISIBLE = "﻿​‌‍⁠"
+
+
+def clean_key(value: Any) -> str | None:
+    """An API key without the whitespace, BOM or zero-width space that a CRLF .env file
+    or a copy-paste leaves around it; None when nothing is left."""
+    if value is None:
+        return None
+    text = str(value).strip().strip(_INVISIBLE).strip()
+    return text or None
+
+
+def base_url_from(options: dict, env_name: str | None, default: str, spec: str) -> str:
+    """The base URL from the provider's settings, else the environment, else the public
+    API. A base_url that is set but empty (an unset ${VAR} in llmshift.yaml) is an error:
+    falling back would send the requests, and the key, to the public API instead."""
+    if "base_url" in options:
+        value = str(options["base_url"] or "").strip()
+        if not value:
+            raise ProviderError(
+                f"{spec}: base_url is empty in llmshift.yaml (an unset environment variable?); set it, or remove it to use {default}",
+                code="invalid_config",
+            )
+        return value.rstrip("/")
+    env = (os.environ.get(env_name) or "").strip() if env_name else ""
+    return (env or default).rstrip("/")
 
     def __str__(self) -> str:
         bits = []

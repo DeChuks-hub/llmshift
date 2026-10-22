@@ -161,7 +161,7 @@ def test_shadow_report(tmp_path, monkeypatch, capsys):
     good = _shadow_log(tmp_path, "mock:frugal")
     records = load_shadow_logs([str(bad)])
     cases, answers, spec = build_cases(records)
-    assert len(cases) == 4 and spec == "mock:nextgen" and sum(len(v) for v in answers.values()) == 4
+    assert len(cases) == 4 and spec == "mock:nextgen" and sorted(answers) == sorted(c.id for c in cases)
     assert cli.main(["shadow", "report", str(good)]) == 0
     out = capsys.readouterr().out
     assert "LLMShift shadow" in out and "4 unchanged" in out and "4 shadowed request(s)" in out
@@ -270,3 +270,18 @@ def test_shadowing_and_recording_work_in_a_forked_child(tmp_path):
         pytest.fail("the forked child hung")
     assert os.waitstatus_to_exitcode(status) == 0
     assert shadow.flush(10)
+
+
+def test_repeated_requests_keep_their_own_answers(tmp_path, monkeypatch, capsys):
+    """The same question asked 200 times has 200 real and 200 shadow answers: each shadow
+    answer is checked against its own real one, whatever order the threads run in."""
+    monkeypatch.chdir(tmp_path)
+    log = tmp_path / "dup.jsonl"
+    request = {"messages": [{"role": "user", "content": "Name a random fruit."}], "params": {"temperature": 1}}
+    with open(log, "w", encoding="utf-8") as fh:
+        for i in range(200):
+            answer = f"fruit number {i}"
+            fh.write(json.dumps({"llmshift_shadow": 1, "ts": "2026-10-22T10:00:00Z", "request": request, "baseline": {"output": answer}, "shadow": {"spec": "mock:same", "output": answer}}) + "\n")
+    assert cli.main(["shadow", "report", str(log), "--concurrency", "16", "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["summary"]["passed"] == 200 and data["summary"]["failed"] == 0

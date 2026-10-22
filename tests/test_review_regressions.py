@@ -157,7 +157,8 @@ def test_registry_resource_names_variants_and_overrides(tmp_path):
     assert reg.lookup("anthropic.claude-v2:1").model == "claude-2.1"
     vertex = reg.lookup("projects/p/locations/us-central1/publishers/google/models/gemini-1.5-pro-002")
     assert vertex.model == "gemini-1.5-pro-002" and vertex.platform == "vertex"
-    assert reg.lookup("anthropic/claude-3.5-sonnet").model == "claude-3-5-sonnet"
+    routed = reg.lookup("anthropic/claude-3.5-sonnet")  # OpenRouter's id: Anthropic's alias, not Vertex's undated entry
+    assert routed.model == "claude-3-5-sonnet-latest" and routed.provider == "anthropic"
     assert reg.lookup("claude-sonnet-4.5").model == "claude-sonnet-4-5"
     override = tmp_path / "reg.json"
     override.write_bytes(b"\xef\xbb\xbf" + json.dumps([{"id": "gpt-4o", "status": "deprecated", "note": "internal policy"}]).encode())

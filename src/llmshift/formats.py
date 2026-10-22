@@ -9,15 +9,23 @@ from typing import Any
 
 from .textutil import json_loads, json_too_deep
 
-_FENCE_RE = re.compile(r"^\s*(```|~~~)[ \t]*([\w+#.-]*)[^\n]*\n(.*?)\n?[ \t]*\1[ \t]*\s*$", re.S)
+_FENCE_OPEN_RE = re.compile(r"\s*(```|~~~)[ \t]*([\w+#.-]*)[^\n]*\n")
 
 
 def strip_fences(text: str) -> tuple[str, bool, str]:
-    """If the whole text is one fenced code block, return (inner, True, lang)."""
-    m = _FENCE_RE.match(text or "")
+    """If the whole text is one fenced code block, return (inner, True, lang). Matched
+    from both ends, not by one regex that backtracks through runaway output."""
+    text = text or ""
+    m = _FENCE_OPEN_RE.match(text)
     if m:
-        return m.group(3), True, (m.group(2) or "").lower()
-    return text or "", False, ""
+        fence = m.group(1)
+        rest = text[m.end():].rstrip()
+        if rest.endswith(fence):
+            inner = rest[: -len(fence)].rstrip(" \t")
+            if inner.endswith("\n"):
+                inner = inner[:-1]
+            return inner, True, (m.group(2) or "").lower()
+    return text, False, ""
 
 
 def find_embedded_json(text: str, max_attempts: int = 50) -> tuple[Any, int, int] | None:

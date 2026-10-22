@@ -20,6 +20,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from .textutil import json_loads
+
 _ALIAS_NOTE_RE = re.compile(r"^\s*(alias|alternate id)", re.I)
 _NOT_BEFORE_RE = re.compile(r"not_before:(\d{4}-\d{2}-\d{2})")
 _DATE_SUFFIX_RE = re.compile(r"-(\d{4}-\d{2}-\d{2}|\d{8}|\d{4}|\d{2}-\d{4})$")
@@ -28,7 +30,16 @@ _PREFIXES = (
     "vertex_ai/", "vertex_ai_beta/", "vertex/", "gemini/", "mistral/", "mistralai/", "cohere/", "xai/", "x-ai/",
     "deepseek/", "deepseek-ai/", "together_ai/", "groq/", "fireworks_ai/", "perplexity/", "anyscale/",
 )
-_SPEC_PREFIXES = ("openai:", "anthropic:", "gemini:", "google:", "azure:", "mistral:", "cohere:", "xai:", "deepseek:", "openrouter:", "bedrock:", "vertex:")
+# provider:model prefixes (llmshift's, LiteLLM's, pydantic-ai's and LangChain's init_chat_model's)
+_SPEC_PREFIXES = (
+    "openai-responses:", "openai-chat:", "openai:", "anthropic:", "gemini:", "google-gla:", "google-vertex:", "google_genai:",
+    "google_vertexai:", "google:", "vertexai:", "vertex:", "azure_openai:", "azure:", "mistralai:", "mistral:", "cohere:",
+    "xai:", "deepseek:", "openrouter:", "bedrock_converse:", "bedrock:", "groq:", "ollama:", "together:", "fireworks:", "huggingface:",
+)
+_SPEC_PLATFORM = {
+    "bedrock:": "bedrock", "bedrock_converse:": "bedrock", "vertex:": "vertex", "vertexai:": "vertex", "google-vertex:": "vertex",
+    "google_vertexai:": "vertex", "azure:": "azure", "azure_openai:": "azure",
+}
 _BEDROCK_RE = re.compile(r"^(?:(?:us|eu|apac|global|us-gov|jp|au|ca)\.)?(anthropic|meta|mistral|cohere|amazon|ai21|deepseek|openai|qwen|writer)\.(.+?)(?:-v\d+(?::\d+)?)?$")
 _BEDROCK_CLAUDE_LEGACY = {"claude-v2": "claude-2.0", "claude-v2:1": "claude-2.1", "claude-instant-v1": "claude-instant-1.2", "claude-v1": "claude-1.3"}
 _VERTEX_CLAUDE_RE = re.compile(r"^(claude-[\w.-]+?)(?:-v\d)?@(\d{8})$")
@@ -131,8 +142,8 @@ def cached_registry() -> tuple[dict, Path] | None:
     """The downloaded registry, when present and valid (whatever its date)."""
     path = user_data_dir() / "models.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+        data = json_loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, RecursionError):
         return None
     return (data, path) if not registry_problems(data) else None
 
@@ -211,10 +222,10 @@ class Registry:
             paths.extend(p for p in env.split(os.pathsep) if p)
         for p in paths:
             try:
-                raw = json.loads(Path(p).read_text(encoding="utf-8-sig"))
+                raw = json_loads(Path(p).read_text(encoding="utf-8-sig"))
             except FileNotFoundError:
                 raise ValueError(f"registry file not found: {p}") from None
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise ValueError(f"registry file {p} is not valid JSON: {exc}") from None
             extra_entries = raw.get("models") if isinstance(raw, dict) else raw
             if not isinstance(extra_entries, list):
@@ -251,8 +262,7 @@ class Registry:
             lower = s.lower()
         for p in _SPEC_PREFIXES:
             if lower.startswith(p):
-                if p in ("bedrock:", "vertex:"):
-                    platform = p[:-1]
+                platform = _SPEC_PLATFORM.get(p, platform)
                 s = s[len(p) :]
                 lower = s.lower()
                 break
@@ -327,6 +337,28 @@ class Registry:
         others = [e for e in matches if e is not chosen]
         return chosen, others
 
+    def _entry(self, model: str, platform: str | None) -> dict | None:
+        for cand in self.normalize(model)[0]:
+            if cand in self.by_id:
+                return self._pick(self.by_id[cand], platform)[0]
+        return None
+
+    def final_replacement(self, replacement: str | None, platform: str | None = None) -> str | None:
+        """Where to move to: a replacement that is itself retired, retiring or deprecated is
+        followed to its own replacement (o1-mini -> o4-mini -> ...), never in a circle."""
+        current, seen = replacement, set()
+        while current and current.lower() not in seen and len(seen) < 10:
+            seen.add(current.lower())
+            entry = self._entry(current, platform)
+            if entry is None:
+                break
+            ending = entry.get("status") in ("retired", "deprecated") or _date(entry.get("retires")) is not None
+            nxt = entry.get("replacement")
+            if not (ending and nxt) or str(nxt).lower() in seen:
+                break
+            current = str(nxt)
+        return current
+
     def lookup(self, raw: str, *, platform: str | None = None, warn_days: int = 180) -> Lookup:
         candidates, detected_platform, fine_tune_of = self.normalize(raw)
         platform = platform or detected_platform
@@ -338,6 +370,13 @@ class Registry:
                 entry, others = self._pick(self.by_id[cand], platform)
                 matched_id = cand
                 break
+        if entry is not None and entry.get("provider") == "google-vertex" and platform != "vertex":
+            # An undated Claude id is Vertex's naming, but also OpenRouter's (anthropic/claude-3.5-sonnet):
+            # outside Vertex, Anthropic's own -latest alias says what is meant.
+            alias = self.by_id.get(f"{matched_id}-latest")
+            native = [e for e in alias or [] if e.get("provider") != "google-vertex"]
+            if native:
+                entry, others, matched_id = native[0], self.by_id[matched_id] + native[1:], f"{matched_id}-latest"
         if entry is None:
             family = None
             for cand in candidates:
@@ -360,7 +399,8 @@ class Registry:
         not_before = _date(nb.group(1)) if nb else None
         alias = bool(_ALIAS_NOTE_RE.match(note))
         stored = e.get("status", "active")
-        replacement = e.get("replacement")
+        listed = e.get("replacement")
+        replacement = self.final_replacement(listed, platform) if listed else None
         days_left = (retires - now).days if retires else None
         if retires and retires <= now:
             status, severity = "retired", "critical"
@@ -385,6 +425,8 @@ class Registry:
                 message += "; alias - the model behind it can change without notice, pin a dated snapshot for stable behaviour"
         if replacement and status != "active":
             message += f"; replacement: {replacement}"
+            if listed and str(listed).lower() != str(replacement).lower():
+                message += f" (the listed replacement, {listed}, is retiring too)"
         if fine_tune_of:
             message = f"fine-tune of {fine_tune_of}: {message}"
         if platform in ("bedrock", "azure") or (platform == "vertex" and e.get("provider") != "google-vertex"):

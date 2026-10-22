@@ -242,11 +242,21 @@ def test_text_algorithms_stay_fast_on_adversarial_input():
         lambda: textutil.word_diff("alpha beta " * 15_000, "alpha gamma " * 15_000),
         lambda: textutil.rouge_l("w " * 60_000, "w x " * 30_000),
         lambda: textutil.detect_language("le " * 200_000),
+        # Runaway model output that used to take a minute in one regex each:
+        lambda: facts.extract("Answer:" + "\n" * 32_000),
+        lambda: formats.strip_fences("```json\n{" + "\t" * 64_000 + "x"),
+        lambda: facts.extract("Code: " + "a-" * 16_000),
+        lambda: Redactor(pii=True).text("Contact: " + "a-" * 16_000),
     ]
     for fn in cases:
         done = _timed(15)
         fn()
         done()
+    from llmshift.scanner import scan_generic
+
+    done = _timed(15)
+    scan_generic("\n".join('model = "' + "a1" * 995 + '"' for _ in range(900)), code=True)  # 697 s before
+    done()
 
 
 def test_scanner_on_minified_and_binary_sources(in_tmp):
@@ -398,16 +408,14 @@ def test_unwritable_outputs_exit_2_with_the_reason(demo, capsys):
 
 def test_a_full_disk_never_breaks_a_run(demo, monkeypatch):
     import errno
-    import tempfile
 
     from llmshift import cache
 
     def full(*args, **kwargs):
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(cache.tempfile, "mkstemp", full)
+    monkeypatch.setattr(cache.fileio, "temp_file", full)
     assert cli.main(["compare", "--to", "mock:legacy", "--no-report"]) == 0
-    monkeypatch.setattr(cache.tempfile, "mkstemp", tempfile.mkstemp)
 
 
 def test_parallel_processes_share_one_cache_and_one_log(tmp_path):
@@ -537,3 +545,167 @@ def test_adversarial_json_nesting_scan_stays_linear():
     for text in ('["' + '\\"' * 400_000, ('"' + "\\" * 1000 + '"[') * 2000, '["' + "[" * 800_000 + '"]', "[" * 800_000, "[" + ",".join(["[1]"] * 200_000) + "]"):
         textutil.json_too_deep(text)
     assert time.perf_counter() - started < 5
+
+
+def test_deep_python_never_crashes_scan_or_check(in_tmp):
+    """A 3,000-term `+` chain or a 600-branch elif ladder: the model call next to it is
+    still found, prompts in the file are still read, and nothing raises RecursionError."""
+    from llmshift.prcheck import prompt_candidates
+    from llmshift.scanner import scan_paths
+
+    chain = "SQL = " + " + ".join(f'"part {i} "' for i in range(3000)) + "\n"
+    ladder = "def route(x):\n    if x == 0:\n        return 0\n" + "".join(f"    elif x == {i}:\n        return {i}\n" for i in range(1, 600))
+    call = 'client.chat.completions.create(model="gpt-4o-2024-05-13", messages=[])\n'
+    for name, body in (("chain.py", chain), ("ladder.py", ladder)):
+        (in_tmp / name).write_text("from openai import OpenAI\nclient = OpenAI()\n" + body + call, encoding="utf-8")
+        result = scan_paths([name])
+        assert [f.model for f in result.findings] == ["gpt-4o-2024-05-13"] and not result.errors, name
+    start = time.perf_counter()
+    cands = prompt_candidates(chain, "chain.py")
+    assert time.perf_counter() - start < 5 and "".join(f"part {i} " for i in range(3000)) in cands
+    deep_json = "[" * 5000 + '"You are a careful assistant who answers briefly."' + "]" * 5000
+    assert prompt_candidates(deep_json, "fixture.json")  # read as text, not a RecursionError
+
+
+def test_warnings_about_the_users_code_are_not_printed(in_tmp, capsys):
+    """Python 3.12+ warns about invalid escape sequences while parsing; that is about
+    the user's code, so llmshift does not print it, and other warnings are untouched."""
+    import warnings
+
+    from llmshift.textutil import parse_python
+
+    (in_tmp / "app.py").write_text('import re\nPAT = re.compile("\\d+")\nMODEL = "gpt-4o-2024-05-13"\n', encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # as under PYTHONWARNINGS=error: a parse must not fail
+        assert parse_python('x = "\\d"') is not None
+        assert cli.main(["scan", "app.py", "--fail-on", "never"]) == 0
+    assert "SyntaxWarning" not in capsys.readouterr().err
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        compile('x = "\\d"', "host_app.py", "exec")  # the host app's own code still warns as usual
+    assert any(issubclass(w.category, SyntaxWarning) for w in seen) or sys.version_info < (3, 12)
+
+
+def test_a_folder_that_refuses_new_files_fails_at_once(tmp_path, monkeypatch):
+    """On Windows, tempfile.mkstemp before Python 3.13 retries such a folder about two
+    billion times (a hang); llmshift's own temp files give up on the first refusal."""
+    from llmshift import fileio
+    from llmshift.testset import atomic_write
+
+    attempts = []
+    real_open = os.open
+
+    def refuse(path, flags, *args, **kwargs):
+        if flags & os.O_EXCL:
+            attempts.append(path)
+            raise PermissionError(13, "Access is denied", path)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refuse)
+    with pytest.raises(PermissionError):
+        fileio.temp_file(tmp_path)
+    with pytest.raises(PermissionError):
+        atomic_write(tmp_path / "tests.jsonl", "{}\n")
+    assert len(attempts) == 2
+
+
+def test_redaction_knows_every_provider_key_and_real_world_numbers(monkeypatch):
+    monkeypatch.setenv("MY_SERVICE_API_KEY", "0123456789abcdef0123456789abcdef")  # no recognisable shape
+    keys = [
+        "xai-ABCDEFGHIJKLMNOPQRSTUV", "gsk_ABCDEFGHIJKLMNOPQRSTUV", "pplx-ABCDEFGHIJKLMNOPQRSTUV", "fw_ABCDEFGHIJKLMNOPQRSTUV",
+        "hf_ABCDEFGHIJKLMNOPQRSTUV", "r8_ABCDEFGHIJKLMNOPQRSTUV", "sk_live_ABCDEFGHIJKLMNOP", "ASIAABCDEFGHIJKLMNOP",
+        "AIza" + "SyA1234567890abcdefghijklmnopqrstu-", "0123456789abcdef0123456789abcdef",
+    ]
+    out = Redactor(secrets=True).text(" | ".join(keys))
+    assert not any(k in out for k in keys), out
+    pii = Redactor(secrets=True, pii=True)
+    text = "IBAN gb82west12345698765432, phones +44 20 7946 0958, 01 23 45 67 89, card 4111.1111.1111.1111 expires"
+    out = pii.text(text)
+    assert "gb82" not in out and "7946" not in out and "45 67" not in out and "4111" not in out and "> expires" in out
+    # ...and leaves look-alikes alone: no check digits, too few digits.
+    keep = "SKU AB12 CDEF GHIJ KLMN, score +10 20 30, version 1.2.3"
+    assert pii.text(keep) == keep
+
+
+def test_wrong_typed_fields_in_test_files_name_the_place(tmp_path):
+    base = {"input": {"messages": [{"role": "user", "content": "hi"}]}, "baseline": {"output": "ok"}}
+    for rec, words in (
+        ({**base, "input": {"messages": [{"role": "user", "content": "hi"}], "params": 5}}, "'params' must be an object"),
+        ({**base, "tags": 5}, "'tags' must be a list"),
+        ({**base, "vars": "x"}, "'vars' must be an object"),
+        ({**base, "metadata": [1]}, "'metadata' must be an object"),
+    ):
+        (tmp_path / "t.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+        with pytest.raises(TestFileError, match=words) as info:
+            load_tests(tmp_path / "t.jsonl")
+        assert "t.jsonl:1" in str(info.value)
+    (tmp_path / "t.yaml").write_text("- input: hi\n  baseline: 2024-02-30\n", encoding="utf-8")
+    with pytest.raises(TestFileError, match="t.yaml: invalid YAML value"):
+        load_tests(tmp_path / "t.yaml")
+    (tmp_path / "u.yaml").write_text("- input: hi\n  vars: {1: a, b: c}\n  baseline: ok\n", encoding="utf-8")
+    assert len(load_tests(tmp_path / "u.yaml")) == 1  # keys of mixed types are fine
+
+
+def test_ctrl_c_stops_judge_and_embedding_calls_at_once():
+    """The judge phase of compare, judge calibrate and embeddings wait on worker threads:
+    Ctrl+C must stop them at once, not after every queued call has finished."""
+    import _thread
+    import threading
+
+    from llmshift.runner import interruptible_map
+
+    def slow(x):
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not http.CANCEL.is_set():
+            time.sleep(0.01)
+        return x
+
+    threading.Timer(0.3, _thread.interrupt_main).start()
+    start = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        interruptible_map(slow, range(8), 2)
+    assert time.monotonic() - start < 5 and http.CANCEL.is_set()
+    http.CANCEL.clear()
+    assert interruptible_map(lambda x: x * 2, range(5), 3) == [0, 2, 4, 6, 8]  # order kept
+
+
+def test_a_watch_loop_survives_an_outage(demo, monkeypatch, tmp_path):
+    """A scheduled watch reports an outage (alert, critical) and checks again next time,
+    instead of exiting for good on the first network failure."""
+    from llmshift import watch
+    from llmshift.runner import RunAborted
+
+    real, calls, sleeps = watch.run_watch, [], []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RunAborted("cannot reach api.example.com: connection refused")
+        return real(*args, **kwargs)
+
+    def tick(*args):
+        sleeps.append(1)
+        if len(sleeps) >= 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(watch, "run_watch", flaky)
+    monkeypatch.setattr(watch, "sleep_until_next", tick)
+    alert = tmp_path / "outage.json"
+    assert cli.main(["watch", "--model", "mock:legacy", "--every", "1m", "--alert", f"file:{alert}"]) == 130
+    assert len(calls) == 2 and json.loads(alert.read_text(encoding="utf-8"))["title"] == "mock:legacy: every request failed"
+
+
+def test_wrong_numbers_are_refused_before_anything_runs(demo, capsys):
+    for argv, words in (
+        (["compare", "--to", "mock:legacy", "--min-pass-rate", "95"], "for 95% write 0.95"),
+        (["compare", "--to", "mock:legacy", "--limit", "-17"], "must be 1 or more"),
+        (["compare", "--to", "mock:legacy", "--show", "x"], "a number or 'all'"),
+        (["compare", "--to", "mock:legacy", "--concurrency", "0"], "must be 1 or more"),
+        (["fix", "--to", "mock:nextgen", "--rounds", "0"], "must be 1 or more"),
+        (["watch", "--model", "mock:legacy", "--max-drop", "-1"], "from 0 to 1"),
+        (["snapshot", "logs", "--max-cases", "-3"], "must be 1 or more"),
+    ):
+        with pytest.raises(SystemExit) as info:
+            cli.main(argv)
+        assert info.value.code == 2 and words in capsys.readouterr().err, argv
+    assert not Path(".llmshift/reports").exists() or not list(Path(".llmshift/reports").glob("compare-*"))  # nothing ran

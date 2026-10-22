@@ -9,10 +9,10 @@ import urllib.parse
 from typing import Any
 
 from .. import messages as msgs
-from ..textutil import stable_hash
+from ..textutil import json_loads, stable_hash
 from . import http
 from .anthropic import json_instruction
-from .base import Provider, ProviderError, Response, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of
 
 _DATA_URL_RE = re.compile(r"^data:([\w.+/-]+);base64,(.*)$", re.S)
 _SCHEMA_KEYS = {
@@ -87,9 +87,11 @@ class GeminiProvider(Provider):
             model = model[len("models/") :]
         super().__init__(model, name=name or "gemini", options=options)
         o = self.options
-        self.base_url = str(o.get("base_url") or os.environ.get("GEMINI_BASE_URL") or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        self.base_url = base_url_from(o, "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta", self.spec)
         self.key_env = o.get("api_key_env", "GEMINI_API_KEY")
-        self.api_key = o.get("api_key") or (os.environ.get(self.key_env) if self.key_env else None) or os.environ.get("GOOGLE_API_KEY")
+        self.api_key = (
+            clean_key(o.get("api_key")) or (clean_key(os.environ.get(self.key_env)) if self.key_env else None) or clean_key(os.environ.get("GOOGLE_API_KEY"))
+        )
 
     def identity(self) -> dict:
         shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env")}
@@ -126,8 +128,8 @@ class GeminiProvider(Provider):
                     args = tc.get("arguments")
                     if isinstance(args, str):
                         try:
-                            args = json.loads(args) if args.strip() else {}
-                        except ValueError:
+                            args = json_loads(args) if args.strip() else {}
+                        except (ValueError, RecursionError):
                             args = {"_raw": args}
                     call: dict = {"name": tc.get("name"), "args": args if isinstance(args, dict) else {"value": args} if args else {}}
                     if tc.get("id"):

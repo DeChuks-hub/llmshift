@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- `pick`: when the model you use today is also a candidate, today's cost is measured on the same tests, so its row reads "same" instead of a saving against itself. The header says where today's cost comes from (your recorded usage, or these tests), and "Keep" is recommended whenever today's model is the cheapest that passes.
+- `pick` from Python and the MCP `llmshift_pick` tool read `pick.volume` the way the command line does: `100k` in `llmshift.yaml` failed there with a TypeError.
+- `demo`: the simulated production logs record the token usage the simulated model actually reports, so today's cost in `pick` matches a test run of the same model.
+- `safety`: the header gives the probes each category really ran. Refusals use each test case at most once and add up to 10 harmless questions with alarming words, so with 18 test cases the refusal row shows 28, not "20 probes per category".
+- README links work on the PyPI page (they were relative to the repository).
+- The tests pass from the source archive on PyPI (one of them needed the repository's CI workflow); CI and the release now run the test suite from the built source archive, as packagers do.
+
 ## 0.1.0 (2026-10-22)
 
 First release. Runs on Python 3.9 to 3.15 on Linux, macOS and Windows; pure Python, so it installs without a compiler (PyYAML's pure-Python parser is included under `llmshift/_vendor`, MIT License).

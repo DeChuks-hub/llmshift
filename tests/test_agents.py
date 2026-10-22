@@ -212,6 +212,22 @@ def test_lookup_and_compare_steps_helpers():
     failures, changes, details = compare_steps(agent["steps"], new)
     assert failures == ['search.q: "x" -> "z"'] and not changes and details["trace"] == ["search(q=z)", "answer"]
     assert trace(agent["steps"]) == ["search(q=x)", "answer"]
+    # An exact match uses up its result: the next call with other arguments gets the next one.
+    two = recorded_results({"steps": [{"tool_calls": [{"id": "a", "name": "get", "arguments": {"n": 1}}, {"id": "b", "name": "get", "arguments": {"n": 2}}], "results": [{"tool_call_id": "a", "content": "A"}, {"tool_call_id": "b", "content": "B"}]}]})
+    used = set()
+    assert lookup(two, {"name": "get", "arguments": {"n": 1}}, used)[0] == "A" and lookup(two, {"name": "get", "arguments": {"n": 3}}, used)[0] == "B"
+
+
+def test_parallel_calls_in_another_order_are_the_same_run():
+    def run(*ids):
+        return [{"text": "", "tool_calls": [{"id": i, "name": "lookup_order", "arguments": {"order_id": i}} for i in ids]}, {"text": "Both orders are on their way.", "tool_calls": []}]
+
+    failures, changes, _ = compare_steps(run("1001", "1002"), run("1002", "1001"))
+    assert failures == [] and changes == []
+    # Calls in separate steps keep their order.
+    split = [{"text": "", "tool_calls": [{"name": "a", "arguments": {}}]}, {"text": "", "tool_calls": [{"name": "b", "arguments": {}}]}, {"text": "ok", "tool_calls": []}]
+    swapped = [split[1], split[0], split[2]]
+    assert compare_steps(split, swapped)[1][0].startswith("tools called in a different order")
 
 
 def test_agent_definitions_are_validated():

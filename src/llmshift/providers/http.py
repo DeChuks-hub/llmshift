@@ -47,12 +47,41 @@ def _user_agent() -> str:
     return f"llmshift/{__version__} (+python-urllib)"
 
 
+def _host(url: str) -> str:
+    """host[:port] of a URL for messages, never with a user:password@ part."""
+    netloc = urllib.parse.urlsplit(url).netloc
+    return netloc.rsplit("@", 1)[-1] or "the server"
+
+
+_SECRET_HEADERS = ("authorization", "x-api-key", "api-key", "x-goog-api-key", "proxy-authorization")
+
+
+def _check_headers(headers: dict) -> None:
+    """HTTP header values are Latin-1 text without line breaks. A key with a stray newline
+    (a CRLF .env file) or an invisible character would otherwise fail inside http.client,
+    whose error message quotes the whole header, key included."""
+    for name, value in headers.items():
+        text = str(value)
+        try:
+            text.encode("latin-1")
+            ok = not any(c in text for c in "\r\n\0")
+        except UnicodeEncodeError:
+            ok = False
+        if not ok:
+            secret = name.lower() in _SECRET_HEADERS
+            raise ProviderError(
+                f"the {name} header contains a character HTTP does not allow"
+                + (": check the API key for a stray newline or an invisible character (its environment variable or .env file)" if secret else ""),
+                code="invalid_api_key" if secret else "invalid_header",
+            )
+
+
 def _parse_error(status: int | None, raw: bytes, url: str, headers: Any = None) -> ProviderError:
     text = raw.decode("utf-8", errors="replace") if raw else ""
     message, code, param, body = text.strip()[:500] or f"HTTP {status}", None, None, None
     try:
-        body = json.loads(text) if text.strip() else None
-    except ValueError:
+        body = json_loads(text) if text.strip() else None
+    except (ValueError, RecursionError):
         body = None
     if isinstance(body, dict):
         err = body.get("error", body)
@@ -69,18 +98,32 @@ def _parse_error(status: int | None, raw: bytes, url: str, headers: Any = None) 
             message = err
         if body.get("type") == "error" and isinstance(body.get("error"), dict):
             code = body["error"].get("type") or code
+        errors = body.get("errors")
+        if isinstance(errors, list):  # GitHub: "Validation Failed", then what failed
+            details = [
+                str(e.get("message") or " ".join(str(e[k]) for k in ("resource", "field", "code") if e.get(k))) if isinstance(e, dict) else str(e)
+                for e in errors[:5]
+            ]
+            details = [d for d in details if d and d not in message]
+            if details:
+                message = f"{message}: {'; '.join(details)}"
     if status is not None and 300 <= status < 400:
         location = (headers.get("Location") if headers is not None else None) or "another URL"
         return ProviderError(
-            f"the server redirected to {location}; not followed so credentials are never sent to another host (check base_url)",
+            f"the server redirected to {location}; not followed so credentials are never sent to another host (check the URL, e.g. base_url)",
             status=status,
             code="redirect",
         )
     if status == 404 and not code:
         code = "not_found"
-    retryable = (status in RETRY_STATUSES) and str(code) not in NON_RETRYABLE_CODES
-    host = urllib.parse.urlsplit(url).netloc
-    return ProviderError(f"{message} ({host})", status=status, code=str(code) if code is not None else None, param=param, retryable=retryable, body=body)
+    told_to_wait = headers is not None and bool(headers.get("retry-after") or headers.get("retry-after-ms"))
+    # A 403 is final, except when the server says when to retry or it is GitHub's
+    # secondary rate limit (GitHub asks for at least a minute's wait).
+    secondary = status == 403 and "secondary rate limit" in message.lower()
+    retryable = (status in RETRY_STATUSES or (status == 403 and told_to_wait) or secondary) and str(code) not in NON_RETRYABLE_CODES
+    wait = _retry_delay(headers, 0) if told_to_wait else (MAX_DELAY if secondary else None)
+    host = _host(url)
+    return ProviderError(f"{message} ({host})", status=status, code=str(code) if code is not None else None, param=param, retryable=retryable, body=body, retry_after=wait)
 
 
 def _retry_delay(headers: Any, attempt: int) -> float:
@@ -102,6 +145,19 @@ def _retry_delay(headers: Any, attempt: int) -> float:
                 except (TypeError, ValueError, IndexError, OverflowError):
                     pass  # unusual value such as "30s": fall back to exponential backoff
     return min(MAX_DELAY, (0.5 * 2**attempt) + random.uniform(0, 0.5))
+
+
+def _via_proxy(url: str) -> str:
+    """The words " through the proxy at HOST" when a proxy setting applies to this URL:
+    then the proxy, not the API, may be what cannot be reached."""
+    parts = urllib.parse.urlsplit(url)
+    try:
+        proxy = urllib.request.getproxies().get(parts.scheme)
+        if not proxy or urllib.request.proxy_bypass(parts.hostname or ""):
+            return ""
+    except Exception:
+        return ""
+    return f" through the proxy at {_host(proxy if '://' in proxy else f'http://{proxy}')}"
 
 
 def _sleep(seconds: float, sleep: Callable[[float], None]) -> None:
@@ -140,13 +196,24 @@ def request(
     max_retries: int = 4,
     sleep: Callable[[float], None] = time.sleep,
     raw: bool = False,
+    idempotent: bool = True,
 ) -> Any:
-    """Send a request and return parsed JSON (or bytes when raw=True)."""
+    """Send a request and return parsed JSON (or bytes when raw=True). With
+    idempotent=False (a POST that sends an alert or creates something), a request whose
+    answer timed out is not sent again: the server may have received it already."""
     data = _encode(body) if body is not None else None
     hdrs = {"User-Agent": _user_agent(), "Accept": "*/*" if raw else "application/json"}
     if data is not None:
         hdrs["Content-Type"] = "application/json"
     hdrs.update({k: v for k, v in (headers or {}).items() if v is not None})
+    _check_headers(hdrs)
+    try:
+        urllib.request.Request(url)
+    except ValueError:  # urllib's message quotes the whole URL, which can hold a secret (a webhook token)
+        raise ProviderError(f"invalid URL for {_host(url)}: it must start with https:// or http://", code="invalid_url") from None
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in ("http", "https"):  # urllib would read file:// (a local file) or ftp:// just as happily
+        raise ProviderError(f"unsupported URL scheme {scheme}:// - llmshift only talks to https:// and http:// addresses", code="invalid_url")
     attempt = 0
     while True:
         if CANCEL.is_set():
@@ -174,9 +241,11 @@ def request(
                 payload = exc.read()
             except Exception:
                 payload = b""
+            finally:
+                exc.close()  # the error response is a socket too
             err = _parse_error(exc.code, payload, url, exc.headers)
             if err.retryable and attempt < max_retries:
-                _sleep(_retry_delay(exc.headers, attempt), sleep)
+                _sleep(err.retry_after if err.retry_after is not None else _retry_delay(exc.headers, attempt), sleep)
                 attempt += 1
                 continue
             raise err from None
@@ -192,12 +261,16 @@ def request(
                     code="ssl_error",
                 ) from None
             reason = getattr(exc, "reason", exc)
+            sent = isinstance(exc, (socket.timeout, TimeoutError))  # urllib wraps timeouts before the request is sent in URLError
+            if sent and not idempotent:
+                raise ProviderError(f"no answer from {_host(url)} within {timeout:g}s; it may still have received the request", code="timeout") from None
             if attempt < max_retries:
                 _sleep(_retry_delay(None, attempt), sleep)
                 attempt += 1
                 continue
-            host = urllib.parse.urlsplit(url).netloc or url
-            raise ProviderError(f"cannot reach {host}: {reason}", code="connection_error", retryable=True) from None
+            raise ProviderError(f"cannot reach {_host(url)}{_via_proxy(url)}: {reason}", code="connection_error", retryable=True) from None
+        except ValueError:  # http.client refused the request; its message would quote the headers
+            raise ProviderError(f"the request to {_host(url)} could not be sent: a header or the URL has a character HTTP does not allow", code="invalid_header") from None
 
 
 def post_json(url: str, body: Any, **kwargs: Any) -> Any:

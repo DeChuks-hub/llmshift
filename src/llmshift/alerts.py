@@ -13,6 +13,7 @@ import json
 import os
 import smtplib
 import ssl
+import urllib.parse
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
@@ -91,13 +92,24 @@ def _url(dest: dict) -> str:
     return url
 
 
+def _post(url: str, body: Any, **kwargs: Any) -> Any:
+    # A delivery whose answer timed out is not sent again: it may have arrived already.
+    return http.post_json(url, body, timeout=30, max_retries=2, raw=True, idempotent=False, **kwargs)
+
+
+def _slack_escape(text: str) -> str:
+    """Slack reads <!channel>, <@U123> and <url|label> in message text: model output
+    and file names must not ping anyone or turn into links."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _send_slack(dest: dict, msg: AlertMessage) -> None:
-    http.post_json(_url(dest), {"text": msg.text(markdown=True)}, timeout=20, max_retries=2, raw=True)
+    _post(_url(dest), {"text": _slack_escape(msg.text(markdown=True))})
 
 
 def _send_discord(dest: dict, msg: AlertMessage) -> None:
     text = msg.text(markdown=False)
-    http.post_json(_url(dest), {"content": text[:1990]}, timeout=20, max_retries=2, raw=True)
+    _post(_url(dest), {"content": text[:1990], "allowed_mentions": {"parse": []}})  # never @everyone
 
 
 def _send_teams(dest: dict, msg: AlertMessage) -> None:
@@ -119,30 +131,42 @@ def _send_teams(dest: dict, msg: AlertMessage) -> None:
             }
         ],
     }
-    http.post_json(_url(dest), card, timeout=20, max_retries=2, raw=True)
+    _post(_url(dest), card)
 
 
 def _send_webhook(dest: dict, msg: AlertMessage) -> None:
     headers = dict(dest.get("headers") or {})
-    http.post_json(_url(dest), msg.payload(), headers=headers, timeout=20, max_retries=2, raw=True)
+    _post(_url(dest), msg.payload(), headers=headers)
 
 
-def _send_github(dest: dict, msg: AlertMessage) -> None:
+def _github_target(dest: dict) -> tuple[str, str, str]:
     token = os.environ.get(dest.get("token_env") or "GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     repo = dest.get("repo") or os.environ.get("GITHUB_REPOSITORY")
     api = (dest.get("api_url") or os.environ.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
     if not token or not repo:
         raise ValueError("the github alert needs GITHUB_TOKEN and GITHUB_REPOSITORY (both are set inside GitHub Actions)")
+    return token, repo, api
+
+
+def _send_github(dest: dict, msg: AlertMessage) -> None:
+    token, repo, api = _github_target(dest)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    label = dest.get("label", "llmshift")
+    label = str(dest.get("label", "llmshift"))
     title = msg.issue_title or f"[llmshift] {msg.model}: behaviour drift detected"
     body = "\n".join([f"**{msg.title}**", ""] + [f"- {line}" for line in msg.lines] + (["", f"Run: {msg.run_url}"] if msg.run_url else []))
-    issues = http.get_json(f"{api}/repos/{repo}/issues?state=open&labels={label}&per_page=50", headers=headers, timeout=20, max_retries=2)
-    existing = next((i for i in issues or [] if isinstance(i, dict) and i.get("title") == title), None)
+    existing = None
+    for page in range(1, 11):  # every open issue with the label, not just the first page
+        issues = http.get_json(
+            f"{api}/repos/{repo}/issues?state=open&labels={urllib.parse.quote(label, safe='')}&per_page=100&page={page}",
+            headers=headers, timeout=30, max_retries=2,
+        )
+        existing = next((i for i in issues or [] if isinstance(i, dict) and i.get("title") == title), None)
+        if existing is not None or not isinstance(issues, list) or len(issues) < 100:
+            break
     if existing:
-        http.post_json(f"{api}/repos/{repo}/issues/{existing['number']}/comments", {"body": body}, headers=headers, timeout=20, max_retries=2)
+        _post(f"{api}/repos/{repo}/issues/{existing['number']}/comments", {"body": body}, headers=headers)
     else:
-        http.post_json(f"{api}/repos/{repo}/issues", {"title": title, "body": body, "labels": [label]}, headers=headers, timeout=20, max_retries=2)
+        _post(f"{api}/repos/{repo}/issues", {"title": title, "body": body, "labels": [label]}, headers=headers)
 
 
 def _send_email(dest: dict, msg: AlertMessage) -> None:
@@ -171,6 +195,11 @@ def _send_email(dest: dict, msg: AlertMessage) -> None:
             if smtp.has_extn("starttls"):
                 smtp.starttls(context=context)
                 smtp.ehlo()
+            elif user and password:
+                raise ValueError(
+                    f"the mail server {host}:{port} offers no encryption (STARTTLS), so the password is not sent; "
+                    "use port 465 (SMTP over TLS) or a server that supports STARTTLS"
+                )
             if user and password:
                 smtp.login(user, password)
             smtp.send_message(email)
@@ -193,6 +222,31 @@ SENDERS = {
 }
 
 
+def check_destinations(destinations: list[Any]) -> list[str]:
+    """What would stop an alert from arriving, found before a run that costs money: an
+    unknown type, or a missing URL, token, mail server or recipient."""
+    problems = []
+    for spec in destinations:
+        try:
+            dest = parse_destination(spec)
+        except Exception as exc:  # pragma: no cover - defensive
+            problems.append(f"invalid alert destination ({exc.__class__.__name__})")
+            continue
+        kind = dest.get("type", "")
+        try:
+            if kind not in SENDERS:
+                raise ValueError(f"unknown alert type {kind!r}; use one of {', '.join(sorted(SENDERS))}")
+            if kind in URL_ENV and not _url(dest).strip().lower().startswith(("https://", "http://")):
+                raise ValueError(f"the {kind} alert URL must start with https://")
+            if kind == "github":
+                _github_target(dest)
+            if kind == "email" and not ((dest.get("host") or os.environ.get("LLMSHIFT_SMTP_HOST")) and (dest.get("to") or os.environ.get("LLMSHIFT_ALERT_EMAIL"))):
+                raise ValueError("the email alert needs a recipient and LLMSHIFT_SMTP_HOST")
+        except ValueError as exc:
+            problems.append(str(exc))
+    return problems
+
+
 _SEVERITY_ALIASES = {"warn": "warning", "crit": "critical", "error": "critical", "information": "info"}
 
 
@@ -213,8 +267,8 @@ def deliver(destinations: list[Any], msg: AlertMessage, default_min_severity: st
             continue
         kind = dest.get("type", "")
         sender = SENDERS.get(kind)
-        if sender is None:
-            results.append((kind or str(spec), f"unknown alert type {kind!r}; use one of {', '.join(sorted(SENDERS))}"))
+        if sender is None:  # the name never repeats the destination itself: it can hold a secret URL
+            results.append((str(kind) or "alert", f"unknown alert type {kind!r}; use one of {', '.join(sorted(SENDERS))}"))
             continue
         min_sev = _severity(dest.get("min_severity"), _severity(default_min_severity, "warning"))
         if SEVERITY_RANK.get(msg.severity, 0) < SEVERITY_RANK.get(min_sev, 1):

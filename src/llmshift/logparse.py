@@ -15,6 +15,7 @@ Formats are detected per record, so one directory can mix them:
 
 from __future__ import annotations
 
+import codecs
 import csv
 import datetime as _dt
 import gzip
@@ -25,13 +26,14 @@ import os
 import random
 import re
 import sys
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from . import messages as msgs
-from .textutil import clean_surrogates, has_surrogate_escape, json_loads
+from .textutil import clean_surrogates, has_surrogate_escape, json_loads, jsonl_lines
 
 LOG_SUFFIXES = (".jsonl", ".ndjson", ".json", ".csv", ".log", ".txt")
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))  # logged prompts easily exceed the 128 KB default
@@ -98,6 +100,12 @@ def _sniff(path: Path) -> bytes:
         return fh.read(4096)
 
 
+def _encoding(path: Path) -> str:
+    """UTF-16 when the file starts with its byte-order mark (what Windows PowerShell 5.1's
+    `>` writes), else UTF-8."""
+    return "utf-16" if _sniff(path).startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig"
+
+
 def _read_document(path: Path, ref: str, stats: "LogStats") -> Any:
     """The whole file as one JSON document (None when it is not one)."""
     with _open_binary(path) as fh:
@@ -105,7 +113,7 @@ def _read_document(path: Path, ref: str, stats: "LogStats") -> Any:
     if len(raw) > MAX_DOCUMENT_BYTES:
         stats.skip("file too large to read as one JSON document (over 512 MB); export JSON Lines instead", ref)
         return _TOO_LARGE
-    text = raw.decode("utf-8-sig", errors="replace")
+    text = raw.decode("utf-16" if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)) else "utf-8-sig", errors="replace")
     try:
         data = json_loads(text)
         return clean_surrogates(data) if has_surrogate_escape(text) else data
@@ -119,6 +127,15 @@ def _read_document(path: Path, ref: str, stats: "LogStats") -> Any:
 def _lines(path: Path, ref: str, stats: "LogStats") -> Iterator[tuple[int, str]]:
     """The file's lines, read one at a time (any size of file, .gz included); a line
     over MAX_LINE_BYTES is skipped without being held in memory."""
+    if _encoding(path) == "utf-16":  # two bytes a character: read whole, then split
+        with _open_binary(path) as fh:
+            raw = fh.read(MAX_DOCUMENT_BYTES + 1)
+        if len(raw) > MAX_DOCUMENT_BYTES:
+            stats.skip("file too large (over 512 MB as UTF-16); save it as UTF-8", ref)
+            return
+        for lineno, text in enumerate(jsonl_lines(raw.decode("utf-16", errors="replace")), 1):
+            yield lineno, text
+        return
     with _open_binary(path) as fh:
         lineno = 0
         while True:
@@ -182,7 +199,7 @@ def iter_records(path: Path, stats: LogStats) -> Iterator[tuple[Any, str]]:
     ref = path.as_posix()  # portable "file:line" references in test files
     if suffix == ".csv":
         with _open_binary(path) as fh:
-            reader = csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace", newline=""))
+            reader = csv.DictReader(io.TextIOWrapper(fh, encoding=_encoding(path), errors="replace", newline=""))
             for i, row in enumerate(reader, 2):
                 yield {_csv_key(k): _csv_value(v) for k, v in row.items() if k is not None and str(k).strip()}, f"{ref}:{i}"
         return
@@ -520,9 +537,14 @@ _NON_CHAT_URL_RE = re.compile(r"/(?:embeddings|moderations|images|audio)(?:/|$)"
 
 
 def non_chat_reason(req: Any, resp: Any = None, url: Any = None) -> str | None:
-    """Why a logged call is not a chat/completion call (embeddings, moderation, images, audio)."""
+    """Why a logged call is not a chat/completion call (embeddings, moderation, images,
+    audio), or cannot be replayed from the log alone."""
     if isinstance(url, str) and _NON_CHAT_URL_RE.search(url):
         return "embedding/moderation/image/audio call (not a chat model call)"
+    if isinstance(req, dict) and (req.get("previous_response_id") or req.get("conversation") or isinstance(req.get("prompt"), dict)):
+        # Earlier turns or the prompt itself live on OpenAI's servers: replaying what the
+        # log holds would test a different request.
+        return "depends on context stored by OpenAI (previous_response_id, conversation or a stored prompt)"
     if isinstance(resp, dict):
         data = resp.get("data")
         if isinstance(data, list) and data and isinstance(data[0], dict) and ("embedding" in data[0] or "b64_json" in data[0] or ("url" in data[0] and resp.get("object") != "list")):
@@ -582,7 +604,7 @@ def sse_response(text: str) -> dict | None:
     if not isinstance(text, str) or "data:" not in text[:4000]:
         return None
     chunks = []
-    for line in text.splitlines():
+    for line in re.split(r"\r\n|\r|\n", text):  # SSE lines end there only, not at U+2028 inside the JSON
         line = line.strip()
         if not line.startswith("data:"):
             continue
@@ -1070,11 +1092,16 @@ def parse_logs(
                     if not inter.messages:
                         stats.skip("no messages", where)
                         continue
+                    try:
+                        keep = admit is None or admit(inter)
+                        if keep:
+                            sample.add(inter)
+                    except Exception as exc:  # odd fields that only grouping touches: skip this one call
+                        stats.skip("could not parse record", f"{where}: {exc.__class__.__name__}: {exc}")
+                        continue
                     stats.parsed += 1
                     stats.formats[inter.fmt] += 1
-                    if admit is None or admit(inter):
-                        sample.add(inter)
-        except (OSError, EOFError, ValueError, csv.Error) as exc:  # unreadable, truncated .gz, bad CSV
+        except (OSError, EOFError, ValueError, csv.Error, zlib.error) as exc:  # unreadable, corrupt or truncated .gz, bad CSV
             stats.skip("unreadable file", f"{path.as_posix()}: {exc.__class__.__name__}: {exc}")
     for inter in _finish_batch(batch, stats):
         stats.parsed += 1

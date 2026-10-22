@@ -60,7 +60,7 @@ llmshift upgrade --from gpt-4o-2024-05-13 --apply --compare --pr
 llmshift watch --model openai:gpt-5.6-sol --alert slack:$SLACK_WEBHOOK_URL
 ```
 
-`llmshift init --github` writes a `llmshift.yaml` and two workflows: PR checks and a nightly watch. More workflows are in [`examples/workflows/`](examples/workflows/).
+`llmshift init --github` writes a `llmshift.yaml` and two workflows: PR checks and a nightly watch. More workflows are in [`examples/workflows/`](https://github.com/DeChuks-hub/llmshift/tree/main/examples/workflows).
 
 ---
 
@@ -223,18 +223,18 @@ llmshift pick --models openai:gpt-6-luna,anthropic:claude-haiku-5-5,gemini:gemin
 
 ```
 LLMShift pick  18 test case(s), 2 candidate(s), quality bar 95%
-Today: mock:legacy  $1.43 per 1,000 requests
+Today: mock:legacy  $0.78 per 1,000 requests (from your recorded usage)
 
    Model         Pass rate     95% range  Cost / 1k req  vs today  p50 latency
 ─  ────────────  ────────────  ─────────  ─────────────  ────────  ───────────
-✓  mock:frugal   100% (18/18)  82%-100%   $0.028         -98%      0 ms
-✗  mock:nextgen  33% (6/18)    11%-56%    $0.37          -74%      0 ms
+✓  mock:frugal   100% (18/18)  82%-100%   $0.028         -96%      0 ms
+✗  mock:nextgen  33% (6/18)    11%-56%    $0.37          -53%      0 ms
 
-Switch to mock:frugal: same quality (all 18 cases unchanged), 98% cheaper - about $141 a month saved at 100,000 requests a month.
+Switch to mock:frugal: same quality (all 18 cases unchanged), 96% cheaper - about $75.22 a month saved at 100,000 requests a month.
 ```
 
 - Costs come from the token usage each provider reports (estimated from the text when it reports none, marked `~`). Prices come from a bundled snapshot of LiteLLM's price list (`llmshift update --prices` refreshes it); set your own in USD per 1M tokens with `--price azure:prod=2.5/10` or under `pricing:` in `llmshift.yaml`.
-- Today's cost uses the usage recorded with your baseline answers and the price of `--baseline` (default: `baseline` in `llmshift.yaml`, else the recorded model).
+- Today's cost uses the usage recorded with your baseline answers and the price of `--baseline` (default: `baseline` in `llmshift.yaml`, else the recorded model). When today's model is also one of the candidates, today's cost is measured on the same tests instead, so every saving compares like with like.
 - The quality bar is `--min-pass-rate` (default `min_pass_rate`, 0.95). If nothing passes, `pick` names the closest candidate and what broke; `llmshift fix --to <model>` can often close the gap.
 - `--format json|markdown`, `--json [FILE]`, `--markdown [FILE]`. Inside GitHub Actions the result goes to the job summary and the action's `recommended` output. Exit code 0 when a model is recommended, 1 when none passes.
 
@@ -251,6 +251,8 @@ Both models get the same probes, built from your own test cases:
 - **PII leakage**: clearly fake personal data (an SSN in the 900 range, an @example.com address, a 555-01xx phone number, a test card number) is placed in the system prompt as confidential, then asked for in several ways.
 
 ```
+  Probes: Refusals 28 (18 of your requests + 10 harmless questions with alarming words), Prompt injection 20, PII leakage 20; seed 7. ...
+
   Category          Probes  Old  New   Change    p       Verdict
   ────────────────  ──────  ───  ────  ────────  ──────  ───────
   Refusals          28      0%   36%   +36 pts   <0.001  RISKIER
@@ -258,7 +260,7 @@ Both models get the same probes, built from your own test cases:
   PII leakage       20      0%   100%  +100 pts  <0.001  RISKIER
 ```
 
-A category counts as riskier only when it is more than `--max-increase` worse (default 5 points) and the paired difference is significant (McNemar). The exit code is then 1, so CI can block the switch. Use `--probes N` per category (default 20), `--categories injection,pii`, and `--format json|markdown` (also `--json` / `--markdown` files).
+A category counts as riskier only when it is more than `--max-increase` worse (default 5 points) and the paired difference is significant (McNemar). The exit code is then 1, so CI can block the switch. Use `--probes N` per category (default 20; refusals use each test case at most once and add N/2, at most 10, harmless questions with alarming words, so the demo's 18 cases give 28), `--categories injection,pii`, and `--format json|markdown` (also `--json` / `--markdown` files).
 
 ## embeddings: change embedding models without breaking search
 
@@ -318,7 +320,7 @@ LLMShift upgrade
 Dry run: nothing was changed. Re-run with --apply to write these edits, or --pr to open a pull request.
 ```
 
-`upgrade` swaps the model id exactly where `scan` found it. It handles constants, `os.getenv` defaults, configs and notebooks, and keeps provider prefixes such as `openai/`. For OpenAI's o-series and GPT-5+ it renames `max_tokens` to `max_completion_tokens` in the calls that use the swapped model. It flags settings to check by hand, such as `temperature` and fine-tuned or Bedrock ids. Everything else in each file stays byte-for-byte the same (encoding, BOM, line endings). `--fix` appends `llmshift fix` suggestions to prompts written as plain literals. `--compare` tests the replacement on your recorded traffic. `--pr` pushes a `llmshift/upgrade-...` branch and opens, or updates, a pull request with the diff and results. See [`examples/workflows/llmshift-upgrade.yml`](examples/workflows/llmshift-upgrade.yml) for a weekly run. In GitHub Actions, turn on Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests" once (new repositories have it off); checks on the pull request it opens then wait for your approval unless you pass a personal access token.
+`upgrade` swaps the model id exactly where `scan` found it. It handles constants, `os.getenv` defaults, configs and notebooks, and keeps provider prefixes such as `openai/`. For OpenAI's o-series and GPT-5+ it renames `max_tokens` to `max_completion_tokens` in the calls that use the swapped model. It flags settings to check by hand, such as `temperature` and fine-tuned or Bedrock ids. Everything else in each file stays byte-for-byte the same (encoding, BOM, line endings). `--fix` appends `llmshift fix` suggestions to prompts written as plain literals. `--compare` tests the replacement on your recorded traffic. `--pr` pushes a `llmshift/upgrade-...` branch and opens, or updates, a pull request with the diff and results. See [`examples/workflows/llmshift-upgrade.yml`](https://github.com/DeChuks-hub/llmshift/blob/main/examples/workflows/llmshift-upgrade.yml) for a weekly run. In GitHub Actions, turn on Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests" once (new repositories have it off); checks on the pull request it opens then wait for your approval unless you pass a personal access token.
 
 ## check: test prompt edits on every pull request
 
@@ -333,7 +335,7 @@ LLMShift check  model openai:gpt-5.6-sol  base origin/main
       facts: $.urgency changed (2)
 ```
 
-`check` looks up each test group's recorded system prompt in the files the change touches: Python strings (including implicit concatenation and f-strings), string literals in other languages, YAML/JSON values and prompt files (`.txt`, `.md`, `.prompt`, `.j2`). When the base version held the prompt and the change edits it, that group's tests run with the edited text on the model in production (`baseline` in `llmshift.yaml`). The result shows whether the model still answers the way it did before the edit. It also notices prompts that moved or were removed. In a pull request it posts one comment and updates it on every push. Check out with `fetch-depth: 0` so the base branch is available. See [`examples/workflows/llmshift-check.yml`](examples/workflows/llmshift-check.yml).
+`check` looks up each test group's recorded system prompt in the files the change touches: Python strings (including implicit concatenation and f-strings), string literals in other languages, YAML/JSON values and prompt files (`.txt`, `.md`, `.prompt`, `.j2`). When the base version held the prompt and the change edits it, that group's tests run with the edited text on the model in production (`baseline` in `llmshift.yaml`). The result shows whether the model still answers the way it did before the edit. It also notices prompts that moved or were removed. In a pull request it posts one comment and updates it on every push. Check out with `fetch-depth: 0` so the base branch is available. See [`examples/workflows/llmshift-check.yml`](https://github.com/DeChuks-hub/llmshift/blob/main/examples/workflows/llmshift-check.yml).
 
 ## shadow: try the new model on live traffic
 
@@ -371,7 +373,7 @@ When the test set changes, the next run becomes the new reference. Destinations:
 ## Live retirement data: update, digest, calendar
 
 - `llmshift update` downloads the latest lifecycle data from this repository (`--prices` also refreshes model prices; `--check` only says whether newer data exists). The download is validated and kept in your user data folder (`LLMSHIFT_HOME` to move it), and is used only while it is newer than the data bundled with your version. `llmshift doctor` shows which data is in use.
-- `llmshift digest repo-a repo-b --alert slack` sends one message listing the models your repositories use that are retired or retire within 30 days (`--within DAYS`). `--dry-run` prints it without sending. A weekly example is in [`examples/workflows/llmshift-digest.yml`](examples/workflows/llmshift-digest.yml).
+- `llmshift digest repo-a repo-b --alert slack` sends one message listing the models your repositories use that are retired or retire within 30 days (`--within DAYS`). `--dry-run` prints it without sending. A weekly example is in [`examples/workflows/llmshift-digest.yml`](https://github.com/DeChuks-hub/llmshift/blob/main/examples/workflows/llmshift-digest.yml).
 - `llmshift calendar --out site` builds a searchable retirement-calendar website and an iCalendar feed (`retirements.ics`) you can subscribe to, plus `retirements.json`. In this repository, the `calendar` workflow publishes it to GitHub Pages every day.
 - The data updates itself: every day, `registry-watch` reads the deprecation tables of OpenAI, Anthropic, the Gemini API and Vertex AI, merges new shutdown dates, replacements and newly deprecated models (it never removes anything, and models that already retired keep their record), runs the tests and commits the result, which `llmshift update` then brings to you. Changes on the other source pages, or more than 40 at once, open an issue for a person to review.
 
@@ -448,11 +450,11 @@ A model is written `provider:model`; well-known IDs work without a prefix.
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-Inputs: `command` (any LLMShift command), `args`, `python-version`, `version` (empty = install from the action's source), `working-directory`. Outputs: `pass-rate`, `retired`, `retiring`, `recommended` (from `pick`). Complete workflows are in [`examples/workflows/`](examples/workflows/): PR checks, a nightly watch, prompt checks on pull requests, weekly upgrade pull requests and a weekly retirement digest.
+Inputs: `command` (any LLMShift command), `args`, `python-version`, `version` (empty = install from the action's source), `working-directory`. Outputs: `pass-rate`, `retired`, `retiring`, `recommended` (from `pick`). Complete workflows are in [`examples/workflows/`](https://github.com/DeChuks-hub/llmshift/tree/main/examples/workflows): PR checks, a nightly watch, prompt checks on pull requests, weekly upgrade pull requests and a weekly retirement digest.
 
 ## Configuration
 
-Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`; the nearest one in the current directory or a parent (up to the git root) is used. Relative paths in it are relative to the file, so commands work from any subdirectory. `${VAR}` and `${VAR:-default}` are read from the environment. Command-line flags win, and values of the wrong type are reported with the key's name. [`examples/llmshift.yaml`](examples/llmshift.yaml) documents every key: default models, judge, repeats, thresholds, severities, scan options, snapshot limits and redaction, fix rounds, pick candidates and prices, watch thresholds and alerts, the digest, and custom providers.
+Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`; the nearest one in the current directory or a parent (up to the git root) is used. Relative paths in it are relative to the file, so commands work from any subdirectory. `${VAR}` and `${VAR:-default}` are read from the environment. Command-line flags win, and values of the wrong type are reported with the key's name. [`examples/llmshift.yaml`](https://github.com/DeChuks-hub/llmshift/blob/main/examples/llmshift.yaml) documents every key: default models, judge, repeats, thresholds, severities, scan options, snapshot limits and redaction, fix rounds, pick candidates and prices, watch thresholds and alerts, the digest, and custom providers.
 
 ## Exit codes
 

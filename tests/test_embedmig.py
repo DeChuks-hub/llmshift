@@ -153,12 +153,14 @@ def test_cli_errors(corpus, tmp_path, cli_extensions, capsys):
         (["--corpus", str(empty)], "no documents"),
         (["--corpus", str(corpus), "--queries", str(tmp_path / "blank.txt")], "contains no queries"),
         (["--corpus", str(corpus), "--queries-from", str(empty)], "no embedding requests"),
-        (["--corpus", str(corpus), "--k", "0"], "at least 1"),
         (["--corpus", str(corpus), "--chunk-chars", "5"], "between 50"),
     ]
     for extra, message in cases:
         code = cli.main(["embeddings", "--from", "mock:embed-v1", "--to", "mock:embed-v2", *extra])
         assert code == 2 and message in capsys.readouterr().err, extra
+    with pytest.raises(SystemExit) as info:  # a bad number is refused before any model is called
+        cli.main(["embeddings", "--from", "mock:embed-v1", "--to", "mock:embed-v2", "--corpus", str(corpus), "--k", "0"])
+    assert info.value.code == 2 and "must be 1 or more" in capsys.readouterr().err
     code = cli.main(["embeddings", "--from", "mock:legacy", "--to", "mock:embed-v2", "--corpus", str(corpus)])
     assert code == 2 and "does not support embeddings" in capsys.readouterr().err
 

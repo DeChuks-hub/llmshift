@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..textutil import stable_hash
+from ..textutil import json_loads, stable_hash
 from . import http
 from .base import Provider, ProviderError, Response
 from .mock import coerce_response
@@ -227,8 +227,8 @@ class CommandProvider(Provider):
         text = (stdout or "").lstrip("\ufeff")
         out = text.strip()
         try:
-            data = json.loads(out)
-        except ValueError:
+            data = json_loads(out)
+        except (ValueError, RecursionError):  # plain text, or JSON nested too deeply to read: the text is the answer
             return Response(text=text.rstrip("\n"), model=self.model, finish_reason="stop")
         if isinstance(data, (dict, str)):
             return coerce_response(data, default_model=self.model)

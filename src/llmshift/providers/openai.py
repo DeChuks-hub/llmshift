@@ -20,9 +20,9 @@ import uuid
 from typing import Any
 
 from .. import messages as msgs
-from ..textutil import stable_hash
+from ..textutil import json_loads, stable_hash
 from . import http
-from .base import Provider, ProviderError, Response, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of
 
 DROPPABLE = {
     "temperature",
@@ -66,8 +66,8 @@ def _arguments_str(args: Any) -> str:
 def _parse_arguments(args: Any) -> Any:
     if isinstance(args, str):
         try:
-            return json.loads(args) if args.strip() else {}
-        except ValueError:
+            return json_loads(args) if args.strip() else {}
+        except (ValueError, RecursionError):
             return args
     return args if args is not None else {}
 
@@ -90,10 +90,9 @@ class OpenAIProvider(Provider):
     def __init__(self, model: str, *, name: str | None = None, options: dict | None = None):
         super().__init__(model, name=name or "openai", options=options)
         o = self.options
-        base = o.get("base_url") or _env(o.get("base_url_env")) or self.default_base_url
-        self.base_url = str(base).rstrip("/")
+        self.base_url = base_url_from(o, o.get("base_url_env"), self.default_base_url, self.spec)
         key_env = o.get("api_key_env", "OPENAI_API_KEY")
-        self.api_key = o.get("api_key") or _env(key_env)
+        self.api_key = clean_key(o.get("api_key")) or clean_key(_env(key_env))
         self.key_env = key_env
         self.official = "api.openai.com" in self.base_url
         self.requires_key = bool(o.get("requires_key", key_env is not None and not _is_local(self.base_url)))
@@ -492,7 +491,7 @@ class AzureOpenAIProvider(OpenAIProvider):
         super().__init__(model, name=name or "azure", options=o)
         self.endpoint = endpoint
         self.official = False
-        self.ad_token = o.get("ad_token") or os.environ.get("AZURE_OPENAI_AD_TOKEN")
+        self.ad_token = clean_key(o.get("ad_token") or os.environ.get("AZURE_OPENAI_AD_TOKEN"))
         if not endpoint:
             self._config_error = "set AZURE_OPENAI_ENDPOINT (e.g. https://my-resource.openai.azure.com) or providers.azure.endpoint"
         else:

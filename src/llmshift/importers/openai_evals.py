@@ -45,7 +45,7 @@ from .. import messages as msgs
 from ..providers import http
 from ..templating import render, render_text, uses_namespace
 from ..testset import TestCase
-from ..textutil import stable_hash
+from ..textutil import jsonl_lines, stable_hash
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 READ_ONLY_DATE = "2026-10-31"
@@ -328,7 +328,7 @@ class EvalsClient:
 def _items_from_jsonl(data: bytes | str) -> list[dict]:
     text = data.decode("utf-8-sig", "replace") if isinstance(data, bytes) else data
     out = []
-    for line in text.splitlines():
+    for line in jsonl_lines(text):
         line = line.strip()
         if not line:
             continue
@@ -553,7 +553,7 @@ def import_from_export(path: str, data: str | None = None, max_items: int | None
         doc: Any = json.loads(raw_text)
         docs = doc if isinstance(doc, list) else [doc]
     except ValueError:
-        docs = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+        docs = [json.loads(line) for line in jsonl_lines(raw_text) if line.strip()]
     evals: list[dict] = []
     loose_output_items: list[dict] = []
     loose_items: list[dict] = []
@@ -649,7 +649,7 @@ def _read_samples(root: Path, ref: str, warnings: list[str]) -> list[dict]:
         if text.startswith("version https://git-lfs"):
             warnings.append(f"{f} is a Git LFS pointer; run `git lfs pull` in the evals repo first")
             continue
-        for line in text.splitlines():
+        for line in jsonl_lines(text):
             if line.strip():
                 try:
                     rec = json.loads(line)

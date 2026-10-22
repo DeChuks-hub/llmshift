@@ -7,8 +7,8 @@ import html
 import json
 import re
 from typing import Any
-from xml.sax.saxutils import quoteattr
 from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import quoteattr
 
 from . import __version__
 from .checks import CATEGORY_TITLES
@@ -482,6 +482,7 @@ def scan_terminal(scan: Any, *, verbose: bool = False, max_locations: int = 4) -
     if not models:
         lines.append("")
         lines.append("  No model IDs found. Try --include-docs, or check the paths you passed.")
+        lines += [style(s, "grey") for s in _skipped(scan)]
         return "\n".join(lines)
     lines.append("")
     for m in models:
@@ -524,16 +525,24 @@ def scan_terminal(scan: Any, *, verbose: bool = False, max_locations: int = 4) -
     if c["active"]:
         summary.append(style(f"{c['active']} ok", "green"))
     lines.append("Summary: " + ", ".join(summary))
-    for err in scan.errors[:5]:
-        lines.append(style(f"  skipped {err}", "grey"))
+    lines += [style(s, "grey") for s in _skipped(scan)]
     return "\n".join(lines)
+
+
+def _skipped(scan: Any, shown: int = 5) -> list[str]:
+    """Files the scan could not read: always listed, so "nothing found" never hides them."""
+    out = [f"  skipped {err}" for err in scan.errors[:shown]]
+    if len(scan.errors) > shown:
+        out.append(f"  ... and {len(scan.errors) - shown} more file(s) skipped")
+    return out
 
 
 def scan_markdown(scan: Any) -> str:
     lines = ["## LLMShift scan", "", f"{scan.files_scanned} files scanned, {len(scan.findings)} model references, lifecycle data from {scan.registry_updated}.", ""]
     models = scan.models()
+    skipped = ["- " + s.strip() for s in _skipped(scan)]
     if not models:
-        return "\n".join(lines + ["No model IDs found."]) + "\n"
+        return "\n".join(lines + ["No model IDs found."] + ([""] + skipped if skipped else [])) + "\n"
     lines += ["| Status | Model | Provider | Retires | Replacement | Where |", "|---|---|---|---|---|---|"]
     for m in models:
         lk = m["lookup"]
@@ -542,6 +551,8 @@ def scan_markdown(scan: Any) -> str:
         where = ", ".join(f"`{f.location}`" for f in m["findings"][:3]) + (f" +{len(m['findings']) - 3}" if len(m["findings"]) > 3 else "")
         retires = lk.retires.isoformat() if lk and lk.retires else ""
         lines.append(f"| {icon} {label} | `{m['model']}` | {lk.provider if lk else ''} | {retires} | {('`' + lk.replacement + '`') if lk and lk.replacement else ''} | {where} |")
+    if skipped:
+        lines += ["", *skipped]
     return "\n".join(lines) + "\n"
 
 

@@ -442,3 +442,59 @@ def test_child_processes_can_neither_read_nor_write_the_protocol_streams():
     err = proc.stderr.decode()
     assert "LEAK" in err and "child read ''" in err  # the child got the null device
     assert 'server read {"jsonrpc": "2.0"}' in err  # and did not steal the next message
+
+
+def test_a_tool_still_running_after_the_client_leaves_is_stopped(server, monkeypatch):
+    """Closing stdin is how a client shuts the server down: a long tool's model calls are
+    cancelled after a short grace period, and requests queued behind it are dropped."""
+    monkeypatch.setattr(mcp, "EOF_GRACE", 0.2)
+    started = []
+
+    def slow(args, cfg):
+        started.append(True)
+        deadline = time.monotonic() + 20
+        while not http.CANCEL.is_set():
+            assert time.monotonic() < deadline, "never cancelled"
+            time.sleep(0.01)
+        return {"stopped": True}
+
+    monkeypatch.setattr(mcp.TOOLS["llmshift_doctor"], "handler", slow)
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "llmshift_doctor", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+    ]
+    out = io.BytesIO()
+    start = time.monotonic()
+    server.serve(io.BytesIO("".join(json.dumps(m) + "\n" for m in lines).encode()), out)
+    answered = [json.loads(line).get("id") for line in out.getvalue().splitlines()]
+    assert started and time.monotonic() - start < 15 and answered == [1, 2] and not http.CANCEL.is_set()
+
+
+def test_a_late_cancel_cannot_swallow_a_later_request(server):
+    server.cancel({"requestId": 9})  # nothing with id 9 is running or waiting: an old notice
+    assert server._cancelled == set()
+    assert rpc(server, "ping", rid=9)["result"] == {}
+
+
+def test_the_server_starts_beside_a_broken_config(tmp_path, monkeypatch):
+    """Tools read llmshift.yaml where they work, so a broken one in the launch folder must
+    not keep the server (and llmshift_doctor, which explains the problem) from starting."""
+    (tmp_path / "llmshift.yaml").write_text("tests: [unclosed\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    started = []
+    monkeypatch.setattr(mcp, "run_stdio", lambda **kw: started.append(kw) or 0)
+    assert cli.main(["mcp"]) == 0 and started
+    assert cli.main(["scan", "--fail-on", "never"]) == 2  # other commands still report the broken file
+
+
+def test_tools_stay_inside_the_project(server, tmp_path):
+    """The assistant (or a document it read) must not point the tools at files elsewhere."""
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text('MODEL = "gpt-4o-2024-05-13"\n', encoding="utf-8")
+    rpc(server, "initialize", {"protocolVersion": "2025-06-18"})
+    for args in ({"paths": [str(outside)]}, {"paths": ["../" + outside.name + "/*.py"]}, {"cwd": ".."}):
+        result = call(server, "llmshift_scan", args)["result"]
+        assert result["isError"] is True and "outside the project" in result["content"][0]["text"], args
+    assert payload(call(server, "llmshift_scan", {"paths": ["."]}))["files_scanned"] >= 0  # inside is fine

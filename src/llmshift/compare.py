@@ -13,7 +13,6 @@ import re
 import statistics
 import threading
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -29,7 +28,6 @@ from .runner import adaptations, run_cases
 from .stats import cases_needed, mcnemar_p, pass_rate_interval
 from .testset import TestCase, unique_ids
 from .textutil import word_count
-
 
 JUDGE_CHECKS = ("llm_judge", "llm_label", "llm_score", "modelgraded")
 
@@ -517,8 +515,9 @@ def run_compare(
     def evaluate_all(case: TestCase) -> CaseResult:
         return combine_runs([evaluate(case, responses) for responses in all_responses])
 
-    with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as pool:
-        results = list(pool.map(evaluate_all, cases))
+    from .runner import interruptible_map
+
+    results = interruptible_map(evaluate_all, cases, concurrency)  # judge calls: Ctrl+C must stop them at once
 
     adapt = adaptations(cand) + (adaptations(base) if base else [])
     if any(c.agent for c in cases):

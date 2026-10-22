@@ -10,9 +10,9 @@ import uuid
 from typing import Any
 
 from .. import messages as msgs
-from ..textutil import stable_hash
+from ..textutil import json_loads, stable_hash
 from . import http
-from .base import Provider, ProviderError, Response, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of
 
 API_VERSION = "2023-06-01"
 _DATA_URL_RE = re.compile(r"^data:([\w.+/-]+);base64,(.*)$", re.S)
@@ -103,8 +103,8 @@ def to_anthropic_messages(messages: list[dict]) -> tuple[str, list[dict]]:
                 args = tc.get("arguments")
                 if isinstance(args, str):
                     try:
-                        args = json.loads(args) if args.strip() else {}
-                    except ValueError:
+                        args = json_loads(args) if args.strip() else {}
+                    except (ValueError, RecursionError):
                         args = {"_raw": args}
                 blocks.append({"type": "tool_use", "id": _tool_id(tc.get("id")), "name": tc.get("name"), "input": args or {}})
             push("assistant", blocks)
@@ -153,9 +153,9 @@ class AnthropicProvider(Provider):
     def __init__(self, model: str, *, name: str | None = None, options: dict | None = None):
         super().__init__(model, name=name or "anthropic", options=options)
         o = self.options
-        self.base_url = str(o.get("base_url") or os.environ.get(o.get("base_url_env") or "ANTHROPIC_BASE_URL") or "https://api.anthropic.com").rstrip("/")
+        self.base_url = base_url_from(o, o.get("base_url_env") or "ANTHROPIC_BASE_URL", "https://api.anthropic.com", self.spec)
         self.key_env = o.get("api_key_env", "ANTHROPIC_API_KEY")
-        self.api_key = o.get("api_key") or (os.environ.get(self.key_env) if self.key_env else None)
+        self.api_key = clean_key(o.get("api_key")) or (clean_key(os.environ.get(self.key_env)) if self.key_env else None)
         self.version = str(o.get("anthropic_version", API_VERSION))
         self.default_max_tokens = int(o.get("max_tokens", 4096))
         self.beta = o.get("beta")

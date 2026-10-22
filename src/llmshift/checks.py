@@ -19,12 +19,29 @@ from typing import Any, Callable
 
 from . import facts as factlib
 from . import tone as tonelib
-from .formats import STRUCTURE_NAMES, analyze_json, is_refusal, parse_json_lenient, structure_signature
+from .formats import (
+    STRUCTURE_NAMES,
+    analyze_json,
+    is_refusal,
+    parse_json_lenient,
+    structure_signature,
+)
 from .jsonschema_lite import describe as describe_schema
 from .jsonschema_lite import get_path, validate
 from .templating import render, render_text
 from .testset import TestCase
-from .textutil import detect_language, language_name, normalize, rouge_l, shorten, similarity, tokenize, vector_cosine, word_count
+from .textutil import (
+    detect_language,
+    json_loads,
+    language_name,
+    normalize,
+    rouge_l,
+    shorten,
+    similarity,
+    tokenize,
+    vector_cosine,
+    word_count,
+)
 
 DEFAULT_SEVERITY = {
     "agent": "error",
@@ -490,14 +507,14 @@ def c_json_equals(check: dict, sample: Sample, case: TestCase, ctx: CheckContext
     for e in expected:
         if isinstance(e, str):
             try:
-                e = json.loads(e)
-            except ValueError:
+                e = json_loads(e)
+            except (ValueError, RecursionError):
                 pass
         parsed_expected.append(e)
     text = _target(check, sample, case)
     try:
-        got = json.loads(text) if not check.get("lenient") else parse_json_lenient(text)
-    except ValueError:
+        got = json_loads(text) if not check.get("lenient") else parse_json_lenient(text)
+    except (ValueError, RecursionError):
         return FAIL(f"not valid JSON: {_fmt(text, 50)}")
     if any(_oss_json_equal(got, e) for e in parsed_expected):
         return PASS()

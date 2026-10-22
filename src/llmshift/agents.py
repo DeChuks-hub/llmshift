@@ -19,7 +19,7 @@ from typing import Any
 
 from . import messages as msgs
 from .providers.base import Response
-from .textutil import stable_hash
+from .textutil import json_loads, stable_hash
 
 LOOP_REPEATS = 3  # the same call this many times (and more than the old model) is a loop
 
@@ -27,8 +27,8 @@ LOOP_REPEATS = 3  # the same call this many times (and more than the old model) 
 def canonical_args(args: Any) -> str:
     if isinstance(args, str):
         try:
-            args = json.loads(args) if args.strip() else {}
-        except ValueError:
+            args = json_loads(args) if args.strip() else {}
+        except (ValueError, RecursionError):
             return args.strip()
     return json.dumps(args if args is not None else {}, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -184,8 +184,9 @@ def lookup(recorded: list[dict], call: dict, used: set) -> tuple[str, str]:
     """The recorded result for a call: the same call, else the same tool's next unused
     result, else a stub saying nothing was recorded."""
     name, args = call_key(call)
-    for r in recorded:
+    for i, r in enumerate(recorded):
         if r["name"] == name and r["args"] == args:
+            used.add(i)  # taken: a call with other arguments gets the next unused result
             return r["content"], "recorded"
     same = [i for i, r in enumerate(recorded) if r["name"] == name]
     fresh = [i for i in same if i not in used] or same
@@ -256,7 +257,7 @@ def run_agent(provider: Any, case: Any, request: dict) -> Response:
 
 def compare_steps(base_steps: list[dict], new_steps: list[dict]) -> tuple[list[str], list[str], dict]:
     """(failures, changes, details) between a recorded run and a replay."""
-    from .checks import _call_problems
+    from .checks import _pair_calls
 
     base_calls = [c for s in base_steps for c in s.get("tool_calls") or []]
     new_calls = [c for s in new_steps for c in s.get("tool_calls") or []]
@@ -282,9 +283,13 @@ def compare_steps(base_steps: list[dict], new_steps: list[dict]) -> tuple[list[s
     for name in sorted(base_names & new_names):
         olds = [c for c in base_calls if c.get("name") == name]
         news = [c for c in new_calls if c.get("name") == name]
-        for old, new in zip(olds, news):
-            failures.extend(_call_problems(name, old, new, "auto"))
-    if not missing and not extra and [c.get("name") for c in base_calls] != [c.get("name") for c in new_calls]:
+        # Calls of one step run in parallel, in any order: pair them by their arguments.
+        failures.extend(_pair_calls(name, olds, news, "auto"))
+
+    def order(steps: list[dict]) -> list[list[str]]:  # step by step; within a step the order is free
+        return [sorted(str(c.get("name")) for c in s.get("tool_calls") or []) for s in steps if s.get("tool_calls")]
+
+    if not missing and not extra and order(base_steps) != order(new_steps):
         changes.append("tools called in a different order: " + " -> ".join(str(c.get("name")) for c in new_calls))
     unrecorded = sum(1 for s in new_steps for r in s.get("results") or [] if r.get("replay") == "unrecorded")
     if unrecorded:

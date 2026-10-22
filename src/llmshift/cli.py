@@ -15,6 +15,7 @@ from . import __version__
 from . import console as con
 from .config import SAMPLE_CONFIG, ConfigError, load_config
 from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
+from .textutil import json_loads
 
 # Commands in their own modules; each provides register(subparsers).
 EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow", "mcp", "prcheck", "upgrade", "embedmig", "feed")
@@ -128,10 +129,10 @@ def _load_compare_json(path: str) -> Any:
     from .compare import CompareResult
 
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        data = json_loads(Path(path).read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         raise UsageError(f"{path} not found") from None
-    except (OSError, UnicodeDecodeError, ValueError) as exc:
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise UsageError(f"{path} is not valid JSON ({exc})") from None
     if not isinstance(data, dict) or not isinstance(data.get("cases"), list) or not isinstance(data.get("summary"), dict):
         raise UsageError(f"{path} is not a compare result (write one with `llmshift compare --json FILE`)")
@@ -166,6 +167,38 @@ def _days(text: str) -> int:
     if number < 0:
         raise argparse.ArgumentTypeError(f"must be zero or more days, got {number}")
     return number
+
+
+# argparse types: a wrong number is refused before anything runs (or is paid for).
+def rate_arg(text: str) -> float:
+    """A fraction from 0 to 1, as in --min-pass-rate 0.95."""
+    try:
+        number = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a fraction from 0 to 1, e.g. 0.95, got {text!r}") from None
+    if not 0.0 <= number <= 1.0:  # also refuses nan
+        hint = f" (for {number:g}% write {number / 100:g})" if 1 < number <= 100 else ""
+        raise argparse.ArgumentTypeError(f"must be a fraction from 0 to 1, got {text}{hint}")
+    return number
+
+
+def positive_int(text: str) -> int:
+    """A whole number of 1 or more (a count, a limit, a number of requests)."""
+    try:
+        number = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {text!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {number}")
+    return number
+
+
+def show_arg(text: str) -> str:
+    """How many cases to print: a number from 0, or "all"."""
+    value = text.strip().lower()
+    if value == "all" or (value.isdigit() and int(value) >= 0):
+        return value
+    raise argparse.ArgumentTypeError(f"expected a number or 'all', got {text!r}")
 
 
 def _show(value: str | None) -> int:
@@ -553,7 +586,7 @@ def cmd_fix(args: argparse.Namespace, cfg: dict) -> int:
         severity=_severity(cfg, args),
         rounds=args.rounds or int(fx.get("rounds", 3)),
         max_cases_per_group=args.max_cases_per_group or int(fx.get("max_cases_per_group", 12)),
-        target=float(fx.get("target_pass_rate", 1.0)),
+        target=float(fx["target_pass_rate"]) if fx.get("target_pass_rate") is not None else 1.0,  # null: the default
         source_paths=args.source or ["."],
         previous=previous,
         validate=not args.no_validate,
@@ -617,7 +650,8 @@ def cmd_fix(args: argparse.Namespace, cfg: dict) -> int:
 
 def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
     from . import report
-    from .alerts import SEVERITY_RANK
+    from .alerts import SEVERITY_RANK, check_destinations
+    from .runner import RunAborted
     from .watch import parse_every, run_watch, seconds_until, sleep_until_next
 
     w = cfg.get("watch") or {}
@@ -631,6 +665,11 @@ def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
     if args.at:
         seconds_until(args.at)
     alerts = list(w.get("alerts") or []) + list(args.alert or [])
+    problems = check_destinations(alerts)
+    if problems and not args.dry_run:  # before the run, not after paying for it
+        raise UsageError("alerts could not be delivered: " + "; ".join(problems))
+    for problem in problems:
+        con.warn(f"alert: {problem}")
     fail_on = args.fail_on or w.get("fail_on", "warning")
     # Threshold: --min-pass-rate, else watch.min_pass_rate, else the project-wide min_pass_rate,
     # each only when set in the config file (null switches it off). Without one, watch alerts on drift.
@@ -648,23 +687,32 @@ def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
     while True:
         cases, path = _load_cases(cfg, args)
         con.out(con.style(f"Watching {model}: running {len(cases)} test case(s) against the live model...", "grey"), err=True)
-        outcome = run_watch(
-            cases,
-            model,
-            history_dir=args.history or w.get("history", ".llmshift/watch"),
-            config=cfg,
-            judge=args.judge or cfg.get("judge"),
-            concurrency=args.concurrency or int(cfg.get("concurrency", 4)),
-            allow_python=args.allow_python or bool(cfg.get("allow_python_checks")),
-            severity=_severity(cfg, args),
-            min_pass_rate=float(min_rate) if min_rate is not None else None,
-            max_pass_rate_drop=args.max_drop if args.max_drop is not None else float(w.get("max_pass_rate_drop", 0.05)),
-            max_similarity_drop=float(w.get("max_similarity_drop", 0.10)),
-            retirement_warn_days=int(w.get("retirement_warn_days", 30)),
-            alerts=alerts,
-            alert_on=args.alert_on or w.get("alert_on", "warning"),
-            dry_run=args.dry_run,
-        )
+        try:
+            outcome = run_watch(
+                cases,
+                model,
+                history_dir=args.history or w.get("history", ".llmshift/watch"),
+                config=cfg,
+                judge=args.judge or cfg.get("judge"),
+                concurrency=args.concurrency or int(cfg.get("concurrency", 4)),
+                allow_python=args.allow_python or bool(cfg.get("allow_python_checks")),
+                severity=_severity(cfg, args),
+                min_pass_rate=float(min_rate) if min_rate is not None else None,
+                max_pass_rate_drop=args.max_drop if args.max_drop is not None else float(w.get("max_pass_rate_drop", 0.05)),
+                max_similarity_drop=float(w.get("max_similarity_drop", 0.10)),
+                retirement_warn_days=int(w.get("retirement_warn_days", 30)),
+                alerts=alerts,
+                alert_on=args.alert_on or w.get("alert_on", "warning"),
+                dry_run=args.dry_run,
+            )
+        except RunAborted as exc:
+            if not loop:
+                raise
+            _watch_outage(model, exc, alerts, args, w)  # an outage is what a watch reports; it keeps watching
+            nxt = f"at {args.at}" if args.at else f"in {args.every}"
+            con.out(con.style(f"  next check {nxt} (Ctrl+C to stop)", "grey"))
+            sleep_until_next(args.every, args.at)
+            continue
         s = outcome.summary
         con.out(con.style("LLMShift watch", "bold") + f"  {outcome.model}  run {outcome.run_id}")
         sim = f", similarity to baseline {s['similarity']:.2f}" if s.get("similarity") is not None else ""
@@ -702,6 +750,20 @@ def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
         nxt = f"at {args.at}" if args.at else f"in {args.every}"
         con.out(con.style(f"  next check {nxt} (Ctrl+C to stop)", "grey"))
         sleep_until_next(args.every, args.at)
+
+
+def _watch_outage(model: str, exc: Exception, alerts: list, args: argparse.Namespace, w: dict) -> None:
+    from .alerts import AlertMessage, deliver, run_url
+
+    con.fail(f"every request failed: {exc}")
+    if not alerts or args.dry_run:
+        return
+    msg = AlertMessage(title=f"{model}: every request failed", severity="critical", model=str(model), lines=[str(exc)], run_url=run_url())
+    for name, err in deliver(alerts, msg, default_min_severity=args.alert_on or w.get("alert_on", "warning")):
+        if err:
+            con.warn(f"alert via {name} failed: {err}")
+        else:
+            con.out(con.style(f"  alert sent via {name}", "grey"))
 
 
 # ----------------------------------------------------------------- import
@@ -912,8 +974,8 @@ def cmd_cache(args: argparse.Namespace, cfg: dict) -> int:
 
 def _add_run_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--tests", help="test file or directory (default: tests in llmshift.yaml, else .llmshift/tests.jsonl)")
-    p.add_argument("--concurrency", type=int, help="parallel requests (default 4)")
-    p.add_argument("--limit", type=int, help="only run the first N cases")
+    p.add_argument("--concurrency", type=positive_int, help="parallel requests (default 4)")
+    p.add_argument("--limit", type=positive_int, help="only run the first N cases")
     p.add_argument("--group", action="append", help="only cases from this prompt template (repeatable)")
     p.add_argument("--tag", action="append", help="only cases with this tag (repeatable)")
     p.add_argument("--case", action="append", help="only this case id (repeatable)")
@@ -962,7 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--retiring-within", type=_days, metavar="DAYS")
     p.add_argument("--warn-days", type=_days, default=180)
     p.add_argument("--registry", action="append")
-    p.add_argument("--limit", type=int, default=60)
+    p.add_argument("--limit", type=positive_int, default=60)
     p.add_argument("--format", choices=["table", "json"], default="table")
     p.set_defaults(func=cmd_models)
 
@@ -977,8 +1039,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model", action="append", help="only calls to this model (glob, repeatable), e.g. 'gpt-4o*'")
     p.add_argument("--since", help="only calls on/after this date (YYYY-MM-DD or ISO-8601)")
     p.add_argument("--until", help="only calls on/before this date")
-    p.add_argument("--max-cases", type=int, help="maximum test cases (default 200)")
-    p.add_argument("--per-group", type=int, help="maximum cases per prompt template (default 25)")
+    p.add_argument("--max-cases", type=positive_int, help="maximum test cases (default 200)")
+    p.add_argument("--per-group", type=positive_int, help="maximum cases per prompt template (default 25)")
     p.add_argument("--seed", type=int, help="sampling seed")
     p.add_argument("--redact-pii", action="store_true", help="also replace e-mails, phone numbers, card numbers, IPs with placeholders")
     p.add_argument("--no-redact", action="store_true", help="do not redact API keys and tokens")
@@ -988,8 +1050,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--regenerate", action="store_true", help="re-generate every baseline with --baseline-model")
     p.add_argument("--with-judge-checks", action="store_true", help="add an LLM-judged equivalence check to free-text cases")
     p.add_argument("--append", action="store_true", help="add to an existing test file instead of replacing it")
-    p.add_argument("--max-records", type=int, metavar="N", help="calls held in memory (default 100000); larger logs keep a fair sample per prompt template")
-    p.add_argument("--concurrency", type=int)
+    p.add_argument("--max-records", type=positive_int, metavar="N", help="calls held in memory (default 100000); larger logs keep a fair sample per prompt template")
+    p.add_argument("--concurrency", type=positive_int)
     p.add_argument("--no-cache", action="store_true")
     p.set_defaults(func=cmd_snapshot)
 
@@ -997,10 +1059,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", "--model", "--candidate", dest="to", metavar="MODEL", help="the new model, e.g. openai:gpt-5.6-sol, anthropic:claude-sonnet-5-5")
     p.add_argument("--baseline-model", metavar="MODEL", help="also run the old model live; failures it shares are treated as noise")
     p.add_argument("--embedder", metavar="MODEL", help="embedding model for cosine similarity checks, e.g. openai:text-embedding-3-small")
-    p.add_argument("--min-pass-rate", type=float, help="exit 1 below this pass rate (default from config: 0.95)")
+    p.add_argument("--min-pass-rate", type=rate_arg, help="exit 1 below this pass rate (default from config: 0.95)")
     p.add_argument("--temperature", type=float, help="override temperature for every request")
     p.add_argument("--max-tokens", type=int, help="override the output token limit for every request")
-    p.add_argument("--show", help="how many changed cases to print (number or 'all', default 5)")
+    p.add_argument("--show", type=show_arg, help="how many changed cases to print (number or 'all', default 5)")
     p.add_argument("--verbose", "-v", action="store_true", help="print every changed case with full diffs and skipped checks")
     p.add_argument("--html", nargs="?", const="", metavar="FILE", help="HTML report (default: in the reports directory)")
     p.add_argument("--json", nargs="?", const="", metavar="FILE", help="JSON results (default: in the reports directory)")
@@ -1008,15 +1070,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--junit", nargs="?", const="", metavar="FILE", help="also write JUnit XML for CI test views")
     p.add_argument("--report-dir", help="where default reports go (default .llmshift/reports)")
     p.add_argument("--no-report", action="store_true", help="do not write the default HTML/JSON reports")
-    p.add_argument("--repeat", type=int, metavar="N", help="run each case N times: finds flaky cases and narrows the pass-rate range")
+    p.add_argument("--repeat", type=positive_int, metavar="N", help="run each case N times: finds flaky cases and narrows the pass-rate range")
     _add_run_options(p)
     p.set_defaults(func=cmd_compare)
 
     p = sub.add_parser("fix", help="suggest prompt changes until the new model matches the old one")
     p.add_argument("--to", "--model", "--candidate", dest="to", metavar="MODEL", help="the new model")
     p.add_argument("--optimizer", metavar="MODEL", help="model that rewrites prompts (optional; rule-based fixes work without it)")
-    p.add_argument("--rounds", type=int, help="improvement rounds per prompt template (default 3)")
-    p.add_argument("--max-cases-per-group", type=int, help="cases used to score each candidate prompt (default 12)")
+    p.add_argument("--rounds", type=positive_int, help="improvement rounds per prompt template (default 3)")
+    p.add_argument("--max-cases-per-group", type=positive_int, help="cases used to score each candidate prompt (default 12)")
     p.add_argument("--from-results", help="reuse a compare JSON instead of re-running the baseline comparison")
     p.add_argument("--write-tests", help="also write a copy of the test set with the suggested prompts applied")
     p.add_argument("--out", help="Markdown report path (a .json is written next to it)")
@@ -1032,8 +1094,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--alert", action="append", help="slack:<url> | discord:<url> | teams:<url> | webhook:<url> | github | email:<addr> | file:<path>")
     p.add_argument("--alert-on", choices=["info", "warning", "critical"], help="lowest drift severity that sends alerts (default warning)")
     p.add_argument("--fail-on", choices=["info", "warning", "critical", "never"], help="exit 1 at or above this drift severity (default warning)")
-    p.add_argument("--min-pass-rate", type=float, help="alert (critical) below this pass rate")
-    p.add_argument("--max-drop", type=float, help="alert when the pass rate drops by this much (default 0.05)")
+    p.add_argument("--min-pass-rate", type=rate_arg, help="alert (critical) below this pass rate")
+    p.add_argument("--max-drop", type=rate_arg, help="alert when the pass rate drops by this much (default 0.05)")
     p.add_argument("--every", help="keep running: repeat every interval, e.g. 24h, 6h, 30m")
     p.add_argument("--at", help="keep running: once a day at HH:MM local time")
     p.add_argument("--dry-run", action="store_true", help="do not write history")
@@ -1049,7 +1111,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-id", action="append", help="with --api: import this eval id (repeatable)")
     p.add_argument("--eval", action="append", help="only evals whose name matches this glob (repeatable)")
     p.add_argument("--data", help="data file for an exported eval ({\"item\": ...} JSONL)")
-    p.add_argument("--max-items", type=int, help="at most N items per eval")
+    p.add_argument("--max-items", type=positive_int, help="at most N items per eval")
     p.add_argument("--output", "-o", help="test file to write (default .llmshift/tests.jsonl)")
     p.add_argument("--split", help="write one test file per eval into this directory")
     p.add_argument("--auto-checks", action="store_true", help="also infer format/fact/tone checks from recorded outputs (as warnings)")
@@ -1063,7 +1125,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--html", nargs="?", const="", metavar="FILE", help="write an HTML report (default: next to the results file)")
     p.add_argument("--markdown", nargs="?", const="", metavar="FILE", help="write a Markdown summary (default: next to the results file)")
     p.add_argument("--junit", nargs="?", const="", metavar="FILE", help="write JUnit XML (default: next to the results file)")
-    p.add_argument("--show")
+    p.add_argument("--show", type=show_arg)
     p.add_argument("--verbose", "-v", action="store_true")
     p.set_defaults(func=cmd_report)
 
@@ -1100,7 +1162,12 @@ def main(argv: list[str] | None = None) -> int:
     from .testset import TestFileError
 
     try:
-        cfg = load_config(args.config)
+        try:
+            cfg = load_config(args.config)
+        except ConfigError:
+            if args.command != "mcp":
+                raise
+            cfg = {}  # the server reads the config for every tool call, where it works: tools report the problem
         return int(args.func(args, cfg) or 0)
     except KeyboardInterrupt:
         con.err("\ninterrupted")

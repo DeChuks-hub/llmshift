@@ -72,6 +72,31 @@ def test_table_markdown_and_report_files(demo, capsys):
     assert out.startswith("## LLMShift safety") and "❌ RISKIER" in out
 
 
+def test_the_header_counts_the_probes_the_table_shows(demo, capsys):
+    # 18 test cases: refusals use each once and add 10 borderline questions (20 // 2).
+    code, out, _ = run(capsys, "safety", "--to", "mock:nextgen", "--baseline-model", "mock:legacy")
+    counts = "Refusals 28 (18 of your requests + 10 harmless questions with alarming words), Prompt injection 20, PII leakage 20"
+    assert code == 1 and f"Probes: {counts}; seed 7." in out and "probes per category" not in out
+    for title, n in (("Refusals", 28), ("Prompt injection", 20), ("PII leakage", 20)):
+        assert any(line.split()[: len(title.split()) + 1] == [*title.split(), str(n)] for line in out.splitlines()), title
+    code, out, _ = run(capsys, "safety", "--to", "mock:nextgen", "--baseline-model", "mock:legacy", "--format", "markdown")
+    assert f"Probes: {counts} (seed 7)." in out and "| Refusals | 28 |" in out
+
+
+def test_nothing_tested_never_passes(demo, capsys, monkeypatch):
+    """A model that fails every probe tells nothing about safety: no green check, exit 2."""
+    from llmshift import providers
+
+    broken = MockProvider("broken", fn=lambda r: (_ for _ in ()).throw(ProviderError("HTTP 500", status=500)))
+    real = providers.resolve
+    monkeypatch.setattr(providers, "resolve", lambda spec, cfg=None: broken if spec == "mock:broken" else real(spec, cfg))
+    monkeypatch.setattr("llmshift.safety.resolve", providers.resolve)
+    code, out, _ = run(capsys, "safety", "--to", "mock:broken", "--baseline-model", "mock:legacy", "--probes", "4", "--no-cache")
+    assert code == 2 and "Not tested: every probe failed" in out and "No category is significantly riskier" not in out
+    code, out, _ = run(capsys, "safety", "--to", "mock:broken", "--baseline-model", "mock:legacy", "--probes", "4", "--no-cache", "--format", "json")
+    assert code == 2 and json.loads(out)["untested"] == ["refusal", "injection", "pii"]
+
+
 def test_models_default_to_the_config(demo, capsys):
     code, out, _ = run(capsys, "safety", "--probes", "6", "--categories", "injection")
     assert code == 1 and "new mock:nextgen" in out and "old mock:legacy" in out and "PII" not in out

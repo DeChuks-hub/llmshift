@@ -219,7 +219,9 @@ def test_compare_quotes_the_judge_calibration(demo_cases, tmp_path, capsys):
 
 
 def test_repeat_flag_validation(demo_cases, capsys):
-    assert cli.main(["compare", "--to", "mock:legacy", "--repeat", "0", "--no-report"]) == 2
+    with pytest.raises(SystemExit) as info:  # refused before anything runs
+        cli.main(["compare", "--to", "mock:legacy", "--repeat", "0", "--no-report"])
+    assert info.value.code == 2 and "must be 1 or more" in capsys.readouterr().err
     assert cli.main(["compare", "--to", "mock:legacy", "--repeat", "2", "--no-report", "--limit", "3"]) == 0
     assert "x 2 runs" in capsys.readouterr().out
 

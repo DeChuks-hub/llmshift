@@ -23,8 +23,10 @@ import math
 import os
 import platform
 import queue
+import re
 import sys
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +40,7 @@ from .textutil import json_loads
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+EOF_GRACE = 5.0  # seconds a running tool may go on once the client has closed its end
 PARSE_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, INVALID_PARAMS, INTERNAL_ERROR = -32700, -32600, -32601, -32602, -32603
 
 INSTRUCTIONS = (
@@ -147,7 +150,10 @@ class Server:
         self._write_lock = threading.Lock()
         self._state = threading.Lock()
         self._running: tuple | None = None
+        self._busy = False  # a request is being handled
+        self._queued: set = set()  # ids read but not started yet
         self._cancelled: set = set()
+        self._closed = False  # the input ended
 
     # ------------------------------------------------------------- dispatch
 
@@ -251,14 +257,30 @@ class Server:
             return self._result(f"unexpected {exc.__class__.__name__}: {exc}", error=True)
         return self._result(data)
 
+    def _check_paths(self, arguments: dict, base: Path) -> None:
+        """Every path a tool is given stays inside the project the server was started on:
+        an assistant (or text it was shown) must not point llmshift at ~/.ssh or ../other."""
+        root = self.root.resolve()
+        for key in PATH_ARGS:
+            value = arguments.get(key)
+            for item in value if isinstance(value, list) else [value] if isinstance(value, str) else []:
+                fixed = re.split(r"[*?\[]", str(item), maxsplit=1)[0] or "."  # the part of a glob before its wildcards
+                path = Path(fixed) if Path(fixed).is_absolute() else base / fixed
+                try:
+                    path.resolve().relative_to(root)
+                except ValueError:
+                    raise ToolError(f"{key} {item!r} is outside the project ({root}); the tools only read and write inside it") from None
+
     @contextlib.contextmanager
     def _workspace(self, arguments: dict) -> Any:
         """Run in the project directory with console output on stderr and no colour."""
         target = self.root
+        self._check_paths({"cwd": arguments["cwd"]} if arguments.get("cwd") else {}, self.root)
         if arguments.get("cwd"):
             target = (self.root / str(arguments["cwd"])).resolve()
             if not target.is_dir():
                 raise ToolError(f"cwd {arguments['cwd']!r} is not a directory (relative paths start at {self.root})")
+        self._check_paths({k: v for k, v in arguments.items() if k != "cwd"}, target)
         previous = os.getcwd()
         os.chdir(target)
         try:
@@ -281,8 +303,10 @@ class Server:
         if not _valid_id(rid):
             return
         with self._state:
-            self._cancelled.add(_key(rid))
             running = self._running == _key(rid)
+            if not running and _key(rid) not in self._queued:
+                return  # already answered (a late notice): a later request may reuse the id
+            self._cancelled.add(_key(rid))
         if running:
             from .providers import http
             from .providers.custom import kill_running
@@ -341,11 +365,30 @@ class Server:
                     elif isinstance(message, dict) and message.get("method") == "notifications/cancelled" and "id" not in message:
                         self.cancel(message.get("params"))
                     else:
+                        if isinstance(message, dict) and _valid_id(message.get("id")):
+                            with self._state:
+                                self._queued.add(_key(message["id"]))
                         jobs.put(message)
             except Exception:  # pragma: no cover - unreadable input
                 traceback.print_exc(file=sys.stderr)
             finally:
                 jobs.put(end)
+                threading.Thread(target=wind_down, name="llmshift-mcp-eof", daemon=True).start()
+
+        def wind_down() -> None:
+            """The input ended, which is how a client shuts the server down. Requests already
+            read are answered, but a tool still running after EOF_GRACE seconds has its model
+            calls and child processes stopped, and the requests behind it are dropped."""
+            time.sleep(EOF_GRACE)
+            with self._state:
+                busy = self._busy
+                if busy:
+                    self._closed = True
+            if busy:
+                from .providers.custom import kill_running
+
+                http.CANCEL.set()
+                kill_running()
 
         threading.Thread(target=read_loop, name="llmshift-mcp-reader", daemon=True).start()
         while True:
@@ -353,20 +396,24 @@ class Server:
                 message = jobs.get(timeout=0.5)  # a timed wait keeps Ctrl+C working on Windows
             except queue.Empty:
                 continue
-            if message is end:
+            if message is end or self._closed:
+                http.CANCEL.clear()
                 return
             key = _key(message["id"]) if isinstance(message, dict) and _valid_id(message.get("id")) else None
             with self._state:
+                self._queued.discard(key)
                 if key is not None and key in self._cancelled:
                     self._cancelled.discard(key)
                     continue  # cancelled before it started
                 http.CANCEL.clear()  # a cancellation applies to one request only
                 self._running = key
+                self._busy = True
             try:
                 response = self.handle(message)
             finally:
                 with self._state:
                     self._running = None
+                    self._busy = False
                     cancelled = key is not None and key in self._cancelled
                     self._cancelled.discard(key)
                     if cancelled:
@@ -427,6 +474,7 @@ def run_stdio(root: str | None = None, config_path: str | None = None) -> int:
 # ------------------------------------------------------------------ tools
 
 CWD = {"type": "string", "description": "Project directory to work in, absolute or relative to where the server started (default: that directory)."}
+PATH_ARGS = ("cwd", "paths", "sources", "output", "tests", "source", "write_tests", "files")  # confined to the project
 TESTS = {"type": "string", "description": "Test file or directory (default: tests in llmshift.yaml, usually .llmshift/tests.jsonl)."}
 STRINGS = {"type": "array", "items": {"type": "string", "minLength": 1}}
 
@@ -464,6 +512,12 @@ def _model(args: dict, cfg: Any) -> str:
     if not spec:
         raise ToolError("which model? Pass `to`, e.g. openai:gpt-5.6-sol or anthropic:claude-sonnet-5-5 (or set candidate in llmshift.yaml)")
     return str(spec)
+
+
+def _target(fix_cfg: dict) -> float:
+    """fix.target_pass_rate from llmshift.yaml; null means the default, 100%."""
+    value = fix_cfg.get("target_pass_rate")
+    return float(value) if value is not None else 1.0
 
 
 def _cache(cfg: Any, args: dict) -> Any:
@@ -616,6 +670,7 @@ def _snapshot_tool(args: dict, cfg: Any) -> dict:
         until=args.get("until"),
         max_cases=int(args.get("max_cases") or sc.get("max_cases", 200)),
         per_group=int(args.get("per_group") or sc.get("per_group", 25)),
+        max_records=int(sc.get("max_records", 100_000)),
         seed=int(sc.get("seed", 7)),
         redact_secrets=bool(sc.get("redact_secrets", True)),
         redact_pii=bool(args.get("redact_pii", sc.get("redact_pii", False))),
@@ -726,7 +781,8 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
         tests_path=path,
         min_pass_rate=float(min_rate) if min_rate is not None else None,
         show_progress=False,
-        repeat=int(args.get("repeat") or 1),
+        repeat=int(args.get("repeat") or cfg.get("repeat") or 1),
+        judge_mode=cfg.get("judge_mode") or "auto",
     )
     reports = cli._write_reports(result, SimpleNamespace(html=None, json=None, markdown=None, junit=None, no_report=False, report_dir=None), cfg, "compare")
     s = result.summary
@@ -815,7 +871,7 @@ def _fix_tool(args: dict, cfg: Any) -> dict:
         severity=dict(cfg.get("severity") or {}),
         rounds=int(args.get("rounds") or fx.get("rounds", 3)),
         max_cases_per_group=int(fx.get("max_cases_per_group", 12)),
-        target=float(fx.get("target_pass_rate", 1.0)),
+        target=_target(fx),
         source_paths=list(args.get("source") or ["."]),
         show_progress=False,
     )
@@ -910,6 +966,9 @@ def _pick_tool(args: dict, cfg: Any) -> dict:
         concurrency=int(cfg.get("concurrency", 4)),
         cache=_cache(cfg, args),
         judge=cfg.get("judge"),
+        embedder=cfg.get("embedder"),
+        allow_python=bool(cfg.get("allow_python_checks")),
+        severity=dict(cfg.get("severity") or {}),
         tests_path=path,
     )
     return result.to_dict()
@@ -981,6 +1040,7 @@ def _check_tool(args: dict, cfg: Any) -> dict:
     run = run_check(
         cases, str(model), base=args.get("base"), files=args.get("files"), all_groups=bool(args.get("all")), config=cfg,
         judge=cfg.get("judge"), concurrency=int(cfg.get("concurrency", 4)), cache=_cache(cfg, args),
+        allow_python=bool(cfg.get("allow_python_checks")), severity=dict(cfg.get("severity") or {}),
         min_pass_rate=float(min_rate) if min_rate is not None else None, show_progress=False,
     )
     return run.to_dict()

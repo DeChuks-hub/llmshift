@@ -15,13 +15,13 @@ import datetime as _dt
 import json
 import random
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from . import console as con
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
+from .textutil import json_loads, jsonl_lines
 
 MIN_LABELS = 5
 VALID = ("pass", "fail")
@@ -44,12 +44,12 @@ def load_labels(path: Path) -> list[dict]:
     if not path.exists():
         return []
     out = []
-    for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    for n, line in enumerate(jsonl_lines(path.read_text(encoding="utf-8-sig")), 1):
         if not line.strip():
             continue
         try:
-            rec = json.loads(line)
-        except ValueError as exc:
+            rec = json_loads(line)
+        except (ValueError, RecursionError) as exc:
             raise UsageError(f"{path}:{n}: invalid JSON ({exc})") from None
         if not isinstance(rec, dict) or rec.get("label") not in VALID or not isinstance(rec.get("candidate"), str):
             raise UsageError(f"{path}:{n}: a label needs \"candidate\" (text) and \"label\": \"pass\" or \"fail\"")
@@ -213,8 +213,9 @@ def run_calibration(labels: list[dict], judge: Any, *, labels_name: str = "", ca
         case = TestCase(id=str(rec.get("id") or "label"), input={"messages": rec["messages"], "params": {}}, baseline={"output": rec.get("reference") or ""}, checks=[check])
         return evaluate(check, Sample(text=rec["candidate"]), case, ctx).status
 
-    with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as pool:
-        verdicts = list(pool.map(verdict, labels))
+    from .runner import interruptible_map
+
+    verdicts = interruptible_map(verdict, labels, concurrency)
     cal = Calibration(judge=judge.spec, labels=labels_name, created_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"))
     compared = []
     for rec, got in zip(labels, verdicts):
@@ -279,8 +280,8 @@ def cmd_calibrate(args: Any, cfg: dict) -> int:
 def _calibrations(path: Path) -> dict:
     """{judge spec: calibration} from the calibration file (also the older one-judge format)."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
-    except (OSError, ValueError):
+        data = json_loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    except (OSError, ValueError, RecursionError):
         return {}
     if isinstance(data, dict) and isinstance(data.get("judges"), dict):
         return {str(k): v for k, v in data["judges"].items() if isinstance(v, dict)}

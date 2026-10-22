@@ -92,7 +92,10 @@ def test_shipped_yaml_is_valid():
     assert action["runs"]["using"] == "composite" and {"command", "args", "version"} <= set(action["inputs"])
     run_step = next(s for s in action["runs"]["steps"] if s.get("id") == "run")
     assert "${{" not in run_step["run"]  # inputs are passed via env, never interpolated into the script
-    for wf in list((ROOT / "examples" / "workflows").glob("*.yml")) + [ROOT / ".github" / "workflows" / "ci.yml"]:
+    examples = sorted((ROOT / "examples" / "workflows").glob("*.yml"))
+    assert len(examples) >= 5
+    # The repository's own workflows are not in the source archive on PyPI: check them when present.
+    for wf in examples + sorted((ROOT / ".github" / "workflows").glob("*.yml")):
         assert "jobs" in yaml.safe_load(wf.read_text(encoding="utf-8")), wf
     cfg = yaml.safe_load((ROOT / "examples" / "llmshift.yaml").read_text(encoding="utf-8"))
     assert cfg["watch"]["alerts"][0]["type"] == "slack"

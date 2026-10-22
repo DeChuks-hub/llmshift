@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from importlib import resources
 from typing import Any
 
+from .textutil import json_loads
+
 # llmshift provider name -> LiteLLM key prefixes to try before the bare model id
 _PREFIXES = {
     "gemini": ("gemini/",),
@@ -117,8 +119,8 @@ def _price_data() -> tuple[dict, str]:
     data, origin = _bundled_prices(), "bundled"
     path = user_data_dir() / "pricing.json"
     try:
-        cached = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
+        cached = json_loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, RecursionError):
         cached = None
     if cached is not None and not prices_problems(cached):
         if (_date(cached.get("fetched")) or _dt.date.min) >= (_date(data.get("fetched")) or _dt.date.min):

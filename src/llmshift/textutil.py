@@ -87,6 +87,53 @@ def clean_surrogates(value: Any) -> Any:
     return value
 
 
+# Deeper JSON is refused everywhere. The C parser's own limit depends on the OS and the
+# Python version (5000 levels parse on Linux with 3.12, not on Windows), and nested
+# values are walked recursively afterwards.
+MAX_JSON_DEPTH = 200
+_JSON_SCAN_RE = re.compile(r'["\[\]{}]')
+
+
+def json_too_deep(text: str, start: int = 0, limit: int = MAX_JSON_DEPTH) -> bool:
+    """Whether the JSON value at `start` nests more than `limit` levels. Linear time,
+    whatever the input (strings are skipped with find, never with backtracking)."""
+    if text.count("[", start) + text.count("{", start) <= limit:
+        return False
+    depth, i, search = 0, start, _JSON_SCAN_RE.search
+    while True:
+        m = search(text, i)
+        if m is None:
+            return False
+        ch, i = m.group(), m.end()
+        if ch == '"':
+            while True:  # to the closing quote: one not preceded by an odd run of backslashes
+                j = text.find('"', i)
+                if j < 0:
+                    return False
+                k = j
+                while k > i and text[k - 1] == "\\":
+                    k -= 1
+                i = j + 1
+                if (j - k) % 2 == 0:
+                    break
+        elif ch in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        else:
+            depth -= 1
+            if depth <= 0:
+                return False
+
+
+def json_loads(text: str) -> Any:
+    """json.loads for untrusted text with the same nesting limit on every platform;
+    deeper nesting raises RecursionError, as json.loads does past its own limit."""
+    if isinstance(text, str) and json_too_deep(text):
+        raise RecursionError(f"JSON nested more than {MAX_JSON_DEPTH} levels deep")
+    return json.loads(text)
+
+
 def shorten(text: Any, limit: int = 120) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= limit else s[: max(0, limit - 3)] + "..."

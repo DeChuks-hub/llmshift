@@ -133,7 +133,7 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     """Kill a command and everything it started (a shell's children would otherwise linger)."""
     try:
         if os.name == "nt":
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=15)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
         else:
             os.killpg(proc.pid, signal.SIGKILL)
     except Exception:

@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any
 
+from .textutil import json_loads, json_too_deep
+
 _FENCE_RE = re.compile(r"^\s*(```|~~~)[ \t]*([\w+#.-]*)[^\n]*\n(.*?)\n?[ \t]*\1[ \t]*\s*$", re.S)
 
 
@@ -33,6 +35,8 @@ def find_embedded_json(text: str, max_attempts: int = 50) -> tuple[Any, int, int
         attempts += 1
         if attempts > max_attempts:
             break
+        if json_too_deep(text, m.start()):
+            continue
         try:
             value, end = decoder.raw_decode(text, m.start())
         except (ValueError, RecursionError):
@@ -47,7 +51,7 @@ def find_embedded_json(text: str, max_attempts: int = 50) -> tuple[Any, int, int
 
 def _loads(text: str) -> Any:
     try:
-        return json.loads(text)
+        return json_loads(text)
     except RecursionError:
         raise ValueError("JSON nesting is too deep") from None
 

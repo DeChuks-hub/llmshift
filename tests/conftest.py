@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -36,6 +37,15 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempP
 def in_tmp(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.chdir(tmp_path)
     return tmp_path
+
+
+class _QuietHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # Timeout and reset tests hang up on purpose. Request threads can outlive their
+        # test, and a traceback printed then would land in another test's captured stderr.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class MockServer:
@@ -97,7 +107,7 @@ class MockServer:
             def do_DELETE(self) -> None:
                 self._handle("DELETE")
 
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd = _QuietHTTPServer(("127.0.0.1", 0), Handler)
         self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()

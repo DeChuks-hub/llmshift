@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
-from ..textutil import clean_surrogates, has_surrogate_escape
+from ..textutil import clean_surrogates, has_surrogate_escape, json_loads
 from .base import ProviderError
 
 RETRY_STATUSES = (408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529)
@@ -162,7 +162,7 @@ def request(
             if not text.strip():
                 return {}
             try:
-                data = json.loads(text)
+                data = json_loads(text)
                 return clean_surrogates(data) if has_surrogate_escape(text) else data
             except RecursionError:
                 raise ProviderError(f"response from {url} is nested too deeply to read", code="invalid_response") from None

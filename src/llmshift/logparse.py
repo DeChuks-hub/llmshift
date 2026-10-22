@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from . import messages as msgs
-from .textutil import clean_surrogates, has_surrogate_escape
+from .textutil import clean_surrogates, has_surrogate_escape, json_loads
 
 LOG_SUFFIXES = (".jsonl", ".ndjson", ".json", ".csv", ".log", ".txt")
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))  # logged prompts easily exceed the 128 KB default
@@ -107,7 +107,7 @@ def _read_document(path: Path, ref: str, stats: "LogStats") -> Any:
         return _TOO_LARGE
     text = raw.decode("utf-8-sig", errors="replace")
     try:
-        data = json.loads(text)
+        data = json_loads(text)
         return clean_surrogates(data) if has_surrogate_escape(text) else data
     except RecursionError:
         stats.skip("JSON nested too deeply", ref)
@@ -171,8 +171,8 @@ def _csv_key(header: str) -> str:
 def _csv_value(value: Any) -> Any:
     if isinstance(value, str) and value[:1] in ("[", "{"):
         try:
-            return json.loads(value)
-        except ValueError:
+            return json_loads(value)
+        except (ValueError, RecursionError):
             return value
     return value
 
@@ -211,7 +211,7 @@ def iter_records(path: Path, stats: LogStats) -> Iterator[tuple[Any, str]]:
             stats.skip("streamed chunk (log whole responses, e.g. with llmshift.record)", f"{ref}:{lineno}")
             continue
         try:
-            rec = json.loads(line)
+            rec = json_loads(line)
         except RecursionError:
             stats.skip("JSON nested too deeply", f"{ref}:{lineno}")
             continue
@@ -590,8 +590,8 @@ def sse_response(text: str) -> dict | None:
         if not payload or payload == "[DONE]":
             continue
         try:
-            chunks.append(json.loads(payload))
-        except ValueError:
+            chunks.append(json_loads(payload))
+        except (ValueError, RecursionError):
             return None
     chunks = [c for c in chunks if isinstance(c, dict)]
     if not chunks:
@@ -621,16 +621,16 @@ def _unwrap_body(obj: Any) -> Any:
         if streamed is not None:
             return streamed
         try:
-            parsed = json.loads(obj["body"])
-        except ValueError:
+            parsed = json_loads(obj["body"])
+        except (ValueError, RecursionError):
             parsed = None
         if isinstance(parsed, dict):
             return parsed
     if isinstance(obj, str):
         try:
-            parsed = json.loads(obj)
+            parsed = json_loads(obj)
             return parsed if isinstance(parsed, dict) else obj
-        except ValueError:
+        except (ValueError, RecursionError):
             streamed = sse_response(obj)
             return streamed if streamed is not None else obj
     return obj

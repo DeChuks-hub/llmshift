@@ -34,6 +34,7 @@ from typing import Any, BinaryIO, Callable
 from . import __version__
 from . import console as con
 from .errors import EXIT_INTERRUPTED, EXIT_OK, UsageError
+from .textutil import json_loads
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -320,7 +321,7 @@ class Server:
             if not text:
                 continue
             try:
-                yield json.loads(text)
+                yield json_loads(text)
             except (ValueError, RecursionError) as exc:
                 self.send(writer, _error(None, PARSE_ERROR, f"parse error: {exc}"))
 
@@ -374,24 +375,47 @@ class Server:
                 return
 
 
-def _protocol_stream() -> Any:
-    """A private handle on the real stdout. fd 1 is then pointed at stderr, so stray
-    output (print, child processes, C libraries) cannot corrupt the protocol stream."""
+def _protocol_streams() -> tuple[Any, Any]:
+    """Private handles on the real stdin and stdout. fd 0 is then pointed at the null
+    device and fd 1 at stderr (on Windows the standard handles too, which is what child
+    processes inherit), so stray output cannot corrupt the protocol stream and no child
+    process can read it, or block on it: on Windows a child that inherits a pipe the
+    reader thread is waiting on hangs at startup."""
+    reader = getattr(sys.stdin, "buffer", sys.stdin)
+    writer = getattr(sys.stdout, "buffer", sys.stdout)
     try:
         sys.stdout.flush()
         fd = os.dup(sys.stdout.fileno())
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-        return os.fdopen(fd, "wb")
+        writer = os.fdopen(fd, "wb")
     except (AttributeError, OSError, ValueError):
-        return getattr(sys.stdout, "buffer", sys.stdout)
+        pass
+    try:
+        fd = os.dup(sys.stdin.fileno())
+        null = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(null, sys.stdin.fileno())
+        os.close(null)
+        reader = os.fdopen(fd, "rb")
+    except (AttributeError, OSError, ValueError):
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+
+            set_std_handle = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint32, ctypes.c_void_p)(("SetStdHandle", ctypes.windll.kernel32))
+            set_std_handle(-10 & 0xFFFFFFFF, msvcrt.get_osfhandle(sys.stdin.fileno()))  # STD_INPUT_HANDLE: the null device
+            set_std_handle(-11 & 0xFFFFFFFF, msvcrt.get_osfhandle(sys.stderr.fileno()))  # STD_OUTPUT_HANDLE: stderr
+        except Exception:
+            pass  # child processes still get stdin=DEVNULL wherever llmshift starts them
+    return reader, writer
 
 
 def run_stdio(root: str | None = None, config_path: str | None = None) -> int:
     con.setup_streams()
     con.set_color(False)
     server = Server(root=root, config_path=config_path)
-    writer = _protocol_stream()
-    reader = getattr(sys.stdin, "buffer", sys.stdin)
+    reader, writer = _protocol_streams()
     print(f"llmshift {__version__} MCP server on stdio (project: {server.root})", file=sys.stderr, flush=True)
     try:
         server.serve(reader, writer)

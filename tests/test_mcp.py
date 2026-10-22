@@ -6,6 +6,7 @@ import io
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -395,3 +396,49 @@ def test_stdio_server_end_to_end(project):
         message = json.loads(line)
         assert message["jsonrpc"] == "2.0" and ("result" in message) != ("error" in message)
     assert b"MCP server on stdio" in b"".join(client.stderr)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+def test_tools_that_run_git_answer_promptly_over_stdio(project):
+    # On Windows a child process that inherits the server's stdin, a pipe the reader
+    # thread is blocked on, hangs at startup: scan waited out git's 30 s timeout, and
+    # check (git without a timeout) never answered.
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "x"], cwd=project, check=True)
+    client = Client(project)
+    try:
+        client.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "pytest", "version": "1"}})
+        start = time.monotonic()
+        scan = payload(client.request("tools/call", {"name": "llmshift_scan", "arguments": {}}, rid=2))
+        check = client.request("tools/call", {"name": "llmshift_check", "arguments": {"base": "HEAD", "model": "mock:legacy"}}, rid=3)
+        assert time.monotonic() - start < 20
+        assert scan["models"] and "result" in check
+        assert client.request("ping", rid=4)["result"] == {}  # the protocol stream is intact
+        client.proc.stdin.close()
+        assert client.proc.wait(timeout=60) == 0
+    finally:
+        if client.proc.poll() is None:
+            client.proc.kill()
+
+
+CHILD_IN_SERVER = """
+import subprocess, sys
+from llmshift import mcp
+reader, writer = mcp._protocol_streams()
+# A child started with inherited streams, as any library might start one.
+subprocess.run([sys.executable, "-c", "import sys; print('LEAK'); print('child read', repr(sys.stdin.read()), file=sys.stderr)"], timeout=60)
+writer.write(b"protocol\\n")
+writer.flush()
+print("server read", reader.readline().decode().strip(), file=sys.stderr)
+"""
+
+
+def test_child_processes_can_neither_read_nor_write_the_protocol_streams():
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(SRC), os.environ.get("PYTHONPATH", "")]))
+    proc = subprocess.run([sys.executable, "-c", CHILD_IN_SERVER], input=b'{"jsonrpc": "2.0"}\n', capture_output=True, timeout=120, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == b"protocol\n"  # the child's print went to stderr
+    err = proc.stderr.decode()
+    assert "LEAK" in err and "child read ''" in err  # the child got the null device
+    assert 'server read {"jsonrpc": "2.0"}' in err  # and did not steal the next message

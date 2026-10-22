@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import messages as msgs
-from .textutil import clean_surrogates, has_surrogate_escape
+from .textutil import clean_surrogates, has_surrogate_escape, json_loads
 from .textutil import stable_hash
 
 
@@ -198,7 +198,7 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
             if not line.strip():
                 continue
             try:
-                rec = json.loads(line)
+                rec = json_loads(line)
                 yield (clean_surrogates(rec) if has_surrogate_escape(line) else rec), f"{path}:{lineno}"
             except ValueError as exc:
                 raise TestFileError(f"{path}:{lineno}: invalid JSON ({exc})") from None
@@ -216,7 +216,7 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
             raise TestFileError(f"{path}: invalid YAML ({exc})") from None
     else:
         try:
-            data = json.loads(text)
+            data = json_loads(text)
             if has_surrogate_escape(text):
                 data = clean_surrogates(data)
         except RecursionError:

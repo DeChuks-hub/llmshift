@@ -505,3 +505,35 @@ def test_test_file_fuzz_never_crashes(tmp_path):
             load_tests(f)
         except TestFileError:
             pass
+
+
+def test_json_nesting_limit_is_the_same_on_every_platform(tmp_path):
+    # The C parser's own limit depends on the OS and Python version: 5000 levels parse on
+    # Linux and macOS with Python 3.12+, not on Windows. Verdicts must not differ.
+    limit = textutil.MAX_JSON_DEPTH
+    ok, deep = "[" * limit + "]" * limit, "[" * (limit + 1) + "]" * (limit + 1)
+    assert textutil.json_loads(ok) and not textutil.json_too_deep(ok)
+    with pytest.raises(RecursionError):
+        textutil.json_loads(deep)
+    assert formats.find_embedded_json("x" + "[" * 5000 + "]" * 5000) is None
+    assert formats.analyze_json("[" * 5000 + "]" * 5000)["valid"] is False
+    assert formats.find_embedded_json('Answer: {"a": [1, {"b": "]]]"}]} done')[0] == {"a": [1, {"b": "]]]"}]}
+    # Brackets inside strings never count, escaped quotes don't end a string, escaped backslashes do.
+    assert not textutil.json_too_deep('{"s": "' + "[" * 500 + '"}')
+    assert not textutil.json_too_deep('{"s": "a\\"' + "[" * 300 + '"}')
+    assert textutil.json_too_deep('{"s": "a\\\\", "t": ' + "[" * 250 + "]" * 250 + "}")
+    # The same limit applies to log lines and test files.
+    deep_record = json.dumps({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "choices": [{"message": {"content": "ok"}}]})
+    (tmp_path / "logs.jsonl").write_text(deep_record + "\n" + '{"x": ' + deep + "}\n", encoding="utf-8")
+    inters, stats = logparse.parse_logs([str(tmp_path / "logs.jsonl")])
+    assert len(inters) == 1 and stats.skipped["JSON nested too deeply"] == 1
+    (tmp_path / "t.jsonl").write_text('{"id": "a", "input": ' + deep + "}\n", encoding="utf-8")
+    with pytest.raises(TestFileError, match="nested too deeply"):
+        load_tests(tmp_path / "t.jsonl")
+
+
+def test_adversarial_json_nesting_scan_stays_linear():
+    started = time.perf_counter()
+    for text in ('["' + '\\"' * 400_000, ('"' + "\\" * 1000 + '"[') * 2000, '["' + "[" * 800_000 + '"]', "[" * 800_000, "[" + ",".join(["[1]"] * 200_000) + "]"):
+        textutil.json_too_deep(text)
+    assert time.perf_counter() - started < 5

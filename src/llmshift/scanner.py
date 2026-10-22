@@ -306,6 +306,7 @@ def _git_files(root: Path) -> list[Path] | None:
         proc = subprocess.run(
             ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
             cwd=str(root),
+            stdin=subprocess.DEVNULL,  # never the caller's stdin (in `llmshift mcp` that is the protocol pipe)
             capture_output=True,
             timeout=30,
         )

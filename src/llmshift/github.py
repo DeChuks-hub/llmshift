@@ -31,7 +31,7 @@ class GitError(RuntimeError):
 def git(*args: str, cwd: str | os.PathLike | None = None, check: bool = True) -> str:
     """Run git with an argument list (never through a shell) and return stdout."""
     try:
-        proc = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace")
     except FileNotFoundError:
         raise GitError("git is not installed or not on PATH") from None
     if check and proc.returncode != 0:
@@ -41,7 +41,7 @@ def git(*args: str, cwd: str | os.PathLike | None = None, check: bool = True) ->
 
 def git_bytes(*args: str, cwd: str | os.PathLike | None = None) -> bytes | None:
     try:
-        proc = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None, capture_output=True)
+        proc = subprocess.run(["git", *args], cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL, capture_output=True)
     except FileNotFoundError:
         return None
     return proc.stdout if proc.returncode == 0 else None

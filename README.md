@@ -27,14 +27,14 @@ Providers now retire models roughly every six months. When a model's behaviour c
 
 AI coding assistants can use all of this as tools: `llmshift mcp` is an [MCP server](#use-it-from-ai-coding-assistants-mcp) for Claude Code, Cursor and VS Code.
 
-LLMShift is a single Python package with one dependency (PyYAML, plus `tomli` on Python 3.9 and 3.10 to read `pyproject.toml`). It talks to OpenAI, Azure OpenAI, Anthropic, Gemini and any OpenAI-compatible endpoint over plain HTTPS, so there are no SDK version conflicts. You can also run it as a GitHub Action.
+LLMShift is a single pure-Python package with no compiled code: its only dependency is `tomli` on Python 3.9 and 3.10 (to read `pyproject.toml`), and a copy of PyYAML's pure-Python YAML parser is included. It talks to OpenAI, Azure OpenAI, Anthropic, Gemini and any OpenAI-compatible endpoint over plain HTTPS, so there are no SDK version conflicts. You can also run it as a GitHub Action.
 
 ```bash
 pip install llmshift
 llmshift demo          # 1-minute offline walkthrough with simulated models (no API key)
 ```
 
-It runs on Python 3.9 to 3.15 on Linux, macOS and Windows. On Python 3.15, PyYAML has no prebuilt wheels yet; if pip tries to compile it and there is no C compiler, install with `PYYAML_FORCE_LIBYAML=0 pip install llmshift` (pure-Python YAML, which is all LLMShift uses).
+It runs on Python 3.9 to 3.15 on Linux, macOS and Windows, and installs without a compiler on any of them.
 
 ---
 
@@ -201,7 +201,7 @@ What changed
 
 - Each case is **failed** (an error-level check broke: format, facts, tool calls, refusal, language) or **changed** (a warning-level difference: tone, length, structure, similarity). Change a check's level with `--severity tone=error`.
 - `--baseline-model <old model>` also runs the old model live. A check that the old model fails as well is counted as noise, not a regression, and the two models are compared case by case (McNemar), so "worse" means significantly worse.
-- `--judge openai:gpt-5.6-terra` adds an LLM equivalence judge, and is used by imported model graders.
+- `--judge openai:gpt-5.6-terra` adds an LLM equivalence judge to free-text answers (JSON, labels and numbers are already checked exactly), and grades imported model graders. `judge:` in `llmshift.yaml` does the same for every run.
 - Reports: a self-contained HTML report with filters and word-level diffs, plus JSON, in `.llmshift/reports/`. Add `--markdown summary.md` for PR comments and `--junit junit.xml` for CI test views; without a file name they are written to `.llmshift/reports/` too. `llmshift report results.json --html` re-renders a saved run.
 - Model quirks are handled automatically and listed in the report: parameters a model rejects (`temperature`, `max_tokens` vs `max_completion_tokens`, Claude's deprecated sampling parameters), Responses-only models, and the `developer` role. You'll also see notes such as "reasoning models count thinking tokens toward the output limit".
 - Responses are cached in `.llmshift/cache`, so re-runs are free. Turn this off with `--no-cache`.
@@ -488,4 +488,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite (370 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.
+The test suite (372 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.

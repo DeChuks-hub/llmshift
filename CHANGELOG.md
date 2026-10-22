@@ -2,7 +2,7 @@
 
 ## 0.1.0 (2026-10-22)
 
-First release. Runs on Python 3.9 to 3.15 on Linux, macOS and Windows.
+First release. Runs on Python 3.9 to 3.15 on Linux, macOS and Windows; pure Python, so it installs without a compiler (PyYAML's pure-Python parser is included under `llmshift/_vendor`, MIT License).
 
 **Find what has to move**
 

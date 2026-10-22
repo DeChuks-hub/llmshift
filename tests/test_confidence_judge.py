@@ -178,12 +178,20 @@ def test_judge_commands_end_to_end(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "4 of 6 pairs (67%)" in out and "too lenient 1x" in out
     saved = json.loads((tmp_path / ".llmshift" / "judge-calibration.json").read_text(encoding="utf-8"))
-    assert saved["judge"] == spec and saved["agree"] == 4
+    assert saved["judges"][spec]["agree"] == 4
     assert cli.main(["judge", "calibrate", "--judge", spec]) == 1  # below the default 0.8
     note = calibration_note(spec, {})
     assert "4 of 6 pairs (67%" in note and "care" in note
-    assert "last checked with" in calibration_note("openai:other", {})
+    assert "were checked with" in calibration_note("openai:other", {})
     assert "not been checked" in calibration_note(spec, {"cache_dir": str(tmp_path / "elsewhere" / "cache")})
+    # Checking a second judge keeps the first one's result.
+    (tmp_path / "strict_fn.py").write_text("import json\n\ndef judge(request):\n    return json.dumps({'verdict': 'fail', 'reason': 'r'})\n", encoding="utf-8")
+    strict = f"python:{tmp_path / 'strict_fn.py'}:judge"
+    cli.main(["judge", "calibrate", "--judge", strict, "--min-agreement", "0"])
+    assert "4 of 6 pairs" in calibration_note(spec, {}) and "pairs" in calibration_note(strict, {})
+    # The older one-judge file format is still read.
+    (tmp_path / ".llmshift" / "judge-calibration.json").write_text(json.dumps({"judge": spec, "n": 6, "agree": 4, "rate": 0.67}), encoding="utf-8")
+    assert "4 of 6 pairs" in calibration_note(spec, {})
 
 
 def test_labelling_is_interactive_and_saves_as_it_goes(demo_cases, monkeypatch, capsys):
@@ -214,3 +222,27 @@ def test_repeat_flag_validation(demo_cases, capsys):
     assert cli.main(["compare", "--to", "mock:legacy", "--repeat", "0", "--no-report"]) == 2
     assert cli.main(["compare", "--to", "mock:legacy", "--repeat", "2", "--no-report", "--limit", "3"]) == 0
     assert "x 2 runs" in capsys.readouterr().out
+
+
+def test_a_judge_given_for_the_run_judges_free_text_cases(demo_cases):
+    # The demo test set was made without --with-judge-checks: --judge must still judge
+    # the prose answers (and never the JSON triage cases, which are checked exactly).
+    assert not any(c.get("type") == "llm_judge" for case in demo_cases for c in case.checks)
+    asked = []
+
+    class Judge(MockProvider):
+        def __init__(self):
+            super().__init__("judge", fn=self._answer)
+
+        def _answer(self, request):
+            asked.append(request["messages"][-1]["content"])
+            return json.dumps({"verdict": "pass", "reason": "same meaning", "differences": []})
+
+    res = run_compare(demo_cases, "mock:nextgen", judge=Judge(), show_progress=False)
+    prose = {c.id for c in res.cases if not c.baseline_output.lstrip().startswith("{")}
+    judged = [c for c in res.cases if any(r.type == "llm_judge" for r in c.checks)]
+    assert len(judged) == len(prose) == 10 and {c.id for c in judged} == prose
+    assert asked  # nextgen rewords the support replies without breaking a rule: the judge decides those
+    assert not any('"category"' in q.split("[New answer to evaluate]")[-1] for q in asked)  # never a JSON answer
+    plain = run_compare(demo_cases, "mock:frugal", show_progress=False)
+    assert not any(r.type == "llm_judge" for c in plain.cases for r in c.checks)  # no judge, no judge checks

@@ -4,7 +4,9 @@ report flags, and package metadata."""
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -203,3 +205,30 @@ def test_day_counts_must_not_be_negative(argv, in_tmp, capsys):
     assert code == 2
     err = capsys.readouterr().err
     assert "zero or more" in err or "whole number of days" in err
+
+
+NO_PYYAML = """
+import sys
+sys.modules["yaml"] = None  # any `import yaml` now fails: llmshift must use its bundled copy
+from pathlib import Path
+from llmshift import cli
+from llmshift.config import load_config
+from llmshift.testset import load_tests, save_tests
+root = Path(sys.argv[1])
+(root / "llmshift.yaml").write_text("candidate: mock:nextgen\\nmin_pass_rate: 0.5\\n", encoding="utf-8")
+assert load_config(str(root / "llmshift.yaml"))["candidate"] == "mock:nextgen"
+(root / "t.yaml").write_text("cases:\\n  - prompt: hi\\n    baseline: hello\\n", encoding="utf-8")
+cases = load_tests(root / "t.yaml")
+save_tests(cases, root / "copy.yaml")
+assert len(load_tests(root / "copy.yaml")) == 1
+assert cli.main(["init", "--github"]) == 0
+print("ok")
+"""
+
+
+def test_llmshift_never_needs_an_installed_pyyaml(tmp_path):
+    proc = subprocess.run([sys.executable, "-c", NO_PYYAML, str(tmp_path)], cwd=tmp_path, capture_output=True, text=True, timeout=120,
+                          env=dict(os.environ, PYTHONPATH=str(ROOT / "src") + os.pathsep + os.environ.get("PYTHONPATH", "")))
+    assert proc.returncode == 0 and "ok" in proc.stdout, proc.stderr[-2000:]
+    meta = _toml(ROOT / "pyproject.toml")["project"]
+    assert not [d for d in meta["dependencies"] if d.lower().startswith("pyyaml")]

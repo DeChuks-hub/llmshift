@@ -109,7 +109,7 @@ def test_init_models_doctor_cache(tmp_path, monkeypatch, capsys):
     assert code == 0 and Path("llmshift.yaml").exists() and Path(".github/workflows/llmshift-watch.yml").exists()
     assert "anthropic:claude-sonnet-5-5" in Path("llmshift.yaml").read_text(encoding="utf-8")
     assert ".llmshift/cache/" in Path(".gitignore").read_text(encoding="utf-8")
-    import yaml
+    from llmshift._vendor import yaml
 
     for wf in Path(".github/workflows").glob("*.yml"):
         assert "jobs" in yaml.safe_load(wf.read_text(encoding="utf-8"))

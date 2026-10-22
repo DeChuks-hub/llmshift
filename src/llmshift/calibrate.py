@@ -251,7 +251,9 @@ def cmd_calibrate(args: Any, cfg: dict) -> int:
     cal = run_calibration(labels, judge, labels_name=str(path), cache=_cache(cfg, args), concurrency=args.concurrency or int(cfg.get("concurrency", 4)))
     out = calibration_path(cfg)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes((json.dumps(cal.to_dict(), indent=2, ensure_ascii=False) + "\n").encode("utf-8", "replace"))
+    judges = _calibrations(out)
+    judges[cal.judge] = cal.to_dict()  # one result per judge: checking another judge keeps this one
+    out.write_bytes((json.dumps({"judges": judges}, indent=2, ensure_ascii=False) + "\n").encode("utf-8", "replace"))
     if args.format == "json":
         con.out(json.dumps(cal.to_dict(), indent=2, ensure_ascii=False))
     else:
@@ -274,17 +276,27 @@ def cmd_calibrate(args: Any, cfg: dict) -> int:
     return EXIT_OK
 
 
-def calibration_note(judge_spec: str, cfg: dict) -> str | None:
-    """The line `compare` adds when a judge was used."""
-    path = calibration_path(cfg)
+def _calibrations(path: Path) -> dict:
+    """{judge spec: calibration} from the calibration file (also the older one-judge format)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
     except (OSError, ValueError):
-        data = None
-    if not isinstance(data, dict):
+        return {}
+    if isinstance(data, dict) and isinstance(data.get("judges"), dict):
+        return {str(k): v for k, v in data["judges"].items() if isinstance(v, dict)}
+    if isinstance(data, dict) and data.get("judge"):
+        return {str(data["judge"]): data}
+    return {}
+
+
+def calibration_note(judge_spec: str, cfg: dict) -> str | None:
+    """The line `compare` adds when a judge was used."""
+    judges = _calibrations(calibration_path(cfg))
+    if not judges:
         return "The judge has not been checked against your own judgement yet: run `llmshift judge label`, then `llmshift judge calibrate`."
-    if data.get("judge") != judge_spec:
-        return f"Your labels were last checked with {data.get('judge')}; run `llmshift judge calibrate --judge {judge_spec}` to check this judge."
+    data = judges.get(judge_spec)
+    if data is None:
+        return f"Your labels were checked with {', '.join(sorted(judges))}; run `llmshift judge calibrate --judge {judge_spec}` to check this judge."
     rate, n = data.get("rate") or 0.0, data.get("n") or 0
     when = str(data.get("created_at") or "")[:10]
     note = f"Judge {judge_spec} agrees with your labels on {data.get('agree', 0)} of {n} pairs ({rate:.0%}; checked {when})."

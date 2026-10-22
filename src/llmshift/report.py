@@ -124,7 +124,7 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
             for p, n in list(patterns.items())[:3]:
                 ex = examples.get(p) or ""
                 text = f"{p} ({n})"
-                if ex and not ex.strip().startswith(p.strip()):
+                if ex and not ex.strip().startswith(p.strip().removesuffix("...").rstrip()):
                     text += f", e.g. {ex}"
                 lines.append(style(f"      {truncate(text, width() - 8)}", "grey"))
     groups = s.get("groups") or {}

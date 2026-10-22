@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
-import yaml
+from ._vendor import yaml
 
 MAX_NODES = 1_000_000  # values after expanding every alias
 

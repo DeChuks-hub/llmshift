@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import yaml
+from llmshift._vendor import yaml
 
 import llmshift
 from llmshift.fix import optimize_prompt, run_fix

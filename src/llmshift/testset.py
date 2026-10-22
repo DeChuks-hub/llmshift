@@ -206,9 +206,8 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
                 raise TestFileError(f"{path}:{lineno}: JSON nested too deeply") from None
         return
     if suffix in (".yaml", ".yml"):
-        import yaml
-
         from . import yamlsafe
+        from ._vendor import yaml
 
         try:
             data = yamlsafe.load(text)
@@ -303,7 +302,7 @@ def save_tests(cases: list[TestCase], path: str | os.PathLike) -> None:
         raise TestFileError(f"{p} is a directory; give a file name such as {p / 'tests.jsonl'}")
     suffix = p.suffix.lower()
     if suffix in (".yaml", ".yml"):
-        import yaml
+        from ._vendor import yaml
 
         text = yaml.safe_dump({"cases": [c.to_dict() for c in cases]}, allow_unicode=True, sort_keys=False, width=100)
     elif suffix == ".json":

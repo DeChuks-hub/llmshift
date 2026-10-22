@@ -484,7 +484,7 @@ def test_every_command_in_an_empty_folder_fails_cleanly(in_tmp, capsys, monkeypa
 def test_config_fuzz_never_crashes(in_tmp):
     rng = random.Random(SEED)
     keys = ["concurrency", "timeout", "max_retries", "min_pass_rate", "repeat", "cache", "judge_mode", "tests", "baseline", "scan", "snapshot", "fix", "watch", "providers", "pricing", "severity"]
-    import yaml
+    from llmshift._vendor import yaml
 
     for _ in range(200):
         doc = {rng.choice(keys): _value(rng) for _ in range(rng.randint(1, 5))}

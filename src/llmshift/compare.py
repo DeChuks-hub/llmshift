@@ -14,13 +14,14 @@ import statistics
 import threading
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import __version__
 from .agents import trace as agent_trace
 from .cache import ResponseCache
 from .checks import CheckContext, CheckResult, Sample, run_checks
+from .infer import wants_judge
 from .messages import request_preview
 from .providers import resolve
 from .providers.base import Provider, Response
@@ -28,6 +29,18 @@ from .runner import adaptations, run_cases
 from .stats import cases_needed, mcnemar_p, pass_rate_interval
 from .testset import TestCase, unique_ids
 from .textutil import word_count
+
+
+JUDGE_CHECKS = ("llm_judge", "llm_label", "llm_score", "modelgraded")
+
+
+def with_judge_check(case: TestCase) -> TestCase:
+    """A judge given for a run (--judge, or judge: in llmshift.yaml) also judges free-text
+    cases that have no judge check of their own, as `snapshot --with-judge-checks` would.
+    Cases with imported model graders keep their own criteria."""
+    if any(c.get("type") in JUDGE_CHECKS for c in case.checks) or not wants_judge(case.baseline_output, case.baseline_tool_calls, case.params):
+        return case
+    return replace(case, checks=[*case.checks, {"type": "llm_judge"}])
 
 
 _OPTIONAL_FIELDS = (
@@ -212,11 +225,18 @@ def failure_patterns(result: CheckResult) -> list[str]:
         if d.get("unrecorded"):
             out.append("tool call with no recorded result")
         return out or ["tool arguments changed"]
+    if result.type == "llm_judge" and d.get("differences"):
+        return [_short(str(x)) for x in d["differences"][:3]]
     msg = re.sub(r"\s*\((?!s\)).*?\)", "", result.message or result.type)  # keep the "(s)" of "call(s)"
-    msg = re.sub(r'"[^"]*"', '"..."', re.sub(r"\s+", " ", msg)).strip()
-    if len(msg) > 80:
-        msg = msg[:80].rsplit(" ", 1)[0].rstrip(",;:") + "..."
-    return [msg or result.type]
+    msg = re.sub(r'"[^"]*"', '"..."', msg)
+    return [_short(msg) or result.type]
+
+
+def _short(text: str, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "..."
+    return text
 
 
 SKIP_REASONS = {
@@ -407,6 +427,8 @@ def run_compare(
     cand: Provider = resolve(candidate, config) if isinstance(candidate, str) else candidate
     base: Provider | None = resolve(baseline, config) if isinstance(baseline, str) else baseline
     judge_p: Provider | None = resolve(judge, config) if isinstance(judge, str) else judge
+    if judge_p is not None:
+        cases = [with_judge_check(c) for c in cases]
     embed_p: Provider | None = resolve(embedder, config) if isinstance(embedder, str) else embedder
     runs = max(1, int(repeat or 1))
     if judge_mode not in ("auto", "always"):

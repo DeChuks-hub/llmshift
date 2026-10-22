@@ -235,6 +235,21 @@ def infer_checks(
     return checks
 
 
+def wants_judge(output: str, tool_calls: list | None = None, params: dict | None = None) -> bool:
+    """Whether infer_checks(judge=True) gives this answer an llm_judge check: free text,
+    not JSON, a label, a number, a refusal or tool calls alone."""
+    text = (output or "").strip()
+    if not text or is_refusal(text):
+        return False
+    rf = (params or {}).get("response_format")
+    rf_type = rf.get("type") if isinstance(rf, dict) else None
+    info = analyze_json(text)
+    value = info["value"]
+    if (isinstance(value, (dict, list)) and (info["valid"] or info["fenced"])) or (rf_type in ("json_object", "json_schema") and isinstance(value, (dict, list))):
+        return False
+    return output_kind(text) not in ("number", "label")
+
+
 def merge_checks(existing: list[dict], inferred: list[dict]) -> list[dict]:
     """Keep hand-written/imported checks; add inferred ones of new types."""
     have = {c.get("type") for c in existing}

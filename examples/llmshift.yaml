@@ -1,0 +1,78 @@
+# Full configuration reference. Every key is optional; command-line flags win over this file.
+# ${VAR} and ${VAR:-default} are expanded from the environment. Relative paths are relative to this file.
+
+tests: .llmshift/tests.jsonl          # written by snapshot/import; read by compare/fix/watch (file or directory)
+baseline: openai:gpt-4o-2024-08-06       # the model in production today
+candidate: openai:gpt-5.6-sol            # the model you are moving to (compare/fix default --to)
+judge: null                              # e.g. openai:gpt-5.6-terra - LLM-judged checks and imported model graders
+embedder: null                           # e.g. openai:text-embedding-3-small - cosine similarity checks
+concurrency: 4                           # parallel requests
+timeout: 120                             # seconds per request
+max_retries: 4                           # retries on 429/5xx (Retry-After is honoured)
+cache: true                              # reuse responses in compare/fix (watch never caches)
+cache_dir: .llmshift/cache
+reports_dir: .llmshift/reports
+min_pass_rate: 0.95                      # compare exits 1 below this (watch too, unless watch.min_pass_rate is set)
+allow_python_checks: false               # run imported OpenAI Evals python graders
+
+severity:                                # per check type: error (fails the case) | warn (flags a change) | info
+  tone: warn
+  similarity: warn
+  # facts: error
+
+scan:
+  paths: ["."]
+  exclude: ["tests/fixtures/*"]
+  warn_days: 180                         # models retiring within this window are urgent
+  fail_on: retired                       # retired | retiring | deprecated | unknown | never
+  include_docs: false                    # also scan Markdown/text
+  registry: null                         # extra lifecycle JSON (a file or a list) layered over the bundled data
+
+snapshot:
+  max_cases: 200
+  per_group: 25                          # cases per prompt template
+  redact_secrets: true                   # API keys, tokens, private keys
+  redact_pii: false                      # e-mails, phone numbers, card numbers, IPs
+  seed: 7
+
+fix:
+  rounds: 3
+  optimizer: null                        # e.g. openai:gpt-5.6-sol - optional LLM prompt rewriter
+  max_cases_per_group: 12
+
+watch:
+  model: openai:gpt-5.6-sol
+  history: .llmshift/watch
+  min_pass_rate: 0.9                     # critical alert below this (null: alert on drift only)
+  max_pass_rate_drop: 0.05               # alert on a (significant) drop of this size
+  max_similarity_drop: 0.10
+  retirement_warn_days: 30
+  fail_on: warning                       # exit code: info | warning | critical | never
+  alert_on: warning                      # lowest drift severity that is sent: info | warning | critical
+  alerts:
+    - type: slack
+      url: ${SLACK_WEBHOOK_URL}
+    - type: github                       # opens/updates an issue (GITHUB_TOKEN + GITHUB_REPOSITORY)
+      min_severity: critical
+    # - type: teams
+    #   url: ${TEAMS_WEBHOOK_URL}
+    # - type: webhook
+    #   url: https://example.com/hooks/llmshift
+    # - type: email
+    #   to: ml-oncall@example.com        # uses LLMSHIFT_SMTP_HOST/_PORT/_USER/_PASSWORD/_FROM
+
+providers:                               # override presets or add OpenAI-compatible endpoints
+  openai:
+    api_key_env: OPENAI_API_KEY
+  azure:
+    endpoint: ${AZURE_OPENAI_ENDPOINT}
+    api_version: "2024-10-21"            # or "v1" for the /openai/v1 route
+  anthropic:
+    structured_outputs: false            # true: send json_schema natively via output_config.format
+  local:
+    type: openai
+    base_url: http://localhost:8000/v1   # vLLM, LiteLLM proxy, ...
+    api_key_env: LOCAL_API_KEY
+  myapp:
+    type: command                        # your own pipeline: request JSON on stdin, answer on stdout
+    command: python scripts/answer.py

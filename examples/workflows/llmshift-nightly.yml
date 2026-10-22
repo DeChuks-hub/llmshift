@@ -1,0 +1,32 @@
+# Copy to .github/workflows/llmshift-nightly.yml
+# Every night: run the test set against the live model and alert when its behaviour drifts.
+name: llmshift-nightly
+on:
+  schedule:
+    - cron: "17 3 * * *"   # 03:17 UTC
+  workflow_dispatch:
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write          # needed for the github alert
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep the run history between nightly runs so drift is measured against previous nights.
+      - uses: actions/cache@v4
+        with:
+          path: .llmshift/watch
+          key: llmshift-watch-${{ github.run_id }}
+          restore-keys: llmshift-watch-
+
+      - uses: DeChuks-hub/llmshift@v0.1.0
+        with:
+          command: watch
+          args: --model openai:gpt-5.6-sol --alert github --alert slack
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

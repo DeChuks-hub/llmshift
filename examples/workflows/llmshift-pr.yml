@@ -1,0 +1,39 @@
+# Copy to .github/workflows/llmshift-pr.yml
+# On every pull request: fail if the code calls a retired model (with inline annotations on
+# retiring ones), then re-run the test set against the model you are moving to.
+name: llmshift
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  llmshift:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Retired / retiring models
+        uses: DeChuks-hub/llmshift@v0.1.0   # or: uses: ./  when this repository is LLMShift itself
+        with:
+          command: scan
+          args: --fail-on retired
+
+      - name: Compare the candidate model
+        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' }}
+        uses: DeChuks-hub/llmshift@v0.1.0
+        with:
+          command: compare
+          args: --to openai:gpt-5.6-sol --min-pass-rate 0.95 --junit llmshift-junit.xml
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: llmshift-reports
+          path: |
+            .llmshift/reports
+            llmshift-junit.xml
+          if-no-files-found: ignore

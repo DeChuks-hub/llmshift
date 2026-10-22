@@ -1,0 +1,72 @@
+name: "LLMShift"
+description: "Switch AI models without breaking your product: flag retiring models, compare a new model on real-usage tests, watch for drift."
+author: "Chukwu Nzubechi"
+branding:
+  icon: "shuffle"
+  color: "purple"
+
+inputs:
+  command:
+    description: "LLMShift command: scan, compare, fix, watch, snapshot, import, models"
+    required: false
+    default: "scan"
+  args:
+    description: "Extra arguments, e.g. '--to openai:gpt-5.6-sol --min-pass-rate 0.9'"
+    required: false
+    default: ""
+  python-version:
+    description: "Python version used to run LLMShift"
+    required: false
+    default: "3.12"
+  version:
+    description: "LLMShift version to install from PyPI (e.g. 0.1.0). Leave empty to install from this action's own source."
+    required: false
+    default: ""
+  working-directory:
+    description: "Directory to run in"
+    required: false
+    default: "."
+
+outputs:
+  pass-rate:
+    description: "compare/watch pass rate (0-1)"
+    value: ${{ steps.run.outputs.pass_rate }}
+  retired:
+    description: "scan: number of retired models found"
+    value: ${{ steps.run.outputs.retired }}
+  retiring:
+    description: "scan: number of models retiring within the warning window"
+    value: ${{ steps.run.outputs.retiring }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install LLMShift
+      shell: bash
+      env:
+        ACTION_VERSION: ${{ inputs.version }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        if [ -n "$ACTION_VERSION" ]; then
+          python -m pip install --disable-pip-version-check --quiet "llmshift==$ACTION_VERSION"
+        else
+          python -m pip install --disable-pip-version-check --quiet "$ACTION_PATH"
+        fi
+
+    - name: Run llmshift
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ACTION_COMMAND: ${{ inputs.command }}
+        ACTION_ARGS: ${{ inputs.args }}
+      run: |
+        # Inputs arrive through the environment (never interpolated into the script) to avoid injection.
+        # $ACTION_ARGS is split on spaces; `set -f` keeps globs such as --model 'gpt-4o*' literal.
+        set -f
+        # shellcheck disable=SC2086
+        llmshift "$ACTION_COMMAND" $ACTION_ARGS

@@ -801,10 +801,11 @@ def cmd_demo(args: argparse.Namespace, cfg: dict) -> int:
     try:
         dcfg = _load(str(root / "llmshift.yaml"))
         steps = [
-            ("1/4  llmshift scan", ["scan"]),
-            ("2/4  llmshift snapshot logs/", ["snapshot", "logs"]),
-            ("3/4  llmshift compare --to mock:nextgen", ["compare", "--to", "mock:nextgen", "--show", "3"]),
-            ("4/4  llmshift fix --to mock:nextgen", ["fix", "--to", "mock:nextgen", "--write-tests", ".llmshift/tests.fixed.jsonl"]),
+            ("1/5  llmshift scan", ["scan"]),
+            ("2/5  llmshift snapshot logs/", ["snapshot", "logs"]),
+            ("3/5  llmshift compare --to mock:nextgen", ["compare", "--to", "mock:nextgen", "--show", "3"]),
+            ("4/5  llmshift fix --to mock:nextgen", ["fix", "--to", "mock:nextgen", "--write-tests", ".llmshift/tests.fixed.jsonl"]),
+            ("5/5  llmshift pick --models mock:nextgen,mock:frugal --volume 100k", ["pick", "--models", "mock:nextgen,mock:frugal", "--volume", "100k"]),
         ]
         parser = build_parser()
         for title, argv in steps:

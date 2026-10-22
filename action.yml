@@ -7,7 +7,7 @@ branding:
 
 inputs:
   command:
-    description: "LLMShift command: scan, compare, fix, watch, snapshot, import, models"
+    description: "LLMShift command: scan, compare, check, pick, safety, fix, upgrade, watch, snapshot, import, models, digest"
     required: false
     default: "scan"
   args:
@@ -37,6 +37,9 @@ outputs:
   retiring:
     description: "scan: number of models retiring within the warning window"
     value: ${{ steps.run.outputs.retiring }}
+  recommended:
+    description: "pick: the cheapest model that still passes"
+    value: ${{ steps.run.outputs.recommended }}
 
 runs:
   using: "composite"

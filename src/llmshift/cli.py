@@ -14,12 +14,10 @@ from typing import Any
 from . import __version__
 from . import console as con
 from .config import SAMPLE_CONFIG, ConfigError, load_config
+from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
 
-EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_INTERRUPTED = 0, 1, 2, 130
-
-
-class UsageError(Exception):
-    pass
+# Commands in their own modules; each provides register(subparsers).
+EXTENSIONS: tuple[str, ...] = ()
 
 
 # ------------------------------------------------------------------ helpers
@@ -1037,6 +1035,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("cache", help="manage the response cache")
     p.add_argument("action", choices=["clear"])
     p.set_defaults(func=cmd_cache)
+
+    import importlib
+
+    for name in EXTENSIONS:
+        importlib.import_module(f"{__package__}.{name}").register(sub)
     return parser
 
 

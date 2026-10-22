@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import math
 import os
 import re
 import statistics
@@ -26,6 +25,7 @@ from typing import Any
 from .alerts import AlertMessage, SEVERITY_RANK, deliver, run_url
 from .compare import CompareResult, run_compare
 from .registry import Registry
+from .stats import mcnemar_p, two_proportion_p
 from .testset import TestCase, unique_ids
 from .textutil import rouge_l, stable_hash
 
@@ -60,25 +60,6 @@ class WatchOutcome:
         if not self.drifts:
             return "ok"
         return max(self.drifts, key=lambda d: SEVERITY_RANK.get(d.severity, 0)).severity
-
-
-def mcnemar_p(b: int, c: int) -> float:
-    """One-sided exact McNemar p-value for b regressions vs c improvements."""
-    n = b + c
-    if n == 0 or b == 0:
-        return 1.0
-    return sum(math.comb(n, k) for k in range(b, n + 1)) / (2**n)
-
-
-def two_proportion_p(p1: float, n1: int, p2: float, n2: int) -> float:
-    """One-sided p-value that pass rate p2 (of n2 cases) is lower than p1 (of n1)."""
-    if not n1 or not n2:
-        return 1.0
-    pooled = (p1 * n1 + p2 * n2) / (n1 + n2)
-    se = math.sqrt(pooled * (1 - pooled) * (1 / n1 + 1 / n2))
-    if se == 0:
-        return 0.0 if p1 > p2 else 1.0
-    return 0.5 * math.erfc(((p1 - p2) / se) / math.sqrt(2))
 
 
 def case_hash(case: TestCase) -> str:

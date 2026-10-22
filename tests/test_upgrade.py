@@ -202,6 +202,12 @@ def test_pull_request_flow(in_tmp, capsys, server, monkeypatch):
     # A second run updates the same branch and pull request instead of opening another.
     code, out, _ = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--pr")
     assert code == 0 and len(pulls) == 2 and "title" in pulls[1] and "head" not in pulls[1]
+    # What real GitHub answers while "Allow GitHub Actions to create and approve pull
+    # requests" is off (the default for new repositories): say how to fix it.
+    server.route("POST", "/repos/acme/app/pulls", lambda r: (403, {"message": "GitHub Actions is not permitted to create or approve pull requests.", "status": "403"}))
+    code, _, err = run(capsys, "upgrade", "--from", "claude-3-5-haiku-20241022", "--pr")
+    assert code == 2 and "Allow GitHub Actions to create and approve pull requests" in err
+    assert "https://github.com/acme/app/compare/main...llmshift/upgrade-claude-3-5-haiku-20241022" in err and "403, 403" not in err
     (root / "app" / "triage.py").write_bytes(before + b"# local edit\n")
     code, _, err = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--pr")
     assert code == 2 and "uncommitted changes" in err

@@ -22,6 +22,7 @@ from typing import Any
 from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
+from .providers.base import ProviderError
 
 PROTECTED_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", "vendors", "third_party", "third-party", "site-packages", ".venv", "venv", "dist", "build", ".llmshift"}
 CONFIG_NAMES = {"llmshift.yaml", "llmshift.yml", ".llmshift.yaml", ".llmshift.yml"}
@@ -816,6 +817,18 @@ def _open_pr(plan: UpgradePlan, args: argparse.Namespace, body: str, root: Path)
         where = f"https://github.com/{ctx.repo}/compare/{base}...{branch}?expand=1" if ctx.repo else f"branch {branch}"
         con.warn(f"no GITHUB_TOKEN: open the pull request yourself: {where}")
         return EXIT_OK
-    pr = gh.open_pull_request(ctx, head=branch, base=base, title=title, body=body)
+    try:
+        pr = gh.open_pull_request(ctx, head=branch, base=base, title=title, body=body)
+    except ProviderError as exc:
+        if exc.status not in (401, 403, 404):
+            raise
+        manual = f"The branch is pushed; open the pull request yourself: https://github.com/{ctx.repo}/compare/{base}...{branch}?expand=1"
+        if "not permitted to create" in str(exc):
+            raise UsageError(
+                "GitHub does not let GITHUB_TOKEN open pull requests in this repository. Turn on Settings > Actions > General > "
+                "Workflow permissions > \"Allow GitHub Actions to create and approve pull requests\", or pass a personal access "
+                f"token or GitHub App token as GITHUB_TOKEN. {manual}"
+            ) from None
+        raise UsageError(f"the token cannot open pull requests in {ctx.repo} ({exc}); the workflow needs `permissions: pull-requests: write`. {manual}") from None
     con.out(f"{con.style(con.sym('pass'), 'green')} pull request: {pr.get('html_url') or pr.get('number')}")
     return EXIT_OK

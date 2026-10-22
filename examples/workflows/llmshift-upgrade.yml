@@ -2,8 +2,11 @@
 # Every Monday: find models in this repository that are retired or retire soon, swap them
 # for their replacement, test the replacement on the recorded traffic and open a pull
 # request with the diff and the results ("Dependabot for AI models").
-# Pull requests opened with GITHUB_TOKEN do not start other workflows; use a personal
-# access token or a GitHub App token instead if your CI must run on them.
+# One-time setup: Settings -> Actions -> General -> Workflow permissions -> tick "Allow
+# GitHub Actions to create and approve pull requests" (new repositories have it off).
+# Checks on a pull request opened with GITHUB_TOKEN wait until someone with write access
+# approves them ("Approve workflows to run"); a personal access token or GitHub App token
+# passed as GITHUB_TOKEN starts them right away.
 name: llmshift upgrade
 on:
   schedule:

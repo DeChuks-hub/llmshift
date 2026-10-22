@@ -76,38 +76,45 @@ def _quoted_strings(text: str) -> list[str]:
     return out
 
 
-def _python_strings(text: str) -> list[str] | None:
+def _render(node: ast.AST) -> str | None:
+    """The runtime text of a Python string expression (f-string fields kept as {expr})."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = []
+        for v in node.values:
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                parts.append(v.value)
+            elif isinstance(v, ast.FormattedValue):
+                try:
+                    parts.append("{" + ast.unparse(v.value) + "}")  # type: ignore[attr-defined]
+                except Exception:
+                    parts.append("{...}")
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _render(node.left), _render(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _python_nodes(text: str) -> list[tuple[str, int, int]] | None:
+    """(string, first line, last line) for each string expression in Python source."""
     try:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return None
-    out: list[str] = []
-
-    def render(node: ast.AST) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
-        if isinstance(node, ast.JoinedStr):
-            parts = []
-            for v in node.values:
-                if isinstance(v, ast.Constant) and isinstance(v.value, str):
-                    parts.append(v.value)
-                elif isinstance(v, ast.FormattedValue):
-                    try:
-                        parts.append("{" + ast.unparse(v.value) + "}")  # type: ignore[attr-defined]
-                    except Exception:
-                        parts.append("{...}")
-            return "".join(parts)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left, right = render(node.left), render(node.right)
-            if left is not None and right is not None:
-                return left + right
-        return None
-
+    out: list[tuple[str, int, int]] = []
     for node in ast.walk(tree):
-        value = render(node)
+        value = _render(node)
         if value is not None:
-            out.append(value)
+            out.append((value, getattr(node, "lineno", 0), getattr(node, "end_lineno", None) or getattr(node, "lineno", 0)))
     return out
+
+
+def _python_strings(text: str) -> list[str] | None:
+    nodes = _python_nodes(text)
+    return None if nodes is None else [value for value, _, _ in nodes]
 
 
 def _data_strings(value: Any, out: list[str]) -> None:
@@ -185,6 +192,58 @@ def best_match(candidates: list[str], target: str, floor: float) -> str | None:
     return best
 
 
+def _spans(text: str, path: str) -> list[tuple[str, int, int]]:
+    """Prompt candidates with the lines they occupy (1-based, inclusive)."""
+    if Path(path).suffix.lower() in TEXT_SUFFIXES:
+        return [(text, 1, text.count("\n") + 1)] if len(text.strip()) >= MIN_PROMPT else []
+    nodes = _python_nodes(text) if Path(path).suffix.lower() in (".py", ".pyi") else None
+    if nodes is None:  # other languages and data files: place each string by its first line
+        lines = text.splitlines()
+        nodes = []
+        for value in prompt_candidates(text, path):
+            probe = next((ln.strip() for ln in value.splitlines() if ln.strip()), "")[:40]
+            if len(probe) < 8:
+                continue
+            at = next((i for i, line in enumerate(lines, 1) if probe in line), None)
+            if at is not None:
+                nodes.append((value, at, at + value.count("\n")))
+    return [n for n in nodes if len(n[0].strip()) >= MIN_PROMPT]
+
+
+def positional_edit(base_text: str, base_path: str, new_text: str, new_path: str, base_prompt: str, exclude: set[str]) -> str | None:
+    """The string that took a prompt's place, however different its wording: the prompt's
+    lines in the base file are mapped through a line diff into the new file. None when
+    nothing new sits there, or more than one string could be it."""
+    where = next(((a, b) for value, a, b in _spans(base_text, base_path) if norm(value) == norm(base_prompt)), None)
+    if where is None:
+        return None
+    first, last = where[0] - 1, where[1]  # 0-based, half-open
+    lo = hi = None
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, base_text.splitlines(), new_text.splitlines(), autojunk=False).get_opcodes():
+        if tag == "insert":
+            overlaps = first <= i1 <= last
+            start, end = j1, j2
+        else:
+            overlaps = i1 < last and i2 > first
+            start, end = (j1 + max(first - i1, 0), j1 + min(last, i2) - i1) if tag == "equal" else (j1, j2)
+        if overlaps and end > start:
+            lo, hi = (start, end) if lo is None else (min(lo, start), max(hi, end))
+    if lo is None:
+        return None
+    before = {norm(value) for value, _, _ in _spans(base_text, base_path)}
+    scored = []
+    for value, a, b in _spans(new_text, new_path):
+        overlap = min(b, hi) - max(a - 1, lo)
+        if overlap > 0 and norm(value) not in before and norm(value) not in exclude:
+            scored.append((overlap, len(value), value))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    if len(scored) > 1 and scored[0][:2] == scored[1][:2] and norm(scored[0][2]) != norm(scored[1][2]):
+        return None  # two equally good candidates: do not guess
+    return scored[0][2]
+
+
 _SHAPES: list[Callable[[str], str]] = [
     lambda s: s,
     str.strip,
@@ -251,16 +310,28 @@ def find_prompt_changes(
     `read_base` (no history), a file holds a prompt when it holds something close to it."""
     base_cache: dict[str, list[str]] = {}
     current_cache: dict[str, list[str]] = {}
+    base_raw: dict[str, str | None] = {}
+    current_raw: dict[str, str | None] = {}
+
+    def base_text(path: str) -> str | None:
+        if path not in base_raw:
+            base_raw[path] = read_base(path) if read_base else None
+        return base_raw[path]
+
+    def current_text(path: str) -> str | None:
+        if path not in current_raw:
+            current_raw[path] = read_current(path)
+        return current_raw[path]
 
     def base_candidates(path: str) -> list[str]:
         if path not in base_cache:
-            text = read_base(path) if read_base else None
+            text = base_text(path)
             base_cache[path] = prompt_candidates(text, path) if text is not None else []
         return base_cache[path]
 
     def current_candidates(path: str) -> list[str]:
         if path not in current_cache:
-            text = read_current(path)
+            text = current_text(path)
             current_cache[path] = prompt_candidates(text, path) if text is not None else []
         return current_cache[path]
 
@@ -283,6 +354,7 @@ def find_prompt_changes(
         if not lived:
             continue
         variants: dict[str, list[str]] = {}
+        rewritten: set[str] = set()
         approximate = False
         removed: list[str] = []
         moved_to: list[str] = []
@@ -300,6 +372,12 @@ def find_prompt_changes(
                 continue
             edited = best_match(mine(now), base_prompt, EDIT_RATIO)
             source = d.new_path
+            positional = False
+            if edited is None and d.new_path:  # rewritten so much that it reads like another prompt?
+                old_text, new_text = base_text(d.old_path), current_text(d.new_path)
+                if old_text is not None and new_text is not None:
+                    edited = positional_edit(old_text, d.old_path, new_text, d.new_path, base_prompt, others)
+                    positional = edited is not None
             if edited is None:  # gone from this file: moved elsewhere in the change?
                 for other in diffs:
                     if not other.new_path or other.new_path == d.new_path or other.new_path in homes:
@@ -322,6 +400,8 @@ def find_prompt_changes(
             if norm(new_prompt) == norm(recorded):
                 unchanged = True
                 continue
+            if positional:
+                rewritten.add(new_prompt)
             variants.setdefault(new_prompt, [])
             if source and source not in variants[new_prompt]:
                 variants[new_prompt].append(source)
@@ -331,6 +411,8 @@ def find_prompt_changes(
                 note = "this prompt was edited differently in several places; each version is tested"
             elif any(f not in homes for f in files):
                 note = f"moved from {', '.join(sorted(h for h in homes if h))}"
+            elif new_prompt in rewritten:
+                note = "rewritten: matched to the old prompt by its place in the file"
             changes.append(PromptChange(group, recorded, new_prompt, files, "changed", note, approximate))
         if not variants:
             if moved_to and not removed:

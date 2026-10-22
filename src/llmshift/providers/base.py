@@ -41,7 +41,7 @@ class ProviderError(Exception):
         bits = []
         if self.status:
             bits.append(f"HTTP {self.status}")
-        if self.code:
+        if self.code and str(self.code) != str(self.status):  # GitHub repeats the status as "status": "403"
             bits.append(str(self.code))
         prefix = f"[{', '.join(bits)}] " if bits else ""
         return prefix + self.message

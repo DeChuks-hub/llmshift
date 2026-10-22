@@ -100,6 +100,28 @@ def test_find_prompt_changes_cases():
     assert PromptChange("g", "o", None, [], "removed").passed(0.95)
 
 
+def test_rewritten_prompts_are_matched_by_their_place():
+    # Found on real GitHub: a prompt rewritten from scratch read as "removed" and went untested.
+    old = "You are a support ticket triage assistant. Classify the message and reply with JSON."
+    new = "Summarise the customer's message in one short sentence for the support team."
+    keep = 'OTHER = "a log line that never changes here"\n'
+    base = {"t.py": f'import json\n\nTRIAGE = (\n    "{old}"\n)\n{keep}'}
+    now = {"t.py": f'import json\n\nTRIAGE = (\n    "{new}"\n)\n{keep}'}
+    diffs = [gh.FileDiff("M", "t.py", "t.py")]
+    [c] = find_prompt_changes({"g": old}, diffs, base.get, now.get)
+    assert c.status == "changed" and c.new == new and "rewritten" in c.note
+    for name, before, after in (("p.txt", old, new), ("prompts.yaml", f"triage: |\n  {old}\n", f"triage: |\n  {new}\n")):
+        [c] = find_prompt_changes({"g": old}, [gh.FileDiff("M", name, name)], {name: before}.get, {name: after}.get)
+        assert c.status == "changed" and c.new.strip() == new, name
+    # Deleted, with an unchanged string now where it was: not a rewrite.
+    now["t.py"] = f"import json\n\n{keep}"
+    assert [c.status for c in find_prompt_changes({"g": old}, diffs, base.get, now.get)] == ["removed"]
+    # Two equally likely new strings in its place: no guessing.
+    twin = new.upper()
+    now["t.py"] = f'import json\n\nTRIAGE = pick("{new}", "{twin}")\n{keep}'
+    assert [c.status for c in find_prompt_changes({"g": old}, diffs, base.get, now.get)] == ["removed"]
+
+
 # ------------------------------------------------------------- end to end
 
 

@@ -318,7 +318,7 @@ LLMShift upgrade
 Dry run: nothing was changed. Re-run with --apply to write these edits, or --pr to open a pull request.
 ```
 
-`upgrade` swaps the model id exactly where `scan` found it. It handles constants, `os.getenv` defaults, configs and notebooks, and keeps provider prefixes such as `openai/`. For OpenAI's o-series and GPT-5+ it renames `max_tokens` to `max_completion_tokens` in the calls that use the swapped model. It flags settings to check by hand, such as `temperature` and fine-tuned or Bedrock ids. Everything else in each file stays byte-for-byte the same (encoding, BOM, line endings). `--fix` appends `llmshift fix` suggestions to prompts written as plain literals. `--compare` tests the replacement on your recorded traffic. `--pr` pushes a `llmshift/upgrade-...` branch and opens, or updates, a pull request with the diff and results. See [`examples/workflows/llmshift-upgrade.yml`](examples/workflows/llmshift-upgrade.yml) for a weekly run.
+`upgrade` swaps the model id exactly where `scan` found it. It handles constants, `os.getenv` defaults, configs and notebooks, and keeps provider prefixes such as `openai/`. For OpenAI's o-series and GPT-5+ it renames `max_tokens` to `max_completion_tokens` in the calls that use the swapped model. It flags settings to check by hand, such as `temperature` and fine-tuned or Bedrock ids. Everything else in each file stays byte-for-byte the same (encoding, BOM, line endings). `--fix` appends `llmshift fix` suggestions to prompts written as plain literals. `--compare` tests the replacement on your recorded traffic. `--pr` pushes a `llmshift/upgrade-...` branch and opens, or updates, a pull request with the diff and results. See [`examples/workflows/llmshift-upgrade.yml`](examples/workflows/llmshift-upgrade.yml) for a weekly run. In GitHub Actions, turn on Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests" once (new repositories have it off); checks on the pull request it opens then wait for your approval unless you pass a personal access token.
 
 ## check: test prompt edits on every pull request
 
@@ -488,4 +488,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite (372 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.
+The test suite (373 tests) runs offline on Python 3.9 to 3.15. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.

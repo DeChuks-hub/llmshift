@@ -60,6 +60,7 @@ class Response:
     error: str | None = None
     error_code: str | None = None
     cached: bool = False
+    steps: list[dict] = field(default_factory=list)  # agent replays: one entry per model call
 
     @property
     def ok(self) -> bool:

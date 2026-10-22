@@ -8,6 +8,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Any, Callable
 
 from . import messages as msgs
+from .agents import run_agent
 from .cache import ResponseCache
 from .console import Progress
 from .providers import http
@@ -70,7 +71,8 @@ def run_cases(
         key = None
         if cache is not None and cache.enabled:
             try:
-                key = cache.key(provider.identity(), request, salt)
+                payload = {"request": request, "agent": case.agent} if case.agent else request
+                key = cache.key(provider.identity(), payload, salt)
                 hit = cache.get(key)
             except Exception:  # a broken cache entry must never fail the run
                 key, hit = None, None
@@ -79,7 +81,7 @@ def run_cases(
                     state["ok"] += 1
                 return case.id, hit
         try:
-            resp = provider.complete(request)
+            resp = run_agent(provider, case, request) if case.agent else provider.complete(request)
         except ProviderError as exc:
             resp = Response.failure(exc)
             if exc.fatal or exc.code in _REPEATING:

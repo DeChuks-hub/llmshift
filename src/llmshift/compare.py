@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import __version__
+from .agents import trace as agent_trace
 from .cache import ResponseCache
 from .checks import CheckContext, CheckResult, Sample, run_checks
 from .messages import request_preview
@@ -32,7 +33,7 @@ from .textutil import word_count
 _OPTIONAL_FIELDS = (
     "candidate_tool_calls", "error", "latency_ms", "usage", "finish_reason", "model", "fingerprint", "unstable",
     "baseline_live_output", "baseline_latency_ms", "baseline_model", "baseline_live_status", "raw_status",
-    "runs", "pass_fraction", "run_statuses", "flaky",
+    "runs", "pass_fraction", "run_statuses", "flaky", "trace", "baseline_trace", "cost_usd", "baseline_cost_usd",
 )
 
 
@@ -62,6 +63,10 @@ class CaseResult:
     pass_fraction: float | None = None  # share of repeated runs that passed
     run_statuses: list[str] = field(default_factory=list)
     flaky: bool = False
+    trace: list[str] = field(default_factory=list)  # agent runs: one line per step
+    baseline_trace: list[str] = field(default_factory=list)
+    cost_usd: float | None = None
+    baseline_cost_usd: float | None = None
 
     @property
     def failing(self) -> list[CheckResult]:
@@ -285,6 +290,7 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
         "avg_words": {"baseline": round(statistics.mean(base_words), 1) if base_words else None, "candidate": round(statistics.mean(cand_words), 1) if cand_words else None},
         "skipped_checks": dict(skipped),
         "unstable_checks": unstable,
+        "agent": _agent_summary(cases),
     }
 
 
@@ -323,6 +329,25 @@ def build_insights(summary: dict, cases: list[CaseResult], adapt: list[str]) -> 
             out.append(f"Each case ran {runs} times: {summary['flaky']} flaky case(s) passed in some runs and failed in others ({ids}).")
         else:
             out.append(f"Each case ran {runs} times and gave the same result every time.")
+    agent = summary.get("agent")
+    if agent:
+        steps = agent.get("avg_steps") or {}
+        note = f"Agent tasks ({agent['tasks']}): {steps.get('baseline')} -> {steps.get('candidate')} steps on average"
+        cost = agent.get("cost_per_task") or {}
+        if cost.get("baseline") and cost.get("candidate") is not None:
+            from .pricing import money
+
+            change = (cost["candidate"] - cost["baseline"]) / cost["baseline"]
+            note += f"; cost per task {money(cost['baseline'])} -> {money(cost['candidate'])} ({change:+.0%})"
+        elif cost.get("candidate") is not None:
+            from .pricing import money
+
+            note += f"; cost per task {money(cost['candidate'])}"
+        if agent.get("looped"):
+            note += f"; {agent['looped']} task(s) looped"
+        if agent.get("out_of_steps"):
+            note += f"; {agent['out_of_steps']} ran out of steps"
+        out.append(note + ".")
     vs = summary.get("vs_baseline")
     if vs and vs.get("compared"):
         b, c, p = vs["regressions"], vs["improvements"], vs["p_value"]
@@ -430,6 +455,9 @@ def run_compare(
             model=resp.model,
             fingerprint=resp.fingerprint,
         )
+        if case.agent:
+            result.baseline_trace = agent_trace(case.agent.get("steps") or [])
+            result.trace = agent_trace(resp.steps)
         if live is not None:
             result.baseline_live_output = live.text if live.ok else None
             result.baseline_latency_ms = live.latency_ms if live.ok else None
@@ -457,6 +485,8 @@ def run_compare(
         results = list(pool.map(evaluate_all, cases))
 
     adapt = adaptations(cand) + (adaptations(base) if base else [])
+    if any(c.agent for c in cases):
+        _price_agent_tasks(results, cases, cand.spec, base.spec if base else None, config)
     summary = summarize(results)
     if base is not None:
         summary["vs_baseline"] = paired_comparison(results)
@@ -481,6 +511,53 @@ def run_compare(
             note += f"; {ctx.judge_skipped} skipped because the rule-based checks already decided"
         res.insights.append(note + ".")
     return res
+
+
+def _agent_summary(cases: list[CaseResult]) -> dict | None:
+    tasks = [c for c in cases if c.baseline_trace]
+    if not tasks:
+        return None
+    ran = [c for c in tasks if c.status != "error" and c.trace]
+    looped = sum(1 for c in ran for r in c.checks if r.type == "agent" and (r.details or {}).get("looped"))
+    stalled = sum(1 for c in ran if c.finish_reason == "step_limit")
+    costs = [c.cost_usd for c in ran if c.cost_usd is not None]
+    base_costs = [c.baseline_cost_usd for c in ran if c.baseline_cost_usd is not None]
+    return {
+        "tasks": len(tasks),
+        "avg_steps": {
+            "baseline": round(statistics.mean(len(c.baseline_trace) for c in ran), 2) if ran else None,
+            "candidate": round(statistics.mean(len(c.trace) for c in ran), 2) if ran else None,
+        },
+        "looped": looped,
+        "out_of_steps": stalled,
+        "cost_per_task": {
+            "baseline": round(statistics.mean(base_costs), 6) if base_costs else None,
+            "candidate": round(statistics.mean(costs), 6) if costs else None,
+        },
+    }
+
+
+def _price_agent_tasks(results: list[CaseResult], cases: list[TestCase], cand_spec: str, base_spec: str | None, config: dict) -> None:
+    """Cost of each agent task, old and new, where prices are known."""
+    from .pricing import overrides_from_config, price_for
+
+    try:
+        overrides = overrides_from_config(config)
+    except ValueError:
+        overrides = {}
+    by_id = {c.id: c for c in cases}
+    new_price = price_for(cand_spec, overrides)
+    for r in results:
+        case = by_id.get(r.id)
+        if case is None or not case.agent:
+            continue
+        usage = r.usage or {}
+        if new_price is not None and isinstance(usage.get("input_tokens"), int):
+            r.cost_usd = round(new_price.cost(usage["input_tokens"], usage.get("output_tokens") or 0), 8)
+        old_price = price_for(base_spec or case.baseline_model or (config or {}).get("baseline") or "", overrides)
+        old_usage = (case.baseline or {}).get("usage") or {}
+        if old_price is not None and isinstance(old_usage.get("input_tokens"), (int, float)):
+            r.baseline_cost_usd = round(old_price.cost(old_usage["input_tokens"], old_usage.get("output_tokens") or 0), 8)
 
 
 _ORDER = {"pass": 0, "warn": 1, "fail": 2, "error": 3}

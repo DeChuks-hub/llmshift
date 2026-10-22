@@ -182,6 +182,10 @@ def _case_block(case: CaseResult, verbose: bool) -> list[str]:
     if case.status == "error":
         out.append(style(f"      Error: {case.error}", "magenta"))
         return out
+    if case.baseline_trace:
+        arrow = f" {sym('arrow')} "
+        out.append(style("      Steps (old): ", "grey") + truncate(arrow.join(case.baseline_trace), width() - 20))
+        out.append(style("      Steps (new): ", "grey") + truncate(arrow.join(case.trace) or "(none)", width() - 20))
     for r in case.checks:
         if r.status == "pass" or (r.status == "skip" and not verbose):
             continue
@@ -423,6 +427,13 @@ def compare_html(result: CompareResult) -> str:
         if case.status == "error":
             parts.append(f"<div class=\"h\">Error</div><pre>{e(case.error or '')}</pre>")
         else:
+            if case.baseline_trace:
+                parts.append("<div class=\"h\">Steps</div><table><tr><th>#</th><th>Old model</th><th>New model</th></tr>")
+                for i in range(max(len(case.baseline_trace), len(case.trace))):
+                    old = case.baseline_trace[i] if i < len(case.baseline_trace) else ""
+                    new = case.trace[i] if i < len(case.trace) else ""
+                    parts.append(f"<tr><td>{i + 1}</td><td>{e(old)}</td><td>{e(new)}</td></tr>")
+                parts.append("</table>")
             parts.append("<table><tr><th></th><th>Category</th><th>Check</th><th>Result</th></tr>")
             for r in sorted(case.checks, key=lambda r: {"fail": 0, "error": 1, "skip": 3, "pass": 4}.get(r.status, 2)):
                 cls = "fail" if (r.status == "fail" and r.severity == "error") else ("warn" if r.status in ("fail", "error") else r.status)

@@ -6,6 +6,13 @@
     client = wrap(OpenAI(), path="logs/llm.jsonl")   # also works with AsyncOpenAI, Anthropic, AsyncAnthropic
     client.chat.completions.create(...)               # behaves exactly as before
 
+Agents: run each task inside `agent_run` so its calls (and the tool results they
+carry) become one multi-step test case:
+
+    from llmshift.record import agent_run
+    with agent_run("refund-flow"):
+        my_agent.run(task)
+
 Or log calls yourself (any SDK or raw HTTP):
 
     from llmshift.record import log
@@ -18,6 +25,8 @@ unchanged. Secrets (API keys, tokens) are redacted before writing.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import datetime as _dt
 import inspect
 import json
@@ -25,6 +34,7 @@ import os
 import random
 import threading
 import time
+import uuid
 import warnings
 from pathlib import Path
 from typing import Any
@@ -77,6 +87,21 @@ def to_dict(obj: Any) -> Any:
     return str(obj)
 
 
+_AGENT_RUN: contextvars.ContextVar = contextvars.ContextVar("llmshift_agent_run", default=None)
+
+
+@contextlib.contextmanager
+def agent_run(name: str | None = None, run_id: str | None = None) -> Any:
+    """Link every call recorded inside the block (also in asyncio tasks started there)
+    into one agent run. Yields the run id."""
+    state = {"id": str(run_id or uuid.uuid4().hex[:16]), "name": name, "step": 0, "lock": threading.Lock()}
+    token = _AGENT_RUN.set(state)
+    try:
+        yield state["id"]
+    finally:
+        _AGENT_RUN.reset(token)
+
+
 class Recorder:
     def __init__(self, path: str | os.PathLike = "logs/llmshift.jsonl", *, sample_rate: float = 1.0, redact_secrets: bool = True, metadata: dict | None = None):
         self.path = Path(path)
@@ -108,6 +133,12 @@ class Recorder:
             meta = {**self.metadata, **(metadata or {})}
             if meta:
                 rec["metadata"] = meta
+            run = _AGENT_RUN.get()
+            if run is not None:
+                with run["lock"]:
+                    run["step"] += 1
+                    step = run["step"]
+                rec["agent_run"] = {"id": run["id"], "step": step, **({"name": run["name"]} if run["name"] else {})}
             if self.redactor is not None:
                 rec = self.redactor.obj(rec)
             data = memoryview((json.dumps(rec, ensure_ascii=False, default=str) + "\n").encode("utf-8"))

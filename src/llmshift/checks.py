@@ -27,6 +27,7 @@ from .testset import TestCase
 from .textutil import detect_language, language_name, normalize, rouge_l, shorten, similarity, tokenize, vector_cosine, word_count
 
 DEFAULT_SEVERITY = {
+    "agent": "error",
     "not_empty": "error",
     "json_valid": "error",
     "json_schema": "error",
@@ -76,6 +77,7 @@ CATEGORY = {
     "fuzzy_match": "facts",
     "facts": "facts",
     "tool_calls": "tools",
+    "agent": "tools",
     "tone": "tone",
     "length": "tone",
     "similarity": "semantics",
@@ -109,6 +111,7 @@ class Sample:
     model: str | None = None
     refusal: str | None = None
     finish_reason: str | None = None
+    steps: list = field(default_factory=list)
 
     @classmethod
     def from_response(cls, resp: Any) -> "Sample":
@@ -118,6 +121,7 @@ class Sample:
             model=getattr(resp, "model", None),
             refusal=getattr(resp, "refusal", None),
             finish_reason=getattr(resp, "finish_reason", None),
+            steps=list(getattr(resp, "steps", []) or []),
         )
 
     @property
@@ -756,9 +760,16 @@ def _compare_args(exp: Any, act: Any, path: str, mode: str, problems: list[str])
             problems.append(f"{path}: {_fmt(exp, 30)} -> {_fmt(act, 30)}")
 
 
+def _agent_check(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> Outcome:
+    from .agents import c_agent
+
+    return c_agent(check, sample, case, ctx)
+
+
 # ------------------------------------------------------------- dispatch
 
 CHECKS: dict[str, Callable[[dict, Sample, TestCase, CheckContext], Outcome]] = {
+    "agent": lambda check, sample, case, ctx: _agent_check(check, sample, case, ctx),
     "not_empty": c_not_empty,
     "json_valid": c_json_valid,
     "json_schema": c_json_schema,

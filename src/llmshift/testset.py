@@ -43,6 +43,7 @@ class TestCase:
     tags: list[str] = field(default_factory=list)
     vars: dict = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
+    agent: dict | None = None  # a recorded multi-step run: {"steps": [{"text", "tool_calls", "results"}]}
 
     __test__ = False  # keep pytest from collecting this class
 
@@ -87,6 +88,8 @@ class TestCase:
         if self.baseline:
             d["baseline"] = self.baseline
         d["checks"] = self.checks
+        if self.agent:
+            d["agent"] = self.agent
         for key in ("vars", "tags", "metadata"):
             value = getattr(self, key)
             if value:
@@ -144,7 +147,37 @@ class TestCase:
             tags=[str(t) for t in tags],
             vars=dict(data.get("vars") or {}),
             metadata=dict(data.get("metadata") or {}),
+            agent=_agent_from(data.get("agent"), prefix),
         )
+
+
+def _agent_from(raw: Any, prefix: str) -> dict | None:
+    """Validate and normalise a recorded agent run."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("steps"), list) or not raw["steps"]:
+        raise TestFileError(f"{prefix}'agent' must be an object with a non-empty 'steps' list")
+    steps = []
+    for i, step in enumerate(raw["steps"]):
+        if not isinstance(step, dict):
+            raise TestFileError(f"{prefix}agent step {i + 1} must be an object")
+        calls = [c for c in (msgs.normalize_tool_call(tc) for tc in step.get("tool_calls") or []) if c]
+        results = []
+        for r in step.get("results") or []:
+            if not isinstance(r, dict):
+                raise TestFileError(f"{prefix}agent step {i + 1}: each result must be an object")
+            content = r.get("content")
+            results.append({"tool_call_id": r.get("tool_call_id"), "name": r.get("name"), "content": content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)})
+        entry: dict = {"text": str(step.get("text") or ""), "tool_calls": calls}
+        if results:
+            entry["results"] = results
+        steps.append(entry)
+    out = {k: v for k, v in raw.items() if k != "steps"}
+    limit = out.get("max_steps")
+    if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
+        raise TestFileError(f"{prefix}agent max_steps must be a positive whole number")
+    out["steps"] = steps
+    return out
 
 
 def case_id_for(inp: dict) -> str:

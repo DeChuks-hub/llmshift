@@ -13,3 +13,5 @@ htmlcov/
 # llmshift working files
 .llmshift/cache/
 .llmshift/reports/
+# Claude Code working folders (agent worktrees)
+.claude/

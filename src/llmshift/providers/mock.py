@@ -13,6 +13,11 @@ Safety probes (deterministic, for `llmshift safety`): `nextgen` obeys text such 
 system prompt marks as confidential when the user asks for it, and refuses harmless
 requests that contain alarming words (kill, attack, hack...). `legacy` and `frugal`
 do none of these.
+
+Tools (for agent runs): when a request offers tools, the models call the tool whose
+name best matches the user's message, filling ID-like arguments from it (#4521 ->
+"4521"), and answer from the tool result. `nextgen` calls the same tool a second
+time before answering, and keeps calling it while the result says "pending" (a loop).
 """
 
 from __future__ import annotations
@@ -118,6 +123,72 @@ def _safety(system: str, messages: list[dict], careful: bool) -> str | None:
     return None
 
 
+def _tools(request: dict) -> list[dict]:
+    out = []
+    for t in (request.get("params") or {}).get("tools") or []:
+        fn = t.get("function") if isinstance(t, dict) and isinstance(t.get("function"), dict) else t
+        if isinstance(fn, dict) and fn.get("name"):
+            out.append(fn)
+    return out
+
+
+def _pick_tool(tools: list[dict], text: str) -> dict:
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    return max(tools, key=lambda t: len(set(re.findall(r"[a-z]+", str(t.get("name", "")).lower())) & words))
+
+
+def _tool_args(tool: dict, text: str) -> dict:
+    props = ((tool.get("parameters") or {}).get("properties") or {}) if isinstance(tool.get("parameters"), dict) else {}
+    number = re.search(r"#?(\d{3,})", text)
+    args = {}
+    for name in props:
+        if "id" in name.lower() or "number" in name.lower():
+            args[name] = number.group(1) if number else ""
+        else:
+            args[name] = text
+    return args
+
+
+def _describe_result(data: Any) -> str:
+    if isinstance(data, dict):
+        subject = next((f"{k.replace('_', ' ')} {v}" for k, v in data.items() if "id" in k.lower()), "The record")
+        details = [f"{k.replace('_', ' ')}: {v}" for k, v in data.items() if "id" not in k.lower()]
+        return f"{subject[:1].upper()}{subject[1:]} - " + ", ".join(details) + "." if details else f"{subject}."
+    return f"Here is what I found: {data}"
+
+
+def _agent_turn(request: dict, careful: bool, model: str) -> Response | None:
+    tools = _tools(request)
+    if not tools:
+        return None
+    messages = request.get("messages") or []
+    user = msgs.last_user_text(messages)
+    i = len(messages)
+    while i > 0 and messages[i - 1].get("role") == "tool":
+        i -= 1
+    results = messages[i:]
+    made = [tc for m in messages if m.get("role") == "assistant" for tc in m.get("tool_calls") or []]
+    tool = _pick_tool(tools, user)
+
+    def call() -> Response:
+        tc = {"id": f"call_{len(made) + 1}", "name": tool["name"], "arguments": _tool_args(tool, user)}
+        return Response(text="", tool_calls=[tc], model=model, finish_reason="tool_calls", usage=_usage(messages, json.dumps(tc)))
+
+    if not results:
+        return call()
+    raw = msgs.content_text(results[-1].get("content"))
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        data = raw
+    if not careful and (len(made) == 1 or (isinstance(data, dict) and str(data.get("status", "")).lower() == "pending")):
+        return call()  # double-checks, and loops while the result is pending
+    text = _describe_result(data)
+    if not careful:
+        text = "Great news! " + text.rstrip(".") + "!"
+    return Response(text=text, model=model, finish_reason="stop", usage=_usage(messages, text))
+
+
 def legacy(request: dict) -> Response:
     messages = request.get("messages") or []
     system = msgs.system_prompt(messages)
@@ -125,6 +196,9 @@ def legacy(request: dict) -> Response:
     reaction = _safety(system, messages, careful=True)
     if reaction is not None:
         return Response(text=reaction, model="legacy-1", finish_reason="stop", fingerprint="fp_legacy", usage=_usage(messages, reaction))
+    turn = _agent_turn(request, careful=True, model="legacy-1")
+    if turn is not None:
+        return turn
     task = _task(system)
     if task == "triage":
         text = json.dumps({"category": _category(user), "urgency": _urgency(user), "summary": _first_sentence(user)})
@@ -154,6 +228,9 @@ def nextgen(request: dict) -> Response:
     reaction = _safety(system, messages, careful=False)
     if reaction is not None:
         return Response(text=reaction, model="nextgen-2", finish_reason="stop", fingerprint="fp_nextgen", usage=_usage(messages, reaction))
+    turn = _agent_turn(request, careful=False, model="nextgen-2")
+    if turn is not None:
+        return turn
     task = _task(system)
     if task == "triage":
         urgency = _urgency(user)

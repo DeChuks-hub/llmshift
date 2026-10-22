@@ -53,6 +53,8 @@ class Interaction:
     tags: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     case_id: str | None = None
+    agent_run: dict | None = None  # {"id", "step"} when the log links calls into one agent run
+    agent: dict | None = None  # set by agents.link_runs: the recorded steps of the whole run
 
     @property
     def has_output(self) -> bool:
@@ -583,6 +585,11 @@ def from_pair(req: dict, resp: Any, rec: dict, where: str) -> Interaction | None
         return None
     messages, params = _REQ_PARSERS[kind](req)
     inter = Interaction(messages=messages, params=params, model=req.get("model"), source=where, fmt=kind)
+    run = rec.get("agent_run")
+    if isinstance(run, dict) and run.get("id") is not None:
+        inter.agent_run = {"id": str(run["id"]), "step": run.get("step")}
+    elif rec.get("trace_id") or rec.get("traceId"):  # tracing exports (Langfuse, LangSmith, OpenTelemetry)
+        inter.agent_run = {"id": str(rec.get("trace_id") or rec.get("traceId"))}
     rk = _response_kind(resp)
     if rk:
         out = _RESP_PARSERS[rk](resp)

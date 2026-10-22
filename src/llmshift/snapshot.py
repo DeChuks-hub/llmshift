@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from . import messages as msgs
+from .agents import link_runs
 from .infer import GroupStats, group_stats, infer_checks, merge_checks
 from .logparse import Interaction, LogStats, parse_logs, parse_time
 from .redact import Redactor
@@ -165,6 +166,7 @@ def build_snapshot(
             inter.vars = redactor.obj(inter.vars)
         result.redactions = Counter(redactor.counts)
 
+    kept = link_runs(kept)
     unique: dict[str, Interaction] = {}
     for inter in kept:
         key = stable_hash({"m": inter.messages, "p": inter.params}, 24)
@@ -179,7 +181,8 @@ def build_snapshot(
 
     groups: dict[str, list[Interaction]] = {}
     for inter in unique.values():
-        groups.setdefault(msgs.template_key(inter.messages, inter.params), []).append(inter)
+        key = msgs.template_key(inter.messages, inter.params)
+        groups.setdefault(key + "-agent" if inter.agent else key, []).append(inter)
     result.groups = len(groups)
     result.group_sizes = {g: len(v) for g, v in groups.items()}
 
@@ -206,6 +209,8 @@ def build_snapshot(
         if not inter.has_output:
             continue
         inferred = infer_checks(inter.messages, inter.params, inter.output, inter.tool_calls, stats_by_group.get(g), judge=judge)
+        if inter.agent:
+            inferred = [{"type": "agent"}] + [c for c in inferred if c.get("type") != "tool_calls"]
         checks = merge_checks(inter.checks, inferred)
         inp = {"messages": inter.messages, "params": inter.params}
         baseline: dict = {"output": inter.output or ""}
@@ -227,6 +232,7 @@ def build_snapshot(
             tags=list(inter.tags),
             vars=dict(inter.vars),
             metadata=metadata,
+            agent=inter.agent,
         )
         result.cases.append(case)
         for c in checks:

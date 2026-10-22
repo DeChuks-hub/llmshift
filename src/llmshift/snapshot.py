@@ -213,6 +213,9 @@ def build_snapshot(
             baseline["tool_calls"] = inter.tool_calls
         if inter.model:
             baseline["model"] = inter.model
+        usage = {k: v for k, v in (inter.usage or {}).items() if k in ("input_tokens", "output_tokens") and isinstance(v, (int, float)) and not isinstance(v, bool)}
+        if usage:
+            baseline["usage"] = usage  # what the answer cost, for `llmshift pick`
         metadata = dict(inter.metadata)
         metadata.update({k: v for k, v in (("source", inter.source), ("timestamp", inter.timestamp), ("format", inter.fmt)) if v})
         case = TestCase(

@@ -486,4 +486,4 @@ pip install -e ".[dev]"
 pytest
 ```
 
-The test suite (369 tests) runs offline on Python 3.9 to 3.13. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.
+The test suite (370 tests) runs offline on Python 3.9 to 3.13. Provider, GitHub and Evals-API tests use a local HTTP server that emulates the real APIs, and `tests/test_torture.py` feeds every command hostile input.

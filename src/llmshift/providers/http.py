@@ -12,6 +12,7 @@ import json
 import math
 import random
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -180,6 +181,16 @@ def request(
                 continue
             raise err from None
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, http.client.HTTPException, OSError) as exc:
+            cert = next((e for e in (getattr(exc, "reason", None), exc) if isinstance(e, ssl.SSLCertVerificationError)), None)
+            if cert is not None:  # retrying cannot fix a certificate problem
+                host = urllib.parse.urlsplit(url).netloc or url
+                detail = getattr(cert, "verify_message", None) or cert
+                raise ProviderError(
+                    f"cannot verify the TLS certificate of {host} ({detail}). With Python from python.org on macOS, run "
+                    "'Install Certificates.command' in the Python folder; behind a proxy that inspects TLS, set SSL_CERT_FILE "
+                    "to your organisation's CA bundle",
+                    code="ssl_error",
+                ) from None
             reason = getattr(exc, "reason", exc)
             if attempt < max_retries:
                 _sleep(_retry_delay(None, attempt), sleep)

@@ -35,7 +35,7 @@ class ProviderError(Exception):
             return True
         if self.status == 404 or self.code in ("model_not_found", "not_found_error", "NOT_FOUND"):
             return True
-        return self.code in ("insufficient_quota", "invalid_api_key", "authentication_error", "permission_error", "missing_api_key")
+        return self.code in ("insufficient_quota", "invalid_api_key", "authentication_error", "permission_error", "missing_api_key", "ssl_error")
 
     def __str__(self) -> str:
         bits = []

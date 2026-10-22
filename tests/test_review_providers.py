@@ -281,3 +281,23 @@ def test_stream_accumulator_rebuilds_gemini_streams():
     r = GeminiProvider.parse(out)
     assert r.text == "Hello" and r.tool_calls[0]["arguments"] == {"a": 1} and r.model == "gemini-x"
     assert r.finish_reason == "tool_calls" and out["usageMetadata"] == {"promptTokenCount": 2}
+
+
+def test_certificate_errors_are_explained_and_not_retried(monkeypatch):
+    import ssl
+    import urllib.error
+
+    from llmshift.providers import http
+    from llmshift.providers.base import ProviderError
+
+    class Opener:
+        def open(self, req, timeout=None):
+            raise urllib.error.URLError(ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"))
+
+    monkeypatch.setattr(http, "_OPENER", Opener())
+    waits = []
+    with pytest.raises(ProviderError) as info:
+        http.request("POST", "https://api.example.com/v1/chat/completions", body={}, max_retries=4, sleep=waits.append)
+    err = info.value
+    assert waits == [] and err.code == "ssl_error" and err.fatal  # no pointless retries; the run stops early
+    assert "api.example.com" in str(err) and "SSL_CERT_FILE" in str(err) and "Install Certificates" in str(err)

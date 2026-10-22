@@ -10,9 +10,10 @@ import uuid
 from typing import Any
 
 from .. import messages as msgs
+from ..pricing import CACHE_FIELDS
 from ..textutil import json_loads, stable_hash
 from . import http
-from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, option_mapping, option_number, params_of
 
 API_VERSION = "2023-06-01"
 _DATA_URL_RE = re.compile(r"^data:([\w.+/-]+);base64,(.*)$", re.S)
@@ -157,15 +158,15 @@ class AnthropicProvider(Provider):
         self.key_env = o.get("api_key_env", "ANTHROPIC_API_KEY")
         self.api_key = clean_key(o.get("api_key")) or (clean_key(os.environ.get(self.key_env)) if self.key_env else None)
         self.version = str(o.get("anthropic_version", API_VERSION))
-        self.default_max_tokens = int(o.get("max_tokens", 4096))
+        self.default_max_tokens = option_number(o, "max_tokens", 4096, self.spec, minimum=1, integer=True)
         self.beta = o.get("beta")
-        self.extra_headers = dict(o.get("headers") or {})
+        self.extra_headers = option_mapping(o, "headers", self.spec, text_values=True)
         self._lock = threading.Lock()
         self._drop: set[str] = set()
         self.adaptations: list[str] = []
 
     def identity(self) -> dict:
-        shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env")}
+        shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env", "timeout_set")}
         shaping.update({"version": self.version, "max_tokens": self.default_max_tokens, "beta": self.beta})
         shaping["headers"] = {k: v for k, v in self.extra_headers.items() if k.lower() not in ("x-api-key", "authorization")}
         return {"kind": self.kind, "model": self.model, "base_url": self.base_url, "options": stable_hash(shaping, 16)}
@@ -229,13 +230,13 @@ class AnthropicProvider(Provider):
         ]
         stop = data.get("stop_reason")
         finish = {"end_turn": "stop", "stop_sequence": "stop", "max_tokens": "length", "tool_use": "tool_calls"}.get(stop, stop)
-        usage = data.get("usage") or {}
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         return Response(
             text=text,
             tool_calls=tool_calls,
             model=data.get("model"),
             finish_reason=finish,
-            usage={"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens")} if usage else {},
+            usage={k: usage.get(k) for k in ("input_tokens", "output_tokens", *CACHE_FIELDS)} if usage else {},
             refusal="refusal" if stop == "refusal" else None,
         )
 

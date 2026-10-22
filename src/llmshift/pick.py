@@ -28,6 +28,7 @@ from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .pricing import Price, money
 from .stats import pass_rate_interval
 from .testset import TestCase, unique_ids
+from .textutil import plural
 
 DEFAULT_MIN_PASS_RATE = 0.95
 
@@ -264,9 +265,9 @@ def _rank(c: CandidateResult) -> tuple:
 
 def _quality(c: CandidateResult, threshold: float) -> str:
     if c.total and c.passed == c.total:
-        return f"same quality (all {c.total} cases unchanged)"
+        return f"same quality ({'the one case' if c.total == 1 else f'all {c.total} cases'} unchanged)"
     if c.total and c.passed + c.warned == c.total:
-        return f"same quality (all {c.total} cases pass, {c.warned} with minor differences)"
+        return f"same quality ({'the one case passes' if c.total == 1 else f'all {c.total} cases pass'}, {c.warned} with minor differences)"
     return f"passes your quality bar (pass rate {c.pass_rate:.0%}, minimum {threshold:.0%})"
 
 
@@ -320,7 +321,7 @@ def _recommend(res: PickResult) -> None:
     res.recommendation = f"Switch to {best.spec}: {quality}, {saving} - {tail}."
     if best.low is not None and best.low + 1e-9 < threshold:
         res.notes.append(
-            f"With {best.total} cases the true pass rate of {best.spec} could be as low as {best.low:.0%}; more test cases give a firmer answer."
+            f"With {plural(best.total, 'case')} the true pass rate of {best.spec} could be as low as {best.low:.0%}; more test cases give a firmer answer."
         )
 
 
@@ -527,14 +528,22 @@ def pick_terminal(res: PickResult) -> str:
 
 
 def _md(text: str) -> str:
-    return " ".join(str(text).split()).replace("|", "\\|")
+    from .report import _md as md
+
+    return md(text)
+
+
+def _code(text: str) -> str:
+    """A model id inside `code` in a Markdown table: kept as written (a code span notifies
+    no one, so an @ in workers:@cf/... stays), only the table's | escaped."""
+    return " ".join(str(text).split()).replace("|", "\\|").replace("`", "'")
 
 
 def pick_markdown(res: PickResult) -> str:
     lines = [
         "## LLMShift pick",
         "",
-        f"{res.cases} test case(s), quality bar {res.min_pass_rate:.0%}. Today: `{_md(res.baseline)}`, {_today_cost(res)}.",
+        f"{res.cases} test case(s), quality bar {res.min_pass_rate:.0%}. Today: `{_code(res.baseline)}`, {_today_cost(res)}.",
         "",
         f"**{_md(res.recommendation)}**",
         "",
@@ -543,10 +552,10 @@ def pick_markdown(res: PickResult) -> str:
     ]
     for c in res.candidates:
         if c.error is not None:
-            lines.append(f"| ✗ | `{_md(c.spec)}` | error: {_md(con.truncate(c.error, 120))} | | | | |")
+            lines.append(f"| ✗ | `{_code(c.spec)}` | error: {_md(con.truncate(c.error, 120))} | | | | |")
             continue
         icon = "✅" if c.meets_bar else "❌"
-        lines.append(f"| {icon} | `{_md(c.spec)}` | {_rate_cell(c)} | {_range_cell(c)} | {_cost_cell(c.cost_per_1k, c.estimated)} | {_vs_today(c)} | {_latency_cell(c)} |")
+        lines.append(f"| {icon} | `{_code(c.spec)}` | {_rate_cell(c)} | {_range_cell(c)} | {_cost_cell(c.cost_per_1k, c.estimated)} | {_vs_today(c)} | {_latency_cell(c)} |")
     price_line = _price_line(res)
     if price_line or res.notes:
         lines.append("")

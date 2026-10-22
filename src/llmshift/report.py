@@ -15,7 +15,7 @@ from .checks import CATEGORY_TITLES
 from .compare import CaseResult, CompareResult
 from .console import bar, status_label, style, sym, truncate, width
 from .formats import parse_json_lenient
-from .textutil import diff_ratio, word_diff
+from .textutil import diff_ratio, plural, word_diff
 
 STATUS_ORDER = {"fail": 0, "error": 1, "warn": 2, "pass": 3}
 CATEGORY_ORDER = ["format", "facts", "tools", "safety", "semantics", "tone", "custom", "errors"]
@@ -81,7 +81,7 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
     lines = []
     lines.append(style(f"LLMShift {result.label}", "bold") + f"  {result.baseline}  {sym('arrow')}  {style(result.candidate, 'bold')}")
     if result.tests_path:
-        lines.append(style(f"Tests: {result.tests_path}  ({s.get('total', 0)} cases, {len(s.get('groups', {}))} prompt templates)", "grey"))
+        lines.append(style(f"Tests: {result.tests_path}  ({plural(s.get('total', 0), 'case')}, {plural(len(s.get('groups', {})), 'prompt template')})", "grey"))
     lines.append("")
     counts = (
         f"  {style(sym('pass') + ' ' + str(s.get('passed', 0)) + ' unchanged', 'green')}"
@@ -140,7 +140,7 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
                 parts.append(style(f"{v['warn']} changed", "yellow"))
             if v.get("error"):
                 parts.append(style(f"{v['error']} errors", "magenta"))
-            lines.append(f"  {truncate(g, 44):<44} {v.get('total', 0):>4} cases  " + ", ".join(parts))
+            lines.append(f"  {truncate(g, 44):<44} {v.get('total', 0):>4} {'case ' if v.get('total', 0) == 1 else 'cases'}  " + ", ".join(parts))
     problem = _interleave_groups([c for c in result.cases if c.status != "pass"])
     if problem:
         limit = len(problem) if verbose or show < 0 else min(show, len(problem))
@@ -214,9 +214,14 @@ def unicode_ok() -> bool:
 # ---------------------------------------------------------------- markdown
 
 
+_MENTION_RE = re.compile(r"(?<![\w`])@(?=[A-Za-z0-9])")
+
+
 def _md(text: str) -> str:
-    """Safe inside a Markdown table cell: one line, escaped pipes and tags."""
-    return " ".join((text or "").split()).replace("|", "\\|").replace("<", "&lt;")
+    """Safe inside a Markdown table cell: one line, escaped pipes and tags, and no live
+    @mentions (a model's answer quoted in a PR comment must not notify anyone)."""
+    text = " ".join(str(text or "").split()).replace("|", "\\|").replace("<", "&lt;")
+    return _MENTION_RE.sub("@\u200b", text)
 
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
@@ -235,7 +240,7 @@ def _status(value: str) -> str:
 def compare_markdown(result: CompareResult, *, max_cases: int = 15, title: str = "LLMShift report") -> str:
     s = result.summary
     lines = [f"## {title}", ""]
-    lines.append(f"**{result.baseline}** {sym('arrow')} **{result.candidate}**" + (f" · tests: `{result.tests_path}`" if result.tests_path else ""))
+    lines.append(f"**{result.baseline}** → **{result.candidate}**" + (f" · tests: `{result.tests_path}`" if result.tests_path else ""))
     lines.append("")
     rate = s.get("pass_rate", 0.0)
     verdict = ""
@@ -365,17 +370,23 @@ var gs=document.getElementById('g');if(gs){gs.addEventListener('change',function
 """
 
 
+def _h(text: Any) -> str:
+    """Text for an HTML page: escaped, and without the control characters (NUL, ESC...)
+    that model output can carry and HTML cannot show."""
+    return html.escape(_xml_text(str(text)))
+
+
 def _html_diff(a: str, b: str) -> str:
     out = []
     for op, text in word_diff(a or "", b or ""):
-        t = html.escape(text)
+        t = _h(text)
         out.append(t if op == "=" else (f"<del>{t}</del>" if op == "-" else f"<ins>{t}</ins>"))
     return "".join(out)
 
 
 def compare_html(result: CompareResult) -> str:
     s = result.summary
-    e = html.escape
+    e = _h
     parts = ['<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">']
     parts.append(f"<title>LLMShift report</title><style>{_HTML_CSS}</style></head><body><main>")
     parts.append(f"<h1>LLMShift {e(result.label)}: {e(result.baseline)} &rarr; {e(result.candidate)}</h1>")
@@ -584,6 +595,22 @@ def _rule_for(lk: Any, warn_days: int) -> str | None:
     return None
 
 
+def _in_workspace(path: str) -> str:
+    """A finding's path as GitHub places annotations and code-scanning results: relative to
+    the checkout (GITHUB_WORKSPACE), whatever folder the command ran in."""
+    import os
+    from pathlib import Path
+
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if not workspace:
+        return path
+    try:
+        rel = os.path.relpath(os.path.abspath(path), workspace)
+    except ValueError:  # another drive on Windows
+        return path
+    return path if rel.startswith("..") else Path(rel).as_posix()
+
+
 def _sarif_uri(path: str) -> str:
     """Relative paths stay relative (percent-encoded); absolute ones become file:/// URIs."""
     import urllib.parse
@@ -609,7 +636,7 @@ def scan_sarif(scan: Any) -> dict:
                 "ruleId": rule,
                 "level": _SARIF_RULES[rule][0],
                 "message": {"text": f"{f.model}: {f.lookup.message}" if f.lookup else f.model},
-                "locations": [{"physicalLocation": {"artifactLocation": {"uri": _sarif_uri(f.file)}, "region": {"startLine": max(1, line), "startColumn": max(1, f.col)}}}],
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": _sarif_uri(_in_workspace(f.file))}, "region": {"startLine": max(1, line), "startColumn": max(1, f.col)}}}],
             }
         )
     rules = [
@@ -644,5 +671,5 @@ def github_annotations(scan: Any) -> list[str]:
         level = "error" if lk.severity == "critical" else "warning"
         title = f"{'Retired' if lk.status == 'retired' else 'Retiring' if lk.status == 'retiring' else 'Deprecated'} model {f.model}"
         line = getattr(f, "file_line", None) or f.line
-        out.append(f"::{level} file={_gh_escape(f.file, True)},line={line},col={f.col},title={_gh_escape(title, True)}::{_gh_escape(lk.message)}")
+        out.append(f"::{level} file={_gh_escape(_in_workspace(f.file), True)},line={line},col={f.col},title={_gh_escape(title, True)}::{_gh_escape(lk.message)}")
     return out

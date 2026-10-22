@@ -17,6 +17,10 @@ from .providers.custom import kill_running
 from .testset import TestCase, group_key
 
 
+class _Skipped(Exception):
+    """An item interruptible_map did not run because an earlier one failed."""
+
+
 class RunAborted(RuntimeError):
     """Every request failed with the same fatal error."""
 
@@ -31,23 +35,41 @@ def interruptible_map(fn: Callable[[Any], Any], items: Any, concurrency: int = 4
     in flight to stop retrying and ends child processes. Results keep the input order."""
     items = list(items)
     results: list = [None] * len(items)
+    http.CANCEL.clear()  # an earlier Ctrl+C in this process (a notebook) must not cancel this run
     pool = ThreadPoolExecutor(max_workers=max(1, int(concurrency)))
-    interrupted = False
+    stopped = False
+    failed = threading.Event()
+
+    def run(item: Any) -> Any:
+        if failed.is_set():  # an earlier item failed: the map raises anyway, so this one is not sent
+            raise _Skipped()
+        try:
+            return fn(item)
+        except BaseException:
+            failed.set()
+            raise
+
     try:
-        index = {pool.submit(fn, item): i for i, item in enumerate(items)}
+        index = {pool.submit(run, item): i for i, item in enumerate(items)}
         pending = set(index)
         while pending:
             done, pending = wait(pending, timeout=0.5, return_when=FIRST_COMPLETED)
             for fut in done:
+                if isinstance(fut.exception(), _Skipped):
+                    continue  # the item that failed raises its own error when its turn comes
                 results[index[fut]] = fut.result()
     except KeyboardInterrupt:
-        interrupted = True
+        stopped = True
         http.CANCEL.set()
         kill_running()
         pool.shutdown(wait=False, cancel_futures=True)
         raise
+    except BaseException:  # one item failed: the rest of the queue is not sent (paid calls)
+        stopped = True
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
     finally:
-        if not interrupted:
+        if not stopped:
             pool.shutdown(wait=True)
     return results
 

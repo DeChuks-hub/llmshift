@@ -27,6 +27,7 @@ from typing import Iterable
 
 from . import __version__
 from .registry import SEVERITY_ORDER, Lookup, Registry
+from .fileio import long_path
 from .textutil import source_lines
 
 CODE_EXT = {
@@ -437,9 +438,13 @@ def iter_source_files(paths: Iterable[str], *, include_docs: bool = False, exclu
         git_mode = bool(files)  # nothing listed: not a repo, or a directory git ignores
         if not git_mode:
             files = []
-            for dirpath, dirnames, filenames in os.walk(root):
+            # Walked in Windows' long form, so folders past 260 characters are listed too;
+            # the files keep the path as given (root/...).
+            top = long_path(root, always=True)
+            for dirpath, dirnames, filenames in os.walk(top):
                 dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.endswith(".egg-info")]
-                files.extend(Path(dirpath) / f for f in filenames)
+                here = root / os.path.relpath(dirpath, top) if dirpath != top else root
+                files.extend(here / f for f in filenames)
         skip = _ALWAYS_SKIP if git_mode else SKIP_DIRS
         for f in sorted(files or []):
             try:
@@ -451,7 +456,7 @@ def iter_source_files(paths: Iterable[str], *, include_docs: bool = False, exclu
             if not _wanted(f, include_docs) or excluded(*candidates(f, rel)):
                 continue
             rf = f.resolve()
-            if rf in seen or not f.is_file():
+            if rf in seen or not os.path.isfile(long_path(f)):
                 continue
             seen.add(rf)
             yield root, f
@@ -478,10 +483,11 @@ def _read_text(path: Path) -> tuple[str | None, str | None]:
     """(text, reason it was skipped). Binary files are skipped silently."""
     limit = MAX_NOTEBOOK_BYTES if path.suffix.lower() == ".ipynb" else MAX_BYTES
     try:
-        size = path.stat().st_size
+        size = os.stat(long_path(path)).st_size
         if size > limit:
-            return None, f"skipped: larger than {limit // 1_000_000} MB"
-        data = path.read_bytes()
+            return None, f"larger than {limit // 1_000_000} MB"
+        with open(long_path(path), "rb") as fh:
+            data = fh.read()
     except OSError as exc:
         return None, f"cannot read: {exc.strerror or exc}"
     return decode_text(data), None
@@ -501,11 +507,21 @@ def platform_hint(text: str) -> str | None:
 # --------------------------------------------------------------- python
 
 
+_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
 class _PyVisitor(ast.NodeVisitor):
     def __init__(self, lines: list[str], llm_hint: bool = True):
         self.lines = lines
         self.llm_hint = llm_hint
-        self.constants: dict[str, tuple[str, int]] = {}
+        # Names are looked up the way Python does: in the function (or class body) where they
+        # are used, then the enclosing ones, then the module. A parameter, or a name a function
+        # assigns something else, hides the same name elsewhere in the file.
+        self.constants: dict[int, dict[str, tuple[str, int]]] = {}  # scope -> {name: (text, line)}
+        self.shadowed: dict[int, set[str]] = {}  # scope -> parameters and other assigned names
+        self.stack: list[ast.AST] = []
+        self.default_names: dict[int, dict[str, str]] = {}  # scope -> {parameter: the name its default is}
+        self.module_id = 0
         self.found: list[tuple[int, int, str, str, str | None, str | None]] = []  # line, col, value, kind, call, via
         self.claimed: set[tuple[int, int]] = set()
         self.docstrings: set[int] = set()
@@ -550,11 +566,13 @@ class _PyVisitor(ast.NodeVisitor):
             if (looks_like_known_model(v) if require_known else plausible_model_value(v) or looks_like_known_model(v)):
                 self._add(node, v, kind, call)
             return
-        if isinstance(node, ast.Name) and node.id in self.constants:
-            value, line = self.constants[node.id]
-            if looks_like_known_model(value) or (not require_known and plausible_model_value(value)):
-                self._add(node, value, kind, call, via=f"{node.id}, line {line}")
-            return
+        if isinstance(node, ast.Name):
+            hit = self._lookup(node.id)
+            if hit is not None:
+                value, line = hit
+                if looks_like_known_model(value) or (not require_known and plausible_model_value(value)):
+                    self._add(node, value, kind, call, via=f"{node.id}, line {line}")
+                return
         default = self._env_default(node)
         if default is not None:
             v = default.value.strip()
@@ -565,19 +583,111 @@ class _PyVisitor(ast.NodeVisitor):
             self._resolve(node.body, call, kind, require_known)
             self._resolve(node.orelse, call, kind, require_known)
 
+    def _lookup(self, name: str, stack: list | None = None) -> tuple[str, int] | None:
+        stack = self.stack if stack is None else stack
+        for i in range(len(stack) - 1, -1, -1):
+            scope = stack[i]
+            if isinstance(scope, ast.ClassDef) and i != len(stack) - 1:
+                continue  # a method does not see the names of its class body
+            hit = self.constants.get(id(scope), {}).get(name)
+            if hit is not None:
+                return hit
+            ref = self.default_names.get(id(scope), {}).get(name)
+            if ref is not None:  # def f(model=MODEL): MODEL as it is where the def stands (a class body counts)
+                return self._lookup(ref, stack[:i])
+            if name in self.shadowed.get(id(scope), ()):
+                return None  # a parameter or another value: not the text assigned elsewhere
+        return None
+
+    def _collect(self, scope: ast.AST) -> None:
+        """The names `scope` binds itself (not those of the functions and classes in it)."""
+        names: dict[str, tuple[str, int]] = {}
+        other: set[str] = set()
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = scope.args
+            other.update(x.arg for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, *(x for x in (a.vararg, a.kwarg) if x)])
+            # A parameter's default is what the body uses when the caller passes nothing.
+            positional = [*a.posonlyargs, *a.args]
+            pairs = [*zip(positional[len(positional) - len(a.defaults):], a.defaults), *zip(a.kwonlyargs, a.kw_defaults)]
+            refs: dict[str, str] = {}
+            for arg, default in pairs:
+                if isinstance(default, ast.Constant) and isinstance(default.value, str):
+                    names[arg.arg] = (default.value.strip(), scope.lineno)
+                elif isinstance(default, ast.Name):
+                    refs[arg.arg] = default.id  # looked up where the def stands, when the body is read
+            self.default_names[id(scope)] = refs
+        todo = list(ast.iter_child_nodes(scope))
+        while todo:
+            n = todo.pop()
+            if isinstance(n, _SCOPE_NODES):
+                if hasattr(n, "name"):
+                    other.add(n.name)
+                continue
+            todo.extend(ast.iter_child_nodes(n))
+            if isinstance(n, (ast.Assign, ast.AnnAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                value = self._env_default(n.value) if n.value is not None and not isinstance(n.value, ast.Constant) else n.value
+                # MODEL = "gpt-4o", and MODEL = os.getenv("MODEL", "gpt-4o"): the default is what runs
+                text = value.value.strip() if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        if text is not None and (t.id not in names or n.lineno >= names[t.id][1]):
+                            names[t.id] = (text, n.lineno)
+                        elif text is None:
+                            other.add(t.id)
+            elif isinstance(n, (ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr)) and isinstance(n.target, ast.Name):
+                other.add(n.target.id)
+            elif isinstance(n, ast.withitem) and isinstance(n.optional_vars, ast.Name):
+                other.add(n.optional_vars.id)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                other.add(n.name)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                other.update((alias.asname or alias.name).split(".")[0] for alias in n.names)
+            elif type(n).__name__ in ("MatchAs", "MatchStar") and getattr(n, "name", None):  # match captures (3.10+)
+                other.add(n.name)
+            elif type(n).__name__ == "MatchMapping" and getattr(n, "rest", None):
+                other.add(n.rest)
+        self.constants[id(scope)] = names
+        self.shadowed[id(scope)] = other
+
     def visit_Module(self, node: ast.Module) -> None:
-        for stmt in ast.walk(node):
+        self.module_id = id(node)
+        for stmt in ast.walk(node):  # breadth first: the module's names are known before its functions'
             if isinstance(stmt, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 body = getattr(stmt, "body", [])
                 if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
                     self.docstrings.add(id(body[0].value))
-            if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
-                for target in stmt.targets:
-                    if isinstance(target, ast.Name):
-                        self.constants[target.id] = (stmt.value.value.strip(), stmt.lineno)
-            elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
-                self.constants[stmt.target.id] = (stmt.value.value.strip(), stmt.lineno)
+            if isinstance(stmt, (ast.Module, *_SCOPE_NODES)):
+                self._collect(stmt)
+        self.stack.append(node)
         self.generic_visit(node)
+        self.stack.pop()
+
+    def _visit_in(self, scope: ast.AST, inner: list, outer: list) -> None:
+        """Decorators, defaults and base classes belong to the enclosing scope; the body to `scope`."""
+        for n in outer:
+            if n is not None:
+                self.visit(n)
+        self.stack.append(scope)
+        try:
+            for n in inner:
+                self.visit(n)
+        finally:
+            self.stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        a = node.args
+        annotations = [x.annotation for x in [*a.posonlyargs, *a.args, *a.kwonlyargs, *(x for x in (a.vararg, a.kwarg) if x)]]
+        outer = [*node.decorator_list, *a.defaults, *a.kw_defaults, *annotations, node.returns, *getattr(node, "type_params", [])]
+        self._visit_in(node, node.body, outer)  # Literal["gpt-4o"] in an annotation is read too
+
+    visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self._visit_in(node, [node.body], [*node.args.defaults, *node.args.kw_defaults])
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_in(node, node.body, [*node.decorator_list, *node.bases, *node.keywords, *getattr(node, "type_params", [])])
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
@@ -648,26 +758,40 @@ _COMMENT_RE = re.compile(r"^\s*(//|#(?!!)|/\*|\*\s|\*$|<!--)")
 
 # Comment syntax by file type: a model named in a comment is not one the code calls.
 _HASH, _SLASH, _BLOCK, _SEMI, _DASH = "#", "//", "/*", ";", "--"
+_HTML = "<!--"  # a block, like /* */
+_HASH_AT_START = "#^"  # "#" only as a line's first character (MySQL comments; elsewhere in SQL it is an operator)
 _C_LIKE = (_SLASH, _BLOCK)
+_BLOCK_END = {_BLOCK: "*/", _HTML: "-->"}
+_BEFORE_BLOCK = set(" \t;{}(),=:")  # where a /* can start a comment; elsewhere it is a glob or a regex (lists/*, /\/*/)
 COMMENT_SYNTAX: dict[str, tuple[str, ...]] = {
     **dict.fromkeys((".yaml", ".yml", ".toml", ".env", ".sh", ".bash", ".zsh", ".rb", ".r", ".jl", ".ex", ".exs", ".ps1", ".tfvars", "dockerfile", "makefile", "procfile"), (_HASH,)),
     **dict.fromkeys((".ini", ".cfg", ".conf"), (_HASH, _SEMI)),
     ".properties": (_HASH, "!"),
     **dict.fromkeys((".tf", ".hcl"), (_HASH, *_C_LIKE)),
     **dict.fromkeys((".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".java", ".kt", ".kts", ".scala", ".cs", ".rs", ".swift", ".dart",
-                     ".c", ".cc", ".cpp", ".h", ".hpp", ".m", ".jsonc", ".json5", ".vue", ".svelte", ".astro"), _C_LIKE),
+                     ".c", ".cc", ".cpp", ".h", ".hpp", ".m", ".jsonc", ".json5"), _C_LIKE),
+    **dict.fromkeys((".vue", ".svelte", ".astro"), (_HTML, *_C_LIKE)),  # an HTML template around the script
     ".php": (_HASH, *_C_LIKE),
-    ".sql": (_DASH, _BLOCK),
+    ".sql": (_DASH, _BLOCK, _HASH_AT_START),
     ".lua": (_DASH,),
 }
 
 
+_OWN_MARKDOWN_RE = re.compile(r"\A(?:<!-- llmshift[^>]*-->\s*)?#{1,2} LLMShift\b")
+
+
 def is_llmshift_output(path: Path, text: str) -> bool:
-    """A report llmshift wrote (JSON, SARIF, JUnit): the models it names are its findings,
-    not models the code calls, so scanning it would only echo earlier results."""
-    if path.suffix.lower() not in (".json", ".sarif", ".xml"):
-        return False
+    """A report llmshift wrote (JSON, SARIF, JUnit, Markdown, HTML): the models and prompts
+    it names are its findings, not what the code uses, so reading it would only echo
+    earlier results."""
+    suffix = path.suffix.lower()
     head = text[:4096]
+    if suffix in (".md", ".markdown"):
+        return bool(_OWN_MARKDOWN_RE.match(head.lstrip()))
+    if suffix in (".html", ".htm"):
+        return "<title>LLMShift" in head
+    if suffix not in (".json", ".sarif", ".xml"):
+        return False
     return '"llmshift_version"' in head or '<testsuites name="llmshift"' in head or bool(re.search(r'"driver":\s*\{\s*"name":\s*"llmshift"', head))
 
 
@@ -685,13 +809,14 @@ def strip_comment(line: str, markers: tuple[str, ...], state: dict) -> str:
     out: list[str] = []
     i, n, quote = 0, len(line), ""
     while i < n:
-        if state.get("block"):
-            end = line.find("*/", i)
+        if state.get("block"):  # the closing token of the open block
+            end = line.find(state["block"], i)
             if end < 0:
                 break
-            state["block"] = False
-            out.append(" " * (end + 2 - i))  # keep the columns of what follows
-            i = end + 2
+            close = len(state["block"])
+            state["block"] = None
+            out.append(" " * (end + close - i))  # keep the columns of what follows
+            i = end + close
             continue
         ch = line[i]
         if quote:
@@ -704,13 +829,22 @@ def strip_comment(line: str, markers: tuple[str, ...], state: dict) -> str:
         elif ch in "\"'`":
             quote = ch
         else:
-            if _BLOCK in markers and line.startswith("/*", i):
-                state["block"] = True
-                out.append("  ")
-                i += 2
+            opened = next((m for m in (_BLOCK, _HTML) if m in markers and line.startswith(m, i)), None)
+            # A block opens only where a comment can start, and only if the file closes it
+            # somewhere: a "/*" in a path glob or a regex would otherwise hide the rest of the file.
+            if opened and (i == 0 or line[i - 1] in _BEFORE_BLOCK) and _BLOCK_END[opened] in state.get("closers", (_BLOCK_END[opened],)):
+                state["block"] = _BLOCK_END[opened]
+                out.append(" " * len(opened))
+                i += len(opened)
                 continue
             for marker in markers:
-                if marker != _BLOCK and line.startswith(marker, i) and (marker not in (_HASH, _SEMI, "!") or i == 0 or line[i - 1].isspace()):
+                if marker in (_BLOCK, _HTML):
+                    continue
+                if marker == _HASH_AT_START:
+                    if ch == "#" and not line[:i].strip():
+                        return "".join(out)
+                    continue
+                if line.startswith(marker, i) and (marker not in (_HASH, _SEMI, "!") or i == 0 or line[i - 1].isspace()):
                     return "".join(out)
         out.append(ch)
         i += 1
@@ -725,7 +859,7 @@ def scan_generic(
     markers (see COMMENT_SYNTAX); text in comments is not scanned."""
     llm_hint = has_llm_hint(text) if llm_hint is None else llm_hint
     out = []
-    block: dict = {}
+    block: dict = {"closers": {end for end in _BLOCK_END.values() if end in text}}  # blocks this file can close
     for lineno, line in enumerate(source_lines(text), 1):
         if len(line) > MAX_LINE:
             if has_trigger(line.lower()):
@@ -846,12 +980,16 @@ def scan_paths(
     include_docs: bool = False,
     exclude: Iterable[str] = (),
     warn_days: int = 180,
+    max_files: int | None = None,
 ) -> ScanResult:
+    """Every model reference in `paths`; with `max_files`, the first that many files."""
     registry = registry or Registry.load()
     paths = list(paths or ["."])
     result = ScanResult(root=", ".join(paths), registry_updated=registry.updated, warn_days=warn_days)
     seen: set[tuple] = set()
     for _root, path in iter_source_files(paths, include_docs=include_docs, exclude=exclude):
+        if max_files is not None and result.files_scanned >= max_files:
+            break
         try:
             rel = Path(os.path.relpath(path)).as_posix()
             if rel.startswith("../"):

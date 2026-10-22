@@ -24,7 +24,8 @@ from . import __version__
 from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
-from .textutil import source_lines
+from .report import _md
+from .textutil import md_fence, source_lines
 
 MIN_PROMPT = 15  # shorter strings are not prompts
 LIVES_RATIO = 0.85  # how close a string in the base version must be to the recorded prompt
@@ -123,18 +124,39 @@ def _python_nodes(text: str) -> list[tuple[str, int, int]] | None:
     tree = parse_python(text)
     if tree is None:
         return None
-    inner = {id(n.left) for n in ast.walk(tree) if _is_add(n)}  # a chain is rendered once, from its top
+    inner = {id(n.left) for n in ast.walk(tree) if _is_add(n)}  # a chain is read once, from its top
     out: list[tuple[str, int, int]] = []
     for node in ast.walk(tree):
-        if id(node) in inner and _is_add(node):
+        if _is_add(node) and id(node) in inner:
             continue
         try:
-            value = _render(node)
+            found = _chain_start(node) if _is_add(node) else (_render(node), node)
         except RecursionError:  # e.g. a right-nested a + (b + (c + ...)) thousands deep
-            value = None
-        if value is not None:
-            out.append((value, getattr(node, "lineno", 0), getattr(node, "end_lineno", None) or getattr(node, "lineno", 0)))
+            found = None
+        if found is not None and found[0] is not None:
+            value, end = found
+            out.append((value, getattr(node, "lineno", 0), getattr(end, "end_lineno", None) or getattr(node, "lineno", 0)))
     return out
+
+
+def _chain_start(top: ast.AST) -> tuple[str, ast.AST] | None:
+    """The longest start of a "a" + "b" + name chain that can be read ("ab"), and the node it
+    ends at: the text before a variable part is still the prompt an edit may change."""
+    spine = []
+    node = top
+    while _is_add(node):
+        spine.append(node)
+        node = node.left  # type: ignore[attr-defined]
+    text = _render(node)
+    if text is None:
+        return None
+    end = node
+    for add in reversed(spine):  # from the innermost +
+        right = _render(add.right)  # type: ignore[attr-defined]
+        if right is None:
+            break
+        text, end = text + right, add
+    return text, end
 
 
 def _python_strings(text: str) -> list[str] | None:
@@ -718,10 +740,11 @@ def check_markdown(run: CheckRun, marker: str = gh.CHECK_MARKER) -> str:
         lines.append("")
         lines.append("This change does not edit any prompt covered by the test set.")
         return "\n".join(lines) + "\n"
+    what = "prompt(s)" if run.ran_all else "prompt change(s)"  # --all also runs the prompts this change left alone
     if run.failing:
-        lines.append(f"## LLMShift prompt check: {len(run.failing)} of {len(tested)} prompt change(s) below {threshold}")
+        lines.append(f"## LLMShift prompt check: {len(run.failing)} of {len(tested)} {what} below {threshold}")
     else:
-        lines.append(f"## LLMShift prompt check: {len(tested)} prompt change(s) keep the recorded behaviour")
+        lines.append(f"## LLMShift prompt check: {len(tested)} {what} keep the recorded behaviour")
     lines.append("")
     lines.append(f"Tested on `{run.model}` against the recorded answers" + (f" (base `{run.base}`)." if run.base else "."))
     lines.append("")
@@ -749,17 +772,15 @@ def check_markdown(run: CheckRun, marker: str = gh.CHECK_MARKER) -> str:
         if c.approximate:
             lines.append("_The code prompt differs from the recorded one (a template?); the edit was applied to the recorded prompt as closely as possible._")
             lines.append("")
-        lines.append("```diff")
-        lines.append(_prompt_diff(c.old, c.new)[:6000])
-        lines.append("```")
+        lines.append(md_fence(_prompt_diff(c.old, c.new)[:6000], "diff"))
         patterns = _patterns(c.result)
         if patterns:
             lines.append("")
-            lines.append("What changed in the answers: " + "; ".join(patterns))
+            lines.append("What changed in the answers: " + _md("; ".join(patterns)))
         bad = [r for r in c.result.cases if r.status in ("fail", "error")][:3]
         for r in bad:
             why = r.error or next((x.message for x in r.checks if x.status in ("fail", "error")), "")
-            lines.append(f"- `{r.id}`: {why[:160]}")
+            lines.append(f"- `{r.id}`: {_md(why[:160])}")
         lines.append("")
         lines.append("</details>")
         lines.append("")

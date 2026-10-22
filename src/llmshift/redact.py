@@ -12,6 +12,12 @@ import re
 import threading
 from typing import Any
 
+# A setting that holds a credential, and a value that looks like one (letters and digits).
+_SECRET_NAME = r"[\w.-]{0,40}(?:password|passwd|pwd|secret|api[-_]?key|apikey|access[-_]?key|secret[-_]?key|token|credential)"
+# The look-aheads stop where a value may end (256 characters): unbounded, every
+# "api-key=" in a long run of value characters would rescan the rest of it.
+_SECRET_VALUE = r"(?=[\w+/=.~!@#$%^*-]{0,255}\d)(?=[\w+/=.~!@#$%^*-]{0,255}[A-Za-z])[\w+/=.~!@#$%^*-]{6,256}"
+
 # (pattern, what it must contain): a substring test is far cheaper than a regex that tries
 # every position of a long text (a document or an image in a request).
 _SECRETS = [
@@ -32,7 +38,21 @@ _SECRETS = [
     (r"\bhf_[A-Za-z0-9]{20,}", ("hf_",)),  # Hugging Face
     (r"\br8_[A-Za-z0-9]{20,}", ("r8_",)),  # Replicate
     (r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}", ("_live_", "_test_")),  # Stripe
+    (r"\bgl(?:pat|dt|rt|ptt|cbt|soat)-[A-Za-z0-9_\-]{20,}", ("gl",)),  # GitLab
+    (r"\bnpm_[A-Za-z0-9]{36}\b", ("npm_",)),  # npm
+    # Only the value (group v) is replaced. A credential in a URL: postgres://user:PASSWORD@host
+    # (a template such as https://{user}:{password}@{host} holds none).
+    (r"\b[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s:/@\"'<>{}$%()]{0,128}:(?P<v>[^\s@/\"'<>{}$%()]{1,256})@", ("://",)),
+    (r"(?i)\bauthorization[\"']?[ \t]*[:=][ \t]*[\"']?basic[ \t]+(?P<v>[A-Za-z0-9+/=]{8,})", ("authorization",)),
+    # The value of a password, secret or key setting (password=..., "api-key": "...", an Azure
+    # key or AWS secret key in a config dump), when it looks like one: letters and digits.
+    (
+        r"(?i)\b" + _SECRET_NAME + r"[\"']?[ \t]*[:=][ \t]*[\"']?(?P<v>" + _SECRET_VALUE + ")",
+        ("pass", "pwd", "secret", "key", "token", "credential"),
+    ),
 ]
+_SECRET_NAME_RE = re.compile(_SECRET_NAME, re.I)
+_SECRET_VALUE_RE = re.compile(_SECRET_VALUE)
 SECRET_PATTERNS = [("SECRET", re.compile(p)) for p, _ in _SECRETS]
 _MARKERS = {p: markers for p, markers in _SECRETS if markers}
 
@@ -59,12 +79,16 @@ def _env_secrets() -> list[str]:
 
 
 _IMAGE_DATA_URL_RE = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,")
-_BASE64_RE = re.compile(r"[A-Za-z0-9+/=\s]+")
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/=\r\n]*")
 _DIGIT_RE = re.compile(r"\d")
 
 
 def _may_match(pattern: re.Pattern, text: str, lowered: list) -> bool:
     markers = _MARKERS.get(pattern.pattern)
+    if markers is not None and pattern.flags & re.I:  # case-insensitive: look in the lowered text
+        if not lowered:
+            lowered.append(text.lower())
+        return any(m in lowered[0] for m in markers)
     if markers is not None:
         return any(m in text for m in markers)
     if "bearer" in pattern.pattern:
@@ -123,6 +147,7 @@ def _plausible(label: str, value: str) -> bool:
 
 class Redactor:
     def __init__(self, *, secrets: bool = True, pii: bool = False):
+        self.secrets = secrets
         self.patterns = (SECRET_PATTERNS if secrets else []) + (PII_PATTERNS if pii else [])
         self.env_secrets = _env_secrets() if secrets else []
         self.mapping: dict[tuple[str, str], str] = {}
@@ -140,9 +165,12 @@ class Redactor:
     def text(self, text: str) -> str:
         if not text or not self.patterns:
             return text
-        if _IMAGE_DATA_URL_RE.match(text, 0, 128):  # an inline image: nothing readable to redact
+        # Encoded data has nothing readable to redact, but only when that is all the text is:
+        # an inline image, or a large raw base64 blob (prose has spaces; base64 does not).
+        data_url = _IMAGE_DATA_URL_RE.match(text, 0, 128)
+        if data_url and _BASE64_RE.fullmatch(text, data_url.end()):
             return text
-        if len(text) > 4096 and _BASE64_RE.fullmatch(text):  # raw base64 (an image or file): the same
+        if len(text) > 4096 and _BASE64_RE.fullmatch(text):
             return text
         for secret in self.env_secrets:  # the live value of a key variable, whatever its shape
             if secret in text:
@@ -153,8 +181,11 @@ class Redactor:
                 continue
 
             def repl(m: re.Match, label: str = label) -> str:
-                value = m.group(0)
-                return self._placeholder(label, value) if _plausible(label, value) else value
+                whole = m.group(0)
+                if "v" in m.re.groupindex:  # only the value part is the secret
+                    start, end = m.start("v") - m.start(), m.end("v") - m.start()
+                    return whole[:start] + self._placeholder(label, m.group("v")) + whole[end:]
+                return self._placeholder(label, whole) if _plausible(label, whole) else whole
 
             redacted = pattern.sub(repl, text)
             if redacted is not text:
@@ -166,18 +197,23 @@ class Redactor:
         deeper than Python's recursion limit (a tool's arguments, say) is handled too."""
         root: list = [None]
         stack: list[tuple[Any, Any, Any]] = [(root, 0, value)]
+        copies: dict[int, Any] = {}  # a container met again (shared, or containing itself) is copied once
         while stack:
             parent, key, item = stack.pop()
-            if isinstance(item, str):
+            if isinstance(item, (list, dict)) and id(item) in copies:
+                parent[key] = copies[id(item)]
+            elif isinstance(item, str):
                 parent[key] = self.text(item)
             elif isinstance(item, list):
-                parent[key] = copy = [None] * len(item)
+                parent[key] = copies[id(item)] = copy = [None] * len(item)
                 stack.extend((copy, i, v) for i, v in enumerate(item))
             elif isinstance(item, dict):
-                parent[key] = out = {}
+                parent[key] = copies[id(item)] = out = {}
                 for k, v in item.items():
                     if k in _PLAIN_KEYS and isinstance(v, str) and len(v) < 64:
                         out[k] = v
+                    elif self.secrets and isinstance(v, str) and isinstance(k, str) and _SECRET_NAME_RE.fullmatch(k) and _SECRET_VALUE_RE.fullmatch(v.strip()):
+                        out[k] = self._placeholder("SECRET", v.strip())  # {"api_key": "..."}
                     else:
                         out[k] = None  # keeps the key order; filled in below
                         stack.append((out, k, v))

@@ -46,13 +46,33 @@ def _close_all() -> None:
 
 
 def _reset_after_fork() -> None:
-    # Only the forking thread survives a fork: copies queued in the parent stay the parent's.
+    # Only the forking thread survives a fork: copies queued in the parent stay the parent's,
+    # and a lock another thread held at that moment would never be released in the child.
+    global _SHARED_LOCK
+    _SHARED_LOCK = threading.Lock()
     for shadow in list(_INSTANCES):
         shadow._lock = threading.Lock()
         shadow._queue = queue.SimpleQueue()
         shadow._threads = []
         shadow._pending = 0
         shadow._pending_bytes = 0
+        if shadow._redactor is not None:
+            shadow._redactor._lock = threading.Lock()
+
+
+_SHARED: dict[tuple, Any] = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def shared(model: str, *, rate: float, path: str | os.PathLike) -> "Shadow":
+    """One Shadow per (model, rate, file): an app that wraps a new client for every request
+    (in a web handler, say) shares one set of background workers instead of starting more."""
+    key = (model, float(rate), os.path.abspath(os.path.expanduser(os.fspath(path))))
+    with _SHARED_LOCK:
+        shadow = _SHARED.get(key)
+        if shadow is None or shadow._closed:
+            shadow = _SHARED[key] = Shadow(model, rate=rate, path=path)
+        return shadow
 
 
 atexit.register(_close_all)
@@ -122,7 +142,7 @@ class Shadow:
             raise ValueError(f"shadow rate must be between 0 and 1, got {rate}")
         self.model = model
         self.rate = rate
-        self.path = Path(path)
+        self.path = Path(path).expanduser()
         self.config = config
         self.max_pending = max(1, int(max_pending))
         self.stats = {"seen": 0, "sent": 0, "written": 0, "dropped": 0, "errors": 0}
@@ -386,7 +406,13 @@ def cmd_shadow_report(args: Any, cfg: dict) -> int:
     from . import cli, report
     from .compare import run_compare
 
-    paths = args.logs or [DEFAULT_PATH]
+    if args.logs:
+        paths = args.logs
+    else:  # run from a subfolder: the log of the project the config belongs to
+        from .config import project_dir
+
+        default = Path(DEFAULT_PATH)
+        paths = [DEFAULT_PATH if default.exists() else str(project_dir(cfg) / DEFAULT_PATH)]
     try:
         records = load_shadow_logs(paths)
     except FileNotFoundError as exc:

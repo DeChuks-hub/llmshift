@@ -9,6 +9,7 @@ Spec forms:
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 from typing import Any
@@ -53,13 +54,13 @@ PRESETS: dict[str, dict] = {
 ALIASES = {"google": "gemini", "claude": "anthropic", "azure-openai": "azure", "azure_openai": "azure", "vertex": "gemini"}
 
 _INFER_RULES = [
-    ("openai", r"^(gpt-|o\d(\b|-)|chatgpt-|text-davinci|davinci|babbage|ft:|text-embedding|codex|computer-use|omni-moderation|text-moderation|dall-e|whisper|tts-)"),
+    ("openai", r"^(gpt-|o\d(\b|-)|chatgpt-|text-davinci|davinci|babbage|ft:|text-embedding-(?!00)|codex|computer-use|omni-moderation|text-moderation|dall-e|whisper|tts-)"),
     ("anthropic", r"^claude-"),
     ("gemini", r"^(models/)?(gemini-|gemma-|text-embedding-00|gemini-embedding)"),
     ("mistral", r"^(mistral-|open-mistral|open-mixtral|codestral|ministral|pixtral|magistral|devstral)"),
     ("deepseek", r"^deepseek-"),
     ("xai", r"^grok-"),
-    ("cohere", r"^(command|c4ai-)"),
+    ("cohere", r"^(command(-|$)|c4ai-)"),
 ]
 
 
@@ -89,6 +90,35 @@ def _user_config(config: dict | None, *names: str) -> dict | None:
     return None
 
 
+def ollama_url(value: str) -> str:
+    """OLLAMA_HOST read the way Ollama reads it: "0.0.0.0", "localhost", ":11434",
+    "box:8080", "https://ollama.example.com". Without a scheme the port defaults to 11434
+    (80 or 443 with one). 0.0.0.0 and :: mean "every interface" to a server, which is no
+    address to call (Windows refuses it): the local machine is meant."""
+    text = value.strip()
+    scheme, sep, rest = text.partition("://")
+    if sep:
+        scheme = scheme.lower()
+        port = {"http": "80", "https": "443"}.get(scheme, "11434")
+    else:
+        scheme, rest, port = "http", text, "11434"
+    hostport, _, path = rest.partition("/")
+    if hostport.startswith("["):  # [::1]:11434
+        host, _, after = hostport[1:].partition("]")
+        given = after[1:] if after.startswith(":") else ""
+    elif hostport.count(":") == 1:
+        host, given = hostport.split(":")
+    else:  # a name, or an IPv6 address without a port
+        host, given = hostport, ""
+    if re.fullmatch(r"[0-9]{1,5}", given) and int(given) <= 65535:
+        port = given
+    if host in ("", "0.0.0.0", "::"):
+        host = "127.0.0.1"
+    if ":" in host:  # an IPv6 address
+        host = f"[{host}]"
+    return f"{scheme}://{host}:{port}" + (f"/{path.strip('/')}" if path.strip("/") else "")
+
+
 def parse_spec(spec: str, config: dict | None = None) -> tuple[str | None, str]:
     spec = (spec or "").strip()
     if ":" in spec:
@@ -111,10 +141,16 @@ def resolve(spec: str, config: dict | None = None) -> Provider:
     if name is None:
         name = infer_provider(model)
         if name is None:
-            raise ProviderError(
-                f"cannot tell which provider serves {model!r}; write it as provider:model, e.g. openai:{model} or ollama:{model}",
-                code="unknown_provider",
-            )
+            prefix, _, rest = model.partition(":")
+            close = difflib.get_close_matches(prefix.lower(), sorted(known_providers(config)), n=1, cutoff=0.75) if rest else []
+            if close:  # opneai:gpt-4o
+                hint = f"unknown provider {prefix!r} in {spec!r}; did you mean {close[0]}:{rest}?"
+            elif prefix.lower() == "command" and rest:
+                hint = (f"{spec!r}: a command provider is set up under a name of its own in llmshift.yaml "
+                        "(providers: {my-app: {type: command, command: ...}}) and used by that name, e.g. my-app:model")
+            else:
+                hint = f"cannot tell which provider serves {model!r}; write it as provider:model, e.g. openai:{model} or ollama:{model}"
+            raise ProviderError(hint, code="unknown_provider")
     canonical = ALIASES.get(name, name)
     alias_names = sorted(a for a, target in ALIASES.items() if target == canonical)
     user_cfg = _user_config(config, name, canonical, *alias_names) or {}
@@ -122,11 +158,10 @@ def resolve(spec: str, config: dict | None = None) -> Provider:
     options["timeout"] = config.get("timeout", 120)
     options["max_retries"] = config.get("max_retries", 4)
     options.update(user_cfg)
-    if name == "ollama" and os.environ.get("OLLAMA_HOST") and "base_url" not in user_cfg:
-        host = os.environ["OLLAMA_HOST"].rstrip("/")
-        if not host.startswith("http"):
-            host = "http://" + host
-        options["base_url"] = host + "/v1"
+    if "timeout" in config or "timeout" in user_cfg:  # python: functions get a time limit only when one is set
+        options["timeout_set"] = True
+    if name == "ollama" and os.environ.get("OLLAMA_HOST", "").strip() and "base_url" not in user_cfg:
+        options["base_url"] = ollama_url(os.environ["OLLAMA_HOST"]) + "/v1"
     ptype = options.get("type") or canonical
     cls = TYPES.get(ptype)
     if cls is None:

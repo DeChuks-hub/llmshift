@@ -87,6 +87,18 @@ class Tool:
 TOOLS: dict[str, Tool] = {}
 
 
+def _as_arguments(message: str, spec: "Tool") -> str:
+    """Messages written for the command line name flags (pass --judge provider:model); a tool
+    caller sets arguments, so a flag the tool takes is named as its argument."""
+    names = set((spec.schema.get("properties") or {}).keys())
+
+    def name(m: re.Match) -> str:
+        arg = m.group(1).replace("-", "_")
+        return f"the {arg} argument" if arg in names else m.group(0)
+
+    return re.sub(r"(?<![\w-])--([a-z][a-z0-9-]*)", name, message)
+
+
 def tool(name: str, description: str, schema: dict, *, title: str | None = None, read_only: bool = True, destructive: bool = False, open_world: bool = False) -> Callable:
     """Register a tool. The handler receives (arguments, config) and returns a JSON-able
     dict; raising ToolError (or any llmshift error) becomes an error result."""
@@ -251,7 +263,7 @@ class Server:
             return self._result(f"every request failed: {exc}. Check the model name and that the provider's API key "
                                 "environment variable is set (llmshift_doctor shows which keys are visible).", error=True)
         except (ToolError, UsageError, ConfigError, TestFileError, ProviderError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
-            return self._result(str(exc) or exc.__class__.__name__, error=True)
+            return self._result(_as_arguments(str(exc) or exc.__class__.__name__, spec), error=True)
         except (Exception, SystemExit) as exc:
             traceback.print_exc(file=sys.stderr)
             return self._result(f"unexpected {exc.__class__.__name__}: {exc}", error=True)

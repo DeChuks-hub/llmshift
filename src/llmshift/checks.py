@@ -10,6 +10,7 @@ exactly what changed.
 from __future__ import annotations
 
 import json
+import math
 import re
 import string
 import threading
@@ -182,6 +183,8 @@ class CheckContext:
     judge_calls: int = 0
     judge_mode: str = "auto"  # auto: ask the judge only when rule-based checks cannot decide
     judge_skipped: int = 0
+    judge_failed: int = 0  # judge calls that got no answer (a wrong key, an unknown model...)
+    judge_error: str | None = None  # the first of those errors
 
 
 @dataclass
@@ -300,9 +303,18 @@ def c_not_empty(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) 
     return FAIL("empty response" + why)
 
 
+def _nan_ok(case: TestCase) -> bool:
+    """Whether this case's own baseline is JSON only with NaN or Infinity in it: test files
+    from 0.1.0 inferred JSON checks from such answers, and the same answer must still pass."""
+    base = case.baseline_output or ""
+    if "NaN" not in base and "Infinity" not in base:
+        return False
+    return parse_json_lenient(base) is None and parse_json_lenient(base, allow_nan=True) is not None
+
+
 def c_json_valid(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> Outcome:
     text = _target(check, sample, case)
-    info = analyze_json(text)
+    info = analyze_json(text, allow_nan=_nan_ok(case))
     if info["valid"]:
         if isinstance(info["value"], (dict, list)) or check.get("allow_scalar"):
             return PASS()
@@ -314,10 +326,13 @@ def c_json_valid(check: dict, sample: Sample, case: TestCase, ctx: CheckContext)
 
 def c_json_schema(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> Outcome:
     schema = check.get("schema") or {}
-    value = parse_json_lenient(_target(check, sample, case))
+    nan_ok = _nan_ok(case)
+    value = parse_json_lenient(_target(check, sample, case), allow_nan=nan_ok)
     if value is None:
         return FAIL(f"no JSON found; expected {describe_schema(schema)}")
     errors = validate(value, schema)
+    if nan_ok:  # the baseline's own NaN or Infinity is no failure
+        errors = [e for e in errors if not e.endswith("is not a JSON number")]
     if errors:
         extra = f" (+{len(errors) - 3} more)" if len(errors) > 3 else ""
         return FAIL("; ".join(errors[:3]) + extra, score=0.0, errors=errors[:20])
@@ -541,7 +556,10 @@ def _scalar_equal(expected: Any, actual: Any, case_sensitive: bool = True, tol: 
     if isinstance(expected, bool) or isinstance(actual, bool):
         return isinstance(expected, bool) and isinstance(actual, bool) and expected == actual
     if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
-        return abs(float(expected) - float(actual)) <= tol * max(1.0, abs(float(expected)))
+        e, a = float(expected), float(actual)
+        if not (math.isfinite(e) and math.isfinite(a)):  # NaN equals NaN here; infinity equals itself
+            return (math.isnan(e) and math.isnan(a)) or e == a
+        return abs(e - a) <= tol * max(1.0, abs(e))
     if isinstance(expected, str) and isinstance(actual, str):
         a, b = _norm_ws(expected.strip()), _norm_ws(actual.strip())
         return a == b if case_sensitive else a.lower() == b.lower()
@@ -554,7 +572,7 @@ def c_json_match(check: dict, sample: Sample, case: TestCase, ctx: CheckContext)
     fields = check.get("fields") or {}
     if not fields:
         return SKIP("no fields to compare")
-    value = parse_json_lenient(_target(check, sample, case))
+    value = parse_json_lenient(_target(check, sample, case), allow_nan=_nan_ok(case))
     if value is None:
         return SKIP("no JSON output to compare (see the format checks)")
     cs = check.get("case_sensitive", True)
@@ -741,6 +759,8 @@ def _pair_calls(name: str, exps: list[dict], acts: list[dict], mode: str) -> lis
     out: list[str] = []
     pool = list(acts)
     for e in exps:
+        if not pool:  # more expected calls than actual ones: the missing ones are reported apart
+            break
         scored = sorted(range(len(pool)), key=lambda i: len(_call_problems(name, e, pool[i], mode)))
         out.extend(_call_problems(name, e, pool.pop(scored[0]), mode))
     return out
@@ -813,6 +833,13 @@ CHECKS: dict[str, Callable[[dict, Sample, TestCase, CheckContext], Outcome]] = {
 }
 
 
+def check_types() -> set[str]:
+    """Every check type a test file or a severity setting can name."""
+    if "llm_judge" not in CHECKS:
+        _register_graders()
+    return set(CHECKS) | set(CATEGORY)
+
+
 def _register_graders() -> None:
     from . import graders
 
@@ -836,7 +863,11 @@ SEVERITY_ALIASES = {
 
 
 def normalize_severity(value: Any) -> str | None:
-    return SEVERITY_ALIASES.get(str(value).strip().lower()) if value not in (None, "") else None
+    if value is False:  # YAML reads `off` and `no` as false
+        return "info"
+    if value is True or value in (None, ""):
+        return None
+    return SEVERITY_ALIASES.get(str(value).strip().lower())
 
 
 def severity_of(check: dict, ctx: CheckContext) -> str:
@@ -860,7 +891,12 @@ def evaluate(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> 
     try:
         outcome = fn(check, sample, case, ctx)
     except Exception as exc:  # a broken check must never abort a run
-        outcome = Outcome("error", f"check crashed: {exc.__class__.__name__}: {exc}")
+        from .providers.base import ProviderError
+
+        if isinstance(exc, ProviderError):  # the judge or grader model did not answer
+            outcome = Outcome("error", f"the grading model failed: {exc}")
+        else:
+            outcome = Outcome("error", f"check crashed: {exc.__class__.__name__}: {exc}")
     explicit = bool(check.get("severity")) or ctype in (ctx.severity or {})
     if outcome.details.get("soft") and severity == "error" and not explicit:
         severity = "warn"  # e.g. only a name went missing; an explicit severity always wins

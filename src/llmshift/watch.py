@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import re
 import statistics
 import time
@@ -80,27 +81,52 @@ def history_paths(history_dir: str | Path, model: str) -> tuple[Path, Path]:
     return base / "history.jsonl", base / "runs"
 
 
+_SUMMARY_NUMBERS = ("total", "evaluated", "passed", "warned", "failed", "errors", "pass_rate", "error_rate", "similarity", "changed_outputs")
+
+
+def _clean_row(row: Any) -> dict | None:
+    """A history row as drift detection reads it: a field of the wrong type (a hand edit,
+    a half-written line) counts as not recorded, instead of failing every later run."""
+    if not isinstance(row, dict):
+        return None
+    summary = dict(row["summary"]) if isinstance(row.get("summary"), dict) else {}
+    for key in _SUMMARY_NUMBERS:
+        value = summary.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+            del summary[key]
+    for key in ("failing_categories", "models", "fingerprints"):
+        if key in summary and not isinstance(summary[key], dict):
+            del summary[key]
+    return {**row, "summary": summary}
+
+
 def load_history(history_dir: str | Path, model: str) -> list[dict]:
     hist_file, _ = history_paths(history_dir, model)
     if not hist_file.exists():
         return []
     out = []
-    for line in jsonl_lines(hist_file.read_text(encoding="utf-8")):
+    for line in jsonl_lines(hist_file.read_text(encoding="utf-8", errors="replace")):
         line = line.strip()
         if line:
             try:
-                out.append(json_loads(line))
+                row = _clean_row(json_loads(line))
             except (ValueError, RecursionError):
                 continue
+            if row is not None:
+                out.append(row)
     return out
 
 
-def _load_run(runs_dir: Path, run_id: str) -> dict:
+def _load_run(runs_dir: Path, run_id: Any) -> dict:
+    """The per-case results of an earlier run ({case id: {...}}); {} when unreadable."""
+    if not isinstance(run_id, str) or not re.fullmatch(r"[\w.-]{1,120}", run_id) or run_id.startswith("."):
+        return {}
     path = runs_dir / f"{run_id}.json"
     try:
-        return json_loads(path.read_text(encoding="utf-8"))
+        data = json_loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError, RecursionError):
         return {}
+    return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
 def summarize_run(res: CompareResult, case_hashes: dict[str, str] | None = None) -> tuple[dict, dict]:
@@ -306,7 +332,7 @@ def run_watch(
     history = load_history(history_dir, provider.spec)
     hist_file, runs_dir = history_paths(history_dir, provider.spec)
     runs = comparable_runs(history, fingerprint)
-    prev_cases = _load_run(runs_dir, runs[-1]["run_id"]) if runs else {}
+    prev_cases = _load_run(runs_dir, runs[-1].get("run_id")) if runs else {}
     try:
         registry = Registry.load()
     except Exception:

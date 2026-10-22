@@ -286,10 +286,19 @@ def compare_steps(base_steps: list[dict], new_steps: list[dict]) -> tuple[list[s
         # Calls of one step run in parallel, in any order: pair them by their arguments.
         failures.extend(_pair_calls(name, olds, news, "auto"))
 
-    def order(steps: list[dict]) -> list[list[str]]:  # step by step; within a step the order is free
-        return [sorted(str(c.get("name")) for c in s.get("tool_calls") or []) for s in steps if s.get("tool_calls")]
+    def first_step(steps: list[dict]) -> dict[str, int]:
+        first: dict[str, int] = {}
+        for i, s in enumerate(steps):
+            for c in s.get("tool_calls") or []:
+                first.setdefault(str(c.get("name")), i)
+        return first
 
-    if not missing and not extra and order(base_steps) != order(new_steps):
+    # Calls of one step have no order: only two tools whose steps swapped are called in a
+    # different order (calls made in parallel by one model and one after another by the
+    # other are the same order).
+    was, now = first_step(base_steps), first_step(new_steps)
+    swapped = any(was[a] < was[b] and now[a] > now[b] for a in was for b in was if a in now and b in now)
+    if not missing and not extra and swapped:
         changes.append("tools called in a different order: " + " -> ".join(str(c.get("name")) for c in new_calls))
     unrecorded = sum(1 for s in new_steps for r in s.get("results") or [] if r.get("replay") == "unrecorded")
     if unrecorded:

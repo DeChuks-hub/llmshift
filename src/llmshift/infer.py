@@ -41,7 +41,7 @@ def _norm_path(path: str) -> str:
 
 
 def _child(path: str, key: str) -> str:
-    return f"{path}.{key}" if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key) else f"{path}[{key!r}]"
+    return f"{path}.{key}" if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else f"{path}[{key!r}]"
 
 
 def _leaves(value: Any, path: str = "$", depth: int = 0) -> list[tuple[str, Any]]:
@@ -215,7 +215,7 @@ def infer_checks(
         expect["numbered_list"] = True
     if words >= 12 or any(expect.values()):
         checks.append({"type": "structure", "expect": expect})
-    checks.append({"type": "length", "min_words": max(1, int(words * 0.5) - 5), "max_words": int(words * 2.0) + 15, "baseline_words": words})
+    checks.append({"type": "length", "min_words": max(1 if words else 0, int(words * 0.5) - 5), "max_words": int(words * 2.0) + 15, "baseline_words": words})
     found = factlib.extract(text)
     if found:
         fact_check: dict = {"type": "facts", "facts": [factlib.public(f) for f in found]}

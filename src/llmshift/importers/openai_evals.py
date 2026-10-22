@@ -36,6 +36,7 @@ import gzip
 import json
 import os
 import re
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,7 +46,7 @@ from .. import messages as msgs
 from ..providers import http
 from ..templating import render, render_text, uses_namespace
 from ..testset import TestCase
-from ..textutil import jsonl_lines, stable_hash
+from ..textutil import decode_text, json_loads, jsonl_lines, read_text, stable_hash
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 READ_ONLY_DATE = "2026-10-31"
@@ -108,9 +109,47 @@ class ImportResult:
 # ------------------------------------------------------------- utilities
 
 
-def _slug(text: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", (text or "eval").lower()).strip("-")
+def _slug(text: Any) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", str(text or "eval").lower()).strip("-")
     return s[:48] or "eval"
+
+
+# Exports and registries are read as they come: a field of the wrong type is treated as
+# missing, never a crash halfway through an import.
+def _dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _dicts(value: Any) -> list[dict]:
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def _num(value: Any) -> float | None:
+    """A number from an export (5, 5.0, "5"), or None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and abs(number) != float("inf") else None
+
+
+def _json_records(text: str, where: Any, warnings: list[str] | None = None) -> list[Any]:
+    """The values of a JSON Lines text. A bad line is a warning when `warnings` is given,
+    else an error that names the file and line."""
+    out = []
+    for n, line in enumerate(jsonl_lines(text), 1):
+        if not line.strip():
+            continue
+        try:
+            out.append(json_loads(line))
+        except (ValueError, RecursionError) as exc:
+            problem = "nested too deeply to read" if isinstance(exc, RecursionError) else "not valid JSON"
+            if warnings is None:
+                raise ValueError(f"{where}, line {n}: {problem}") from None
+            warnings.append(f"{where}, line {n}: {problem}; skipped")
+    return out
 
 
 def canon_content(content: Any) -> Any:
@@ -147,10 +186,8 @@ def canon_messages(raw: Any) -> list[dict]:
     if isinstance(raw, str):
         return [{"role": "user", "content": raw}]
     out = []
-    for m in raw or []:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role") or "user"
+    for m in _dicts(raw):
+        role = m.get("role") if isinstance(m.get("role"), str) and m.get("role") else "user"
         name = m.get("name")
         if role == "system" and name in ("example_user", "example_assistant"):
             role = "user" if name == "example_user" else "assistant"
@@ -220,7 +257,7 @@ def convert_grader(g: dict, item: dict, warnings: list[str]) -> dict | None:
     gtype = g.get("type")
     base = {"name": g.get("name") or gtype, "grader_id": g.get("id") or g.get("name"), "origin": f"openai_evals:{gtype}"}
     if gtype == "string_check":
-        op = (g.get("operation") or "eq").lower()
+        op = str(g.get("operation") or "eq").lower()
         value = _static(g.get("reference", ""), item)
         value = value if isinstance(value, (str, list)) else json.dumps(value)
         check: dict
@@ -240,8 +277,12 @@ def convert_grader(g: dict, item: dict, warnings: list[str]) -> dict | None:
             check["target"] = target
         return {**check, **base}
     if gtype == "text_similarity":
-        metric = (g.get("evaluation_metric") or "fuzzy_match").replace("-", "_")
-        check = {"type": "similarity", "metric": metric, "threshold": float(g.get("pass_threshold", 0.5)), "reference": _static(g.get("reference", ""), item), "category": "custom", "severity": "error"}
+        metric = str(g.get("evaluation_metric") or "fuzzy_match").replace("-", "_")
+        threshold = _num(g.get("pass_threshold", 0.5))
+        if threshold is None:
+            warnings.append(f"text_similarity grader {g.get('name')!r} has no numeric pass_threshold; skipped")
+            return None
+        check = {"type": "similarity", "metric": metric, "threshold": threshold, "reference": _static(g.get("reference", ""), item), "category": "custom", "severity": "error"}
         if metric == "cosine":
             check["embedding_model"] = "openai:text-embedding-3-large"
         target = _target(g.get("input"))
@@ -276,6 +317,9 @@ def convert_grader(g: dict, item: dict, warnings: list[str]) -> dict | None:
         subs = g.get("graders") or {}
         if isinstance(subs, dict) and subs.get("type"):  # SDK typing quirk: a single grader
             subs = {subs.get("name") or "grader": subs}
+        if not isinstance(subs, dict) or not all(isinstance(sub, dict) for sub in subs.values()):
+            warnings.append(f"multi grader {g.get('name')!r} has no readable graders; skipped")
+            return None
         converted = {}
         for name, sub in subs.items():
             c = convert_grader(sub, item, warnings)
@@ -314,42 +358,39 @@ class EvalsClient:
         sep = "&" if "?" in path else "?"
         while True:
             q = f"{path}{sep}limit={limit}{extra}" + (f"&after={after}" if after else "")
-            page = self.get(q)
-            data = page.get("data") or []
+            page = _dict(self.get(q))
+            data = _dicts(page.get("data"))
             yield from data
             if not page.get("has_more") or not data:
                 return
             after = page.get("last_id") or data[-1].get("id")
+            if not after:
+                return
 
     def file_content(self, file_id: str) -> bytes:
         return http.request("GET", f"{self.base_url}/files/{file_id}/content", headers=self.headers, timeout=300, max_retries=5, raw=True)
 
 
-def _items_from_jsonl(data: bytes | str) -> list[dict]:
-    text = data.decode("utf-8-sig", "replace") if isinstance(data, bytes) else data
+def _items_from_jsonl(data: bytes | str, where: Any = "the data file", warnings: list[str] | None = None) -> list[dict]:
+    if isinstance(data, bytes):
+        if data[:2] == b"\x1f\x8b":
+            raise ValueError(f"{where} is gzip-compressed; decompress it first")
+        data = decode_text(data, where)
     out = []
-    for line in jsonl_lines(text):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
+    for rec in _json_records(data, where, warnings if warnings is not None else []):
         if isinstance(rec, dict):
             out.append(rec if "item" in rec else {"item": rec})
     return out
 
 
 def _messages_for_item(data_source: dict, item: dict, sample: dict | None) -> list[dict]:
-    if sample and sample.get("input"):
+    sample = _dict(sample)
+    if sample.get("input"):
         return canon_messages(sample["input"])
-    im = (data_source or {}).get("input_messages") or {}
+    im = _dict(_dict(data_source).get("input_messages"))
     if im.get("type") == "template":
         rendered = []
-        for m in im.get("template") or []:
-            if not isinstance(m, dict):
-                continue
+        for m in _dicts(im.get("template")):
             content = m.get("content")
             if isinstance(content, dict) and "text" in content:
                 text = render_text(content["text"], {"item": item})
@@ -380,7 +421,7 @@ def _baseline_from_sample(sample: dict | None) -> tuple[str | None, list[dict], 
     outputs = sample.get("output")
     if isinstance(outputs, list) and outputs:
         first = outputs[0] if isinstance(outputs[0], dict) else {}
-        calls = [c for c in (msgs.normalize_tool_call(tc) for tc in first.get("tool_calls") or []) if c]
+        calls = [c for c in (msgs.normalize_tool_call(tc) for tc in _dicts(first.get("tool_calls"))) if c]
         return msgs.content_text(first.get("content")), calls, sample.get("model")
     if "choices" in sample:
         from ..providers.openai import OpenAIProvider
@@ -403,28 +444,37 @@ def convert_hosted(
     items: list[dict] | None = None,
     max_items: int | None = None,
 ) -> tuple[list[TestCase], EvalImport]:
-    name = ev.get("name") or ev.get("id") or "eval"
-    info = EvalImport(name=name, eval_id=ev.get("id"), run_id=(run or {}).get("id"))
-    criteria = [g for g in ev.get("testing_criteria") or [] if isinstance(g, dict)]
-    data_source = (run or {}).get("data_source") or {}
+    name = str(ev.get("name") or ev.get("id") or "eval")
+    eval_id = str(ev["id"]) if ev.get("id") is not None else None
+    run = _dict(run) or None
+    info = EvalImport(name=name, eval_id=eval_id, run_id=(run or {}).get("id"))
+    criteria = _dicts(ev.get("testing_criteria"))
+    data_source = _dict((run or {}).get("data_source"))
     params = _sampling_to_params(data_source.get("sampling_params"))
-    group = f"{_slug(name)}-{stable_hash(ev.get('id') or name, 4)}"
+    group = f"{_slug(name)}-{stable_hash(eval_id or name, 4)}"
     rows: list[tuple[dict, dict | None, dict]] = []  # (item, sample, extra metadata)
     if output_items:
-        for oi in output_items:
-            item = oi.get("datasource_item") or {}
+        for oi in _dicts(output_items):
+            item = _dict(oi.get("datasource_item"))
             meta = {"datasource_item_id": oi.get("datasource_item_id"), "openai_status": oi.get("status")}
-            if oi.get("results"):
-                meta["openai_results"] = [{"name": r.get("name"), "passed": r.get("passed"), "score": r.get("score")} for r in oi["results"] if isinstance(r, dict)]
-            rows.append((item, oi.get("sample"), meta))
-        rows.sort(key=lambda r: (r[2].get("datasource_item_id") is None, r[2].get("datasource_item_id") or 0))
+            results = _dicts(oi.get("results"))
+            if results:
+                meta["openai_results"] = [{"name": r.get("name"), "passed": r.get("passed"), "score": r.get("score")} for r in results]
+            rows.append((item, _dict(oi.get("sample")) or None, meta))
+
+        def order(row: tuple) -> tuple:
+            item_id = row[2].get("datasource_item_id")
+            number = _num(item_id)
+            return (item_id is None, number is None, number or 0, str(item_id))
+
+        rows.sort(key=order)
     else:
-        for rec in items or []:
-            rows.append((rec.get("item") or {}, rec.get("sample"), {}))
+        for rec in _dicts(items):
+            rows.append((_dict(rec.get("item")), _dict(rec.get("sample")) or None, {}))
     if max_items:
         rows = rows[:max_items]
     if not rows:
-        dsc = (ev.get("data_source_config") or {}).get("type")
+        dsc = _dict(ev.get("data_source_config")).get("type")
         if dsc in ("logs", "stored_completions"):
             info.warnings.append(
                 f"eval {name!r} reads stored completions/logs and has no run output items to import; "
@@ -462,7 +512,7 @@ def convert_hosted(
                 baseline["model"] = model or run.get("model")
             info.with_baseline += 1
         inp = {"messages": messages, "params": case_params}
-        metadata = {"source": "openai-evals", "eval_id": ev.get("id"), "eval_name": name}
+        metadata = {"source": "openai-evals", "eval_id": eval_id, "eval_name": name}
         if run:
             metadata["run_id"] = run.get("id")
         metadata.update({k: v for k, v in meta.items() if v is not None})
@@ -486,11 +536,11 @@ def convert_hosted(
 def _outputs_of_one_run(output_items: list[dict], run: dict | None, runs: list[dict]) -> tuple[list[dict], dict | None]:
     """Keep the output items of a single run, so baselines and sampling settings match.
     Prefer the picked run; if the export has no outputs for it, use the newest run that has some."""
-    run_ids = {o.get("run_id") for o in output_items if o.get("run_id")}
+    run_ids = {o.get("run_id") for o in output_items if isinstance(o.get("run_id"), str) and o.get("run_id")}
     if not run_ids:
         return output_items, run
     if run is None or run.get("id") not in run_ids:
-        newest = max(run_ids, key=lambda rid: max((o.get("created_at") or 0) for o in output_items if o.get("run_id") == rid))
+        newest = max(sorted(run_ids), key=lambda rid: max((_num(o.get("created_at")) or 0) for o in output_items if o.get("run_id") == rid))
         run = next((r for r in runs if r.get("id") == newest), run)
         keep = newest
     else:
@@ -499,9 +549,10 @@ def _outputs_of_one_run(output_items: list[dict], run: dict | None, runs: list[d
 
 
 def _pick_run(runs: list[dict]) -> dict | None:
+    runs = _dicts(runs)
     completed = [r for r in runs if r.get("status") == "completed"]
     pool = completed or runs
-    return max(pool, key=lambda r: r.get("created_at") or 0) if pool else None
+    return max(pool, key=lambda r: _num(r.get("created_at")) or 0) if pool else None
 
 
 def import_from_api(
@@ -516,28 +567,31 @@ def import_from_api(
     client = client or EvalsClient()
     result = ImportResult()
     if eval_ids:
-        evals = [client.get(f"/evals/{eid}") for eid in eval_ids]
+        evals = _dicts([client.get(f"/evals/{eid}") for eid in eval_ids])
     elif all_evals:
         evals = list(client.paginate("/evals", 100, "&order=desc"))
     else:
         raise ValueError("pass --eval-id ID (repeatable) or --all")
     if name_filter:
-        evals = [e for e in evals if any(fnmatch.fnmatch((e.get("name") or "").lower(), p.lower()) for p in name_filter)]
+        evals = [e for e in evals if any(fnmatch.fnmatch(str(e.get("name") or "").lower(), p.lower()) for p in name_filter)]
     for ev in evals:
+        if not ev.get("id"):
+            result.warnings.append(f"skipped an eval without an id: {str(ev.get('name') or ev)[:80]}")
+            continue
         if progress:
             progress(f"reading {ev.get('name') or ev.get('id')}")
         runs = list(client.paginate(f"/evals/{ev['id']}/runs", 100, "&order=desc"))
         run = _pick_run(runs)
         output_items: list[dict] = []
         items: list[dict] = []
-        if run:
+        if run and run.get("id"):
             output_items = list(client.paginate(f"/evals/{ev['id']}/runs/{run['id']}/output_items", 100))
             if not output_items:
-                source = (run.get("data_source") or {}).get("source") or {}
+                source = _dict(_dict(run.get("data_source")).get("source"))
                 if source.get("type") == "file_content":
-                    items = [c for c in source.get("content") or [] if isinstance(c, dict)]
+                    items = _dicts(source.get("content"))
                 elif source.get("type") == "file_id" and source.get("id"):
-                    items = _items_from_jsonl(client.file_content(source["id"]))
+                    items = _items_from_jsonl(client.file_content(source["id"]), f"file {source['id']}")
         cases, info = convert_hosted(ev, run=run, output_items=output_items, items=items, max_items=max_items)
         result.cases.extend(cases)
         result.evals.append(info)
@@ -547,13 +601,15 @@ def import_from_api(
 
 def import_from_export(path: str, data: str | None = None, max_items: int | None = None) -> ImportResult:
     """Exported eval JSON (eval object / {eval, runs, output_items} / list) + optional data JSONL."""
-    raw_text = Path(path).read_text(encoding="utf-8-sig")
+    raw_text = read_text(path)
     result = ImportResult()
     try:
-        doc: Any = json.loads(raw_text)
+        doc: Any = json_loads(raw_text)
         docs = doc if isinstance(doc, list) else [doc]
-    except ValueError:
-        docs = [json.loads(line) for line in jsonl_lines(raw_text) if line.strip()]
+    except RecursionError:
+        raise ValueError(f"{path}: the JSON is nested too deeply to read") from None
+    except ValueError:  # JSON Lines: one object per line
+        docs = _json_records(raw_text, path)
     evals: list[dict] = []
     loose_output_items: list[dict] = []
     loose_items: list[dict] = []
@@ -564,7 +620,7 @@ def import_from_export(path: str, data: str | None = None, max_items: int | None
         if d.get("object") == "eval" or "testing_criteria" in d:
             evals.append(d)
         elif isinstance(d.get("eval"), dict):
-            evals.append({**d["eval"], "_runs": d.get("runs") or [], "_output_items": d.get("output_items") or [], "_items": d.get("items") or []})
+            evals.append({**d["eval"], "_runs": _dicts(d.get("runs")), "_output_items": _dicts(d.get("output_items")), "_items": _dicts(d.get("items"))})
         elif d.get("object") == "eval.run.output_item":
             loose_output_items.append(d)
         elif d.get("object") == "eval.run":
@@ -573,7 +629,7 @@ def import_from_export(path: str, data: str | None = None, max_items: int | None
             loose_items.append(d)
     if not evals:
         raise ValueError(f"{path}: no eval object found (expected the JSON from GET /v1/evals/{{id}})")
-    extra_items = _items_from_jsonl(Path(data).read_bytes()) if data else []
+    extra_items = _items_from_jsonl(Path(data).read_bytes(), data, result.warnings) if data else []
     for ev in evals:
         ev_runs = ev.pop("_runs", []) or [r for r in runs if r.get("eval_id") == ev.get("id")]
         ev_out = ev.pop("_output_items", []) or [o for o in loose_output_items if o.get("eval_id") in (None, ev.get("id"))]
@@ -581,9 +637,9 @@ def import_from_export(path: str, data: str | None = None, max_items: int | None
         run = _pick_run(ev_runs)
         ev_out, run = _outputs_of_one_run(ev_out, run, ev_runs)
         if run and not ev_items and not ev_out:
-            source = (run.get("data_source") or {}).get("source") or {}
+            source = _dict(_dict(run.get("data_source")).get("source"))
             if source.get("type") == "file_content":
-                ev_items = [c for c in source.get("content") or [] if isinstance(c, dict)]
+                ev_items = _dicts(source.get("content"))
         cases, info = convert_hosted(ev, run=run, output_items=ev_out, items=ev_items, max_items=max_items)
         if not cases and not ev_items and not ev_out:
             info.warnings.append("pass the eval's data file with --data items.jsonl")
@@ -617,7 +673,7 @@ def _load_yaml_entries(files: Iterable[Path], warnings: list[str]) -> dict:
     entries: dict = {}
     for f in files:
         try:
-            data = yamlsafe.load(f.read_text(encoding="utf-8")) or {}
+            data = yamlsafe.load(read_text(f)) or {}
         except Exception as exc:
             warnings.append(f"{f}: cannot parse YAML ({exc})")
             continue
@@ -627,12 +683,25 @@ def _load_yaml_entries(files: Iterable[Path], warnings: list[str]) -> dict:
     return entries
 
 
-def _read_samples(root: Path, ref: str, warnings: list[str]) -> list[dict]:
+MAX_SAMPLES_BYTES = 512 * 1024 * 1024  # a samples file (unpacked) is read this far
+
+
+def _read_samples(root: Path, ref: Any, warnings: list[str]) -> list[dict]:
+    if not isinstance(ref, str) or not ref.strip():
+        warnings.append(f"samples file name must be text, got {ref!r}")
+        return []
     p = Path(ref)
     candidates = [p, root / "data" / ref, root / ref]
     target = next((c for c in candidates if c.exists()), None)
     if target is None:
         warnings.append(f"samples file not found: {ref} (looked in {root / 'data'})")
+        return []
+    try:  # a registry names files of its own, not ones elsewhere on this machine
+        inside = any(target.resolve().is_relative_to(base.resolve()) for base in (root, Path.cwd()))
+    except (OSError, ValueError):
+        inside = False
+    if not inside:
+        warnings.append(f"samples file {ref} is outside the registry ({root}); skipped")
         return []
     files = sorted(target.rglob("*.jsonl")) + sorted(target.rglob("*.jsonl.gz")) if target.is_dir() else [target]
     out: list[dict] = []
@@ -641,22 +710,27 @@ def _read_samples(root: Path, ref: str, warnings: list[str]) -> list[dict]:
             warnings.append(f"{f}: compressed format not supported; decompress it first")
             continue
         try:
-            raw = gzip.open(f, "rb").read() if f.suffix == ".gz" else f.read_bytes()
-        except OSError as exc:
-            warnings.append(f"{f}: {exc}")
+            if f.suffix == ".gz":
+                with gzip.open(f, "rb") as fh:
+                    raw = fh.read(MAX_SAMPLES_BYTES + 1)
+            else:
+                with open(f, "rb") as fh:
+                    raw = fh.read(MAX_SAMPLES_BYTES + 1)
+        except (OSError, EOFError, zlib.error) as exc:  # a missing, unreadable or corrupt (.gz) file
+            warnings.append(f"{f}: cannot read it ({exc})")
             continue
-        text = raw.decode("utf-8-sig", "replace")
+        if len(raw) > MAX_SAMPLES_BYTES:
+            warnings.append(f"{f}: larger than {MAX_SAMPLES_BYTES // (1024 * 1024)} MB; skipped")
+            continue
+        try:
+            text = decode_text(raw, f)
+        except ValueError as exc:
+            warnings.append(str(exc))
+            continue
         if text.startswith("version https://git-lfs"):
             warnings.append(f"{f} is a Git LFS pointer; run `git lfs pull` in the evals repo first")
             continue
-        for line in jsonl_lines(text):
-            if line.strip():
-                try:
-                    rec = json.loads(line)
-                    if isinstance(rec, dict):
-                        out.append(rec)
-                except ValueError:
-                    warnings.append(f"{f}: skipped an invalid JSON line")
+        out.extend(rec for rec in _json_records(text, f, warnings) if isinstance(rec, dict))
     return out
 
 
@@ -702,17 +776,23 @@ def import_oss_registry(path: str, *, eval_names: list[str] | None = None, max_i
         info = EvalImport(name=name)
         if spec is None:
             info.warnings.append(f"cannot resolve {name!r} to a spec with a class")
-            result.evals.append(info)
+            _add_eval(result, info)
             continue
         cls = str(spec.get("class", ""))
-        args = spec.get("args") or {}
+        args = _dict(spec.get("args"))
         samples_ref = args.get("samples_jsonl")
         if not samples_ref:
-            info.warnings.append(f"{name}: no samples_jsonl")
-            result.evals.append(info)
+            info.warnings.append("no samples_jsonl in its args")
+            _add_eval(result, info)
             continue
         samples = _read_samples(root, samples_ref, info.warnings)
-        few_shot = _read_samples(root, args["few_shot_jsonl"], info.warnings)[: int(args.get("num_few_shot", 0) or 0)] if args.get("few_shot_jsonl") else []
+        few_shot = []
+        if args.get("few_shot_jsonl"):
+            shots = _num(args.get("num_few_shot", 0) or 0)
+            if shots is None or shots < 0:
+                info.warnings.append(f"num_few_shot must be a number, got {args.get('num_few_shot')!r}; no few-shot examples used")
+            else:
+                few_shot = _read_samples(root, args["few_shot_jsonl"], info.warnings)[: int(shots)]
         short = cls.rsplit(":", 1)[-1]
         if max_items:
             samples = samples[:max_items]
@@ -723,7 +803,7 @@ def import_oss_registry(path: str, *, eval_names: list[str] | None = None, max_i
                 continue
             prompt = raw_input
             if few_shot and isinstance(raw_input, list):
-                shots = [m for s in few_shot for m in (s.get("sample") or [])]
+                shots = [m for s in few_shot for m in _dicts(s.get("sample"))]
                 prompt = raw_input[:-1] + shots + raw_input[-1:]
             messages = canon_messages(prompt)
             if not messages:
@@ -746,6 +826,14 @@ def import_oss_registry(path: str, *, eval_names: list[str] | None = None, max_i
                 mg = mg_specs.get(spec_name) if isinstance(spec_name, str) else None
                 if not isinstance(mg, dict):
                     info.warnings.append(f"model-graded spec {spec_name!r} not found; add the registry's modelgraded/ folder")
+                    break
+                choices, prompt = mg.get("choice_strings"), mg.get("prompt")
+                # The prompt is a text or, as openai/evals also allows, a list of chat messages.
+                prompt_ok = isinstance(prompt, str) or (isinstance(prompt, list) and prompt and all(isinstance(m, dict) for m in prompt))
+                if not prompt_ok or not (
+                    isinstance(choices, str) or (isinstance(choices, list) and choices and all(isinstance(c, str) for c in choices))
+                ):
+                    info.warnings.append(f"model-graded spec {spec_name!r} needs a prompt (text or chat messages) and choice_strings; skipped")
                     break
                 check = {
                     "type": "modelgraded",
@@ -795,9 +883,13 @@ def import_oss_registry(path: str, *, eval_names: list[str] | None = None, max_i
                 )
             )
             info.cases += 1
-        result.evals.append(info)
-        result.warnings.extend(f"{name}: {w}" for w in dict.fromkeys(info.warnings))
+        _add_eval(result, info)
     return result
+
+
+def _add_eval(result: ImportResult, info: EvalImport) -> None:
+    result.evals.append(info)
+    result.warnings.extend(f"{info.name}: {w}" for w in dict.fromkeys(info.warnings))
 
 
 # ------------------------------------------------------------- fidelity
@@ -854,5 +946,5 @@ def grader_model_warnings(cases: list[TestCase]) -> list[str]:
     for model, n in models.items():
         lk = reg.lookup(str(model))
         if lk.status in ("retired", "retiring", "deprecated"):
-            out.append(f"{n} grader check(s) use {model}, which is {lk.message}. Pass --judge provider:model to grade with a current model.")
+            out.append(f"{n} grader check(s) use {model} ({lk.message}). Pass --judge provider:model to grade with a current model.")
     return out

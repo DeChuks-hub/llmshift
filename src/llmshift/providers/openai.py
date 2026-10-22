@@ -22,7 +22,7 @@ from typing import Any
 from .. import messages as msgs
 from ..textutil import json_loads, stable_hash
 from . import http
-from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, option_mapping, params_of
 
 DROPPABLE = {
     "temperature",
@@ -97,8 +97,8 @@ class OpenAIProvider(Provider):
         self.official = "api.openai.com" in self.base_url
         self.requires_key = bool(o.get("requires_key", key_env is not None and not _is_local(self.base_url)))
         self.api = str(o.get("api", "auto"))
-        self.extra_headers = dict(o.get("headers") or {})
-        self.extra_body = dict(o.get("extra_body") or {})
+        self.extra_headers = option_mapping(o, "headers", self.spec, text_values=True)
+        self.extra_body = option_mapping(o, "extra_body", self.spec)
         if self.official:
             org = o.get("organization") or os.environ.get("OPENAI_ORG_ID") or os.environ.get("OPENAI_ORGANIZATION")
             project = o.get("project") or os.environ.get("OPENAI_PROJECT_ID")
@@ -113,7 +113,7 @@ class OpenAIProvider(Provider):
     # ------------------------------------------------------------- plumbing
 
     def identity(self) -> dict:
-        shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env", "requires_key")}
+        shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env", "requires_key", "timeout_set")}
         shaping["headers"] = {k: v for k, v in self.extra_headers.items() if k.lower() not in ("authorization", "api-key")}
         return {"kind": self.kind, "model": self.model, "base_url": self.base_url, "options": stable_hash(shaping, 16)}
 
@@ -295,7 +295,7 @@ class OpenAIProvider(Provider):
         fc = message.get("function_call")
         if isinstance(fc, dict) and fc.get("name"):
             tool_calls.append({"name": fc["name"], "arguments": _parse_arguments(fc.get("arguments"))})
-        usage = data.get("usage") or {}
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         return Response(
             text=text or "",
             tool_calls=tool_calls,
@@ -336,7 +336,7 @@ class OpenAIProvider(Provider):
         if status == "failed":
             err = data.get("error") or {}
             raise ProviderError(err.get("message") or "response failed", code=err.get("code") or "response_failed")
-        usage = data.get("usage") or {}
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         return Response(
             text=text,
             tool_calls=tool_calls,
@@ -479,8 +479,14 @@ class AzureOpenAIProvider(OpenAIProvider):
 
     def __init__(self, model: str, *, name: str | None = None, options: dict | None = None):
         o = dict(options or {})
-        endpoint = o.get("endpoint") or _env(o.get("endpoint_env", "AZURE_OPENAI_ENDPOINT")) or ""
-        endpoint = endpoint.rstrip("/")
+        endpoint = str(o.get("endpoint") or _env(o.get("endpoint_env", "AZURE_OPENAI_ENDPOINT")) or "").strip().rstrip("/")
+        if not endpoint and "base_url" not in o:
+            raise ProviderError(
+                f"{name or 'azure'}:{model}: set AZURE_OPENAI_ENDPOINT (e.g. https://my-resource.openai.azure.com) or providers.azure.endpoint",
+                code="missing_endpoint",
+            )
+        if endpoint and "://" not in endpoint:
+            endpoint = "https://" + endpoint  # the resource's host name alone, as the Azure portal shows it
         self.api_version = str(o.get("api_version") or os.environ.get("AZURE_OPENAI_API_VERSION") or "2024-10-21")
         if self.api_version == "v1":
             o.setdefault("base_url", f"{endpoint}/openai/v1")
@@ -492,10 +498,6 @@ class AzureOpenAIProvider(OpenAIProvider):
         self.endpoint = endpoint
         self.official = False
         self.ad_token = clean_key(o.get("ad_token") or os.environ.get("AZURE_OPENAI_AD_TOKEN"))
-        if not endpoint:
-            self._config_error = "set AZURE_OPENAI_ENDPOINT (e.g. https://my-resource.openai.azure.com) or providers.azure.endpoint"
-        else:
-            self._config_error = None
 
     def identity(self) -> dict:
         ident = super().identity()
@@ -503,8 +505,6 @@ class AzureOpenAIProvider(OpenAIProvider):
         return ident
 
     def _headers(self) -> dict:
-        if self._config_error:
-            raise ProviderError(self._config_error, code="missing_endpoint")
         headers = dict(self.extra_headers)
         if self.api_key:
             headers["api-key"] = self.api_key

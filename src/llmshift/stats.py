@@ -65,12 +65,31 @@ def cases_needed(p: float, margin: float = 0.05, z: float = Z95) -> int:
     return lo
 
 
+def stored_rate(rate: float) -> float:
+    """A pass rate as reports store it and gates compare it: to 6 decimals, rounded down,
+    so 18,999 of 20,000 never reads as 95% at a 95% gate."""
+    return math.floor(rate * 1e6 + 1e-6) / 1e6
+
+
 def mcnemar_p(b: int, c: int) -> float:
     """One-sided exact McNemar p-value for b regressions vs c improvements."""
     n = b + c
     if n == 0 or b == 0:
         return 1.0
-    return sum(math.comb(n, k) for k in range(b, n + 1)) / (2**n)
+    if n <= 1000:
+        return sum(math.comb(n, k) for k in range(b, n + 1)) / (2**n)
+    # Past that the exact sum of huge integers is slow: add the terms as floats relative
+    # to the first one (each from the last), scaled back with logarithms.
+    log_first = math.lgamma(n + 1) - math.lgamma(b + 1) - math.lgamma(n - b + 1) - n * math.log(2)
+    term, total = 1.0, 0.0
+    for k in range(b, n + 1):
+        total += term
+        term *= (n - k) / (k + 1)
+        if term < 1e-17 * total:
+            break
+    if not math.isfinite(total):  # b far below n/2: the terms outgrow floats, and p is 1
+        return 1.0
+    return min(1.0, math.exp(log_first + math.log(total)))
 
 
 def two_proportion_p(p1: float, n1: int, p2: float, n2: int) -> float:

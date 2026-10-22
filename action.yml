@@ -69,7 +69,16 @@ runs:
         ACTION_ARGS: ${{ inputs.args }}
       run: |
         # Inputs arrive through the environment (never interpolated into the script) to avoid injection.
-        # $ACTION_ARGS is split on spaces; `set -f` keeps globs such as --model 'gpt-4o*' literal.
-        set -f
-        # shellcheck disable=SC2086
-        llmshift "$ACTION_COMMAND" $ACTION_ARGS
+        # args is split the way a shell splits words ('quoted text' stays one argument) but nothing in it
+        # is expanded or run: no globs, variables or command substitution. Backslashes stay as written
+        # (Windows paths such as C:\data\tests.jsonl), and # is not a comment.
+        python - <<'PY'
+        import os, shlex, subprocess, sys
+        words = shlex.shlex(os.environ.get("ACTION_ARGS", ""), posix=True)
+        words.whitespace_split, words.escape, words.commenters = True, "", ""
+        try:
+            args = list(words)
+        except ValueError as exc:
+            sys.exit(f"error: cannot read the args input ({exc}): close every quote")
+        sys.exit(subprocess.call([sys.executable, "-m", "llmshift", os.environ["ACTION_COMMAND"], *args]))
+        PY

@@ -14,10 +14,7 @@ on:
       - ".github/workflows/calendar.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+permissions: {}  # each job asks for what it needs
 
 concurrency:
   group: pages
@@ -26,10 +23,15 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read  # whether Pages deploys from Actions
     outputs:
       pages: ${{ steps.pages.outputs.enabled }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # nothing here pushes: the token is not left in .git/config
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -56,6 +58,9 @@ jobs:
     needs: build
     if: needs.build.outputs.pages == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

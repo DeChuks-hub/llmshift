@@ -4,6 +4,7 @@ language detection. Pure standard library, deterministic."""
 from __future__ import annotations
 
 import ast
+import codecs
 import difflib
 import hashlib
 import json
@@ -13,6 +14,7 @@ import threading
 import unicodedata
 import warnings
 from collections import Counter
+from pathlib import Path
 from typing import Any, Iterable
 
 _TRANSLATE = str.maketrans(
@@ -31,7 +33,7 @@ _TRANSLATE = str.maketrans(
         "—": "-",
         "―": "-",
         "−": "-",
-        " ": " ",
+        "\u00a0": " ",
         " ": " ",
         " ": " ",
         "\u200b": "",
@@ -113,6 +115,26 @@ def source_lines(text: str) -> list[str]:
     return _LINE_BREAK_RE.split(text)
 
 
+def decode_text(raw: bytes, where: Any) -> str:
+    """Bytes of a file you wrote as text: UTF-8 (with or without a BOM), or UTF-16 with a
+    BOM (what Windows PowerShell 5.1 writes with `>`). Anything else is an error that names
+    the file."""
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            raise ValueError(f"{where}: not valid UTF-16 text; save it as UTF-8") from None
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{where}: not UTF-8 text (byte {exc.start} is not); save it as UTF-8") from None
+
+
+def read_text(path: Any) -> str:
+    """A text file you wrote (a test file, llmshift.yaml, labels), as decode_text reads it."""
+    return decode_text(Path(path).read_bytes(), path)
+
+
 def jsonl_lines(text: str) -> list[str]:
     """The lines of a JSON Lines file. Only "\\n" (or "\\r\\n") ends a line: str.splitlines()
     also splits at U+2028, U+0085 and other characters JSON keeps unescaped in strings."""
@@ -182,6 +204,19 @@ def parse_python(source: str) -> ast.Module | None:
 def shorten(text: Any, limit: int = 120) -> str:
     s = " ".join(str(text or "").split())
     return s if len(s) <= limit else s[: max(0, limit - 3)] + "..."
+
+
+def plural(n: int, word: str, many: str | None = None) -> str:
+    """'1 case', '3 cases' (or `many` for irregular words)."""
+    return f"{n} {word if n == 1 else (many or word + 's')}"
+
+
+def md_fence(body: str, lang: str = "") -> str:
+    """`body` as a Markdown code block that no line of it can close (a prompt or diff
+    with its own ``` would otherwise end the block and turn the rest into live Markdown)."""
+    longest = max((len(run) for run in re.findall(r"`{3,}", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{lang}\n{body}\n{fence}"
 
 
 def ngrams(tokens: list[str], n: int) -> list[tuple[str, ...]]:
@@ -471,7 +506,7 @@ _SCRIPTS = [
     ("ko", re.compile(r"[가-힯]")),
     ("zh", re.compile(r"[一-鿿]")),
     ("ru", re.compile(r"[Ѐ-ӿ]")),
-    ("ar", re.compile(r"[؀-ۿ]")),
+    ("ar", re.compile(r"[\u0600-ۿ]")),
     ("he", re.compile(r"[֐-׿]")),
     ("hi", re.compile(r"[ऀ-ॿ]")),
     ("th", re.compile(r"[฀-๿]")),

@@ -3,6 +3,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -13,6 +16,8 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # nothing here pushes: the token is not left in .git/config
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -24,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # nothing here pushes: the token is not left in .git/config
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -39,6 +46,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # nothing here pushes: the token is not left in .git/config
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

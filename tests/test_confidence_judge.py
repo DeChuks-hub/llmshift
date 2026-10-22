@@ -132,7 +132,7 @@ def test_compare_reports_saved_judge_calls():
     cases[1].id = "k"
     res = run_compare(cases, MockProvider("m", fn=lambda r: "same answer here"), judge=judge, show_progress=False)
     assert judge.calls == 1  # only the case whose answer differs from its reference
-    assert "1 judge call(s) made; 1 skipped because the rule-based checks already decided." in res.insights
+    assert "1 judge call(s) answered; 1 skipped because the rule-based checks already decided." in res.insights
 
 
 # ------------------------------------------------------------ calibration

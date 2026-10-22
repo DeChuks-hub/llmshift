@@ -23,7 +23,7 @@ from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import ProviderError
-from .textutil import parse_python
+from .textutil import md_fence, parse_python, plural
 
 PROTECTED_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", "vendors", "third_party", "third-party", "site-packages", ".venv", "venv", "dist", "build", ".llmshift"}
 CONFIG_NAMES = {"llmshift.yaml", "llmshift.yml", ".llmshift.yaml", ".llmshift.yml"}
@@ -58,7 +58,9 @@ def code_id(spec: str) -> str:
 
 
 # An id after one of these names a resource you created (an Azure deployment), not a model.
-_DEPLOYMENT_RE = re.compile(r"(?:deployment(?:_name|_id)?|engine)[\"']?\s*[:=]\s*[\"']?\Z", re.I)
+_DEPLOYMENT_RE = re.compile(r"deployment(?:_name|_id)?[\"']?\s*[:=]\s*[\"']?\Z", re.I)
+# engine= too, but only in Azure code: the pre-1.0 OpenAI SDK named the model engine=.
+_ENGINE_RE = re.compile(r"engine[\"']?\s*[:=]\s*[\"']?\Z", re.I)
 
 
 # ----------------------------------------------------------------- data
@@ -294,7 +296,7 @@ def plan_upgrade(
 ) -> UpgradePlan:
     """Work out every edit; nothing is written."""
     from .registry import Registry
-    from .scanner import scan_paths
+    from .scanner import platform_hint, scan_paths
 
     cwd = Path(os.getcwd()).resolve()
     top = Path(root).resolve() if root else (gh.repo_root(cwd) or cwd)
@@ -348,7 +350,8 @@ def plan_upgrade(
             if not cols:
                 plan.notes.append(f"{rel}:{line_no}: {swap.old} not found on the line; not changed")
                 continue
-            deployments = [col for col in cols if _DEPLOYMENT_RE.search(body[:col])]
+            azure = platform_hint(decoded[0]) == "azure"
+            deployments = [col for col in cols if _DEPLOYMENT_RE.search(body[:col]) or (azure and _ENGINE_RE.search(body[:col]))]
             if deployments:
                 plan.notes.append(f"{rel}:{line_no}: {target} names an Azure deployment; create a {swap.new} deployment, then rename it here; not changed")
                 cols = [col for col in cols if col not in deployments]
@@ -712,9 +715,7 @@ def plan_markdown(plan: UpgradePlan, min_pass_rate: float | None = None) -> str:
     if diff:
         lines.append("<details><summary>Diff</summary>")
         lines.append("")
-        lines.append("```diff")
-        lines.append(diff[:40000].rstrip())
-        lines.append("```")
+        lines.append(md_fence(diff[:40000].rstrip(), "diff"))
         lines.append("</details>")
         lines.append("")
     lines.append("_Opened by `llmshift upgrade`. Review the diff and the test results before merging._")
@@ -817,7 +818,7 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
                 if args.fix:
                     from .fix import patched_cases, run_fix
 
-                    con.out(con.style(f"Looking for prompt changes for {model} ({len(subset)} cases)...", "grey"), err=True)
+                    con.out(con.style(f"Looking for prompt changes for {model} ({plural(len(subset), 'case')})...", "grey"), err=True)
                     fix = run_fix(subset, model, source_paths=args.paths or None, validate=False, **common)
                     apply_prompt_fixes(plan, fix, args.paths or sc.get("paths") or ["."])
                     subset = patched_cases(subset, fix)  # compare with the suggested prompts in place
@@ -843,6 +844,7 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
     if args.markdown is not None:
         target = args.markdown or Path(cfg.get("reports_dir") or ".llmshift/reports") / f"upgrade-{cli._timestamp()}.md"
         cli._write(target, md)
+        con.out(con.style(f"  report: {cli._rel(target)}", "grey"))
     cli._step_summary(md)
     below = any(min_rate is not None and r.summary.get("pass_rate", 0) + 1e-9 < min_rate for r in plan.compare.values())
     if not plan.changed:

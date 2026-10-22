@@ -11,6 +11,14 @@ from typing import Any
 MAX_ERRORS = 20
 
 
+def _bound(schema: dict, key: str) -> float | None:
+    """A numeric keyword of the schema; one that is not a finite number is ignored."""
+    value = schema.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return value
+
+
 def type_of(value: Any) -> str:
     if value is None:
         return "null"
@@ -57,7 +65,7 @@ def json_equal(a: Any, b: Any) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return isinstance(a, bool) and isinstance(b, bool) and a == b
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return a == b
+        return a == b or (a != a and b != b)  # NaN equals NaN
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(json_equal(x, y) for x, y in zip(a, b))
     if isinstance(a, dict) and isinstance(b, dict):
@@ -106,8 +114,9 @@ def merge(a: dict, b: dict) -> dict:
 # ------------------------------------------------------------- validation
 
 
-def _resolve_ref(ref: str, root: dict) -> dict:
-    if not ref.startswith("#"):
+def _resolve_ref(ref: Any, root: dict) -> dict | bool:
+    """The schema a local "#/..." reference points to (a schema or true/false); {} otherwise."""
+    if not isinstance(ref, str) or not ref.startswith("#"):
         return {}
     node: Any = root
     for part in ref[1:].split("/"):
@@ -118,7 +127,7 @@ def _resolve_ref(ref: str, root: dict) -> dict:
             node = node[part]
         else:
             return {}
-    return node if isinstance(node, dict) else {}
+    return node if isinstance(node, (dict, bool)) else {}
 
 
 def _type_matches(value: Any, t: str) -> bool:
@@ -148,6 +157,8 @@ def validate(value: Any, schema: dict | bool, *, root: dict | None = None, path:
     if schema is False:
         errors.append(f"{path}: no value is allowed here")
         return errors
+    if not isinstance(schema, dict):  # not a schema: nothing to check
+        return errors
     if "$ref" in schema:
         target = _resolve_ref(schema["$ref"], root)
         validate(value, target, root=root, path=path, errors=errors, depth=depth + 1)
@@ -167,33 +178,39 @@ def validate(value: Any, schema: dict | bool, *, root: dict | None = None, path:
         errors.append(f"{path}: expected {_fmt(schema['const'])}, got {_fmt(value)}")
 
     vt = type_of(value)
-    if vt in ("integer", "number"):
-        if "minimum" in schema and value < schema["minimum"]:
-            errors.append(f"{path}: {value} is less than minimum {schema['minimum']}")
-        if "maximum" in schema and value > schema["maximum"]:
-            errors.append(f"{path}: {value} is greater than maximum {schema['maximum']}")
-        if "exclusiveMinimum" in schema and isinstance(schema["exclusiveMinimum"], (int, float)) and value <= schema["exclusiveMinimum"]:
-            errors.append(f"{path}: {value} must be greater than {schema['exclusiveMinimum']}")
-        if "exclusiveMaximum" in schema and isinstance(schema["exclusiveMaximum"], (int, float)) and value >= schema["exclusiveMaximum"]:
-            errors.append(f"{path}: {value} must be less than {schema['exclusiveMaximum']}")
-        mult = schema.get("multipleOf")
-        if isinstance(mult, (int, float)) and mult > 0 and abs(value / mult - round(value / mult)) > 1e-9:
+    if vt == "number" and not math.isfinite(value):
+        errors.append(f"{path}: {value} is not a JSON number")
+    elif vt in ("integer", "number"):
+        low, high = _bound(schema, "minimum"), _bound(schema, "maximum")
+        if low is not None and value < low:
+            errors.append(f"{path}: {value} is less than minimum {low}")
+        if high is not None and value > high:
+            errors.append(f"{path}: {value} is greater than maximum {high}")
+        low, high = _bound(schema, "exclusiveMinimum"), _bound(schema, "exclusiveMaximum")
+        if low is not None and value <= low:
+            errors.append(f"{path}: {value} must be greater than {low}")
+        if high is not None and value >= high:
+            errors.append(f"{path}: {value} must be less than {high}")
+        mult = _bound(schema, "multipleOf")
+        if mult is not None and mult > 0 and abs(value / mult - round(value / mult)) > 1e-9:
             errors.append(f"{path}: {value} is not a multiple of {mult}")
     elif vt == "string":
-        if "minLength" in schema and len(value) < schema["minLength"]:
+        low, high = _bound(schema, "minLength"), _bound(schema, "maxLength")
+        if low is not None and len(value) < low:
             errors.append(f"{path}: string shorter than {schema['minLength']} characters")
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
+        if high is not None and len(value) > high:
             errors.append(f"{path}: string longer than {schema['maxLength']} characters")
-        if "pattern" in schema:
+        if isinstance(schema.get("pattern"), str):
             try:
                 if not re.search(schema["pattern"], value):
                     errors.append(f"{path}: {_fmt(value)} does not match pattern {schema['pattern']!r}")
             except re.error:
                 pass
     elif vt == "array":
-        if "minItems" in schema and len(value) < schema["minItems"]:
+        low, high = _bound(schema, "minItems"), _bound(schema, "maxItems")
+        if low is not None and len(value) < low:
             errors.append(f"{path}: expected at least {schema['minItems']} items, got {len(value)}")
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
+        if high is not None and len(value) > high:
             errors.append(f"{path}: expected at most {schema['maxItems']} items, got {len(value)}")
         if schema.get("uniqueItems"):
             seen: list = []
@@ -224,14 +241,14 @@ def validate(value: Any, schema: dict | bool, *, root: dict | None = None, path:
         for key in schema.get("required") or []:
             if key not in value:
                 errors.append(f"{path}: missing required key {key!r}")
-        if "minProperties" in schema and len(value) < schema["minProperties"]:
+        if _bound(schema, "minProperties") is not None and len(value) < schema["minProperties"]:
             errors.append(f"{path}: expected at least {schema['minProperties']} keys")
-        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+        if _bound(schema, "maxProperties") is not None and len(value) > schema["maxProperties"]:
             errors.append(f"{path}: expected at most {schema['maxProperties']} keys")
         pattern_props = schema.get("patternProperties") or {}
         additional = schema.get("additionalProperties", True)
         for key, sub_value in value.items():
-            sub_path = f"{path}.{key}" if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(key)) else f"{path}[{key!r}]"
+            sub_path = f"{path}.{key}" if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(key)) else f"{path}[{key!r}]"
             matched = False
             if key in props:
                 matched = True
@@ -272,7 +289,7 @@ def describe(schema: dict, *, depth: int = 0) -> str:
     if depth > 4:
         return "..."
     if "$ref" in schema:
-        return schema["$ref"].split("/")[-1]
+        return str(schema["$ref"]).split("/")[-1]
     if "enum" in schema:
         return " | ".join(_fmt(v) for v in schema["enum"][:8])
     types = schema.get("type")
@@ -301,7 +318,7 @@ def json_paths(value: Any, prefix: str = "$", *, depth: int = 0) -> list[tuple[s
     if isinstance(value, dict):
         for key, sub in value.items():
             key = str(key)
-            sub_path = f"{prefix}.{key}" if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key) else f"{prefix}[{key!r}]"
+            sub_path = f"{prefix}.{key}" if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) else f"{prefix}[{key!r}]"
             out.extend(json_paths(sub, sub_path, depth=depth + 1))
     elif isinstance(value, list):
         for i, sub in enumerate(value):

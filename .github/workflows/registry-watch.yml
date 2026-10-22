@@ -22,13 +22,15 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write
-  issues: write
+permissions: {}  # the job below asks for what it needs
 
 jobs:
   watch:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # commits the updated data
+      issues: write  # opens the issue for pages the update could not read
+      actions: write  # starts the calendar workflow after a data update
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,7 +41,15 @@ jobs:
       - name: Update the data from the providers' deprecation tables
         id: update
         run: |
-          python scripts/update_registry.py --write --summary "$RUNNER_TEMP/update.md"
+          # Exit code 4: the safe changes were written, but a shutdown date moved earlier (or is
+          # already past) and waits for a person; the job publishes the rest and then fails.
+          code=0
+          python scripts/update_registry.py --write --summary "$RUNNER_TEMP/update.md" || code=$?
+          if [ "$code" -eq 4 ]; then
+            echo "review=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
           if git diff --quiet -- src/llmshift/data; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -48,6 +58,8 @@ jobs:
 
       - name: Test and publish the updated data
         if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python -m pytest -q
           git config user.name "github-actions[bot]"
@@ -55,6 +67,8 @@ jobs:
           git add src/llmshift/data/models.json src/llmshift/data/sources.json
           git commit -q -F "$RUNNER_TEMP/update.md"
           git push
+          # A push made with GITHUB_TOKEN starts no workflow: rebuild the calendar now, not tomorrow.
+          gh workflow run calendar.yml --ref "$GITHUB_REF_NAME" || echo "::warning::could not start the calendar workflow"
 
       - name: Record the reviewed source pages
         if: inputs.reviewed
@@ -73,3 +87,9 @@ jobs:
         run: python scripts/check_registry_sources.py --issue
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ask for a review of shutdown dates that moved earlier
+        if: steps.update.outputs.review == 'true'
+        run: |
+          echo "::error title=Lifecycle dates need a review::A provider page moved a shutdown date earlier (or lists one already past). It was not applied; see the update step's output."
+          exit 1

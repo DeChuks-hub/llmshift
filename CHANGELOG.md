@@ -9,6 +9,37 @@
 - README links work on the PyPI page (they were relative to the repository).
 - The tests pass from the source archive on PyPI (one of them needed the repository's CI workflow); CI and the release now run the test suite from the built source archive, as packagers do.
 
+**Safety and security**
+
+- Secrets stay out of sight: API keys with a stray newline or invisible character are cleaned or reported without the key; an empty `base_url` (an unset `${VAR}`) is an error instead of sending your requests and key to the public API; only `http(s)` URLs are used, a URL with `user:password@` is refused without echoing the password, and error messages name only the host (a webhook URL's token is never shown).
+- Model output, provider errors and scanned files cannot drive your terminal: escape sequences and bidi controls are shown as text. In PR comments, `@mentions` from model answers notify no one and a prompt or diff cannot close its code block.
+- Redaction covers more key formats (xAI, Groq, Perplexity, Fireworks, Hugging Face, Replicate, Stripe, GitLab, npm, temporary AWS keys), `password=`/`api-key:` values, credentials in connection strings, Basic auth headers and the live values of key environment variables.
+- Alerts: SMTP logs in only over TLS; Slack and Discord messages cannot ping `@channel`/`@everyone`. MCP tools read and write only inside the project.
+- GitHub: a comment by another user is never edited, a POST that may have arrived is never sent again, and a value can no longer inject extra step outputs. The action's `args` are split like shell words (quote an argument with spaces) and never expanded. The workflows (and those `init --github` writes) ask for the least permissions and keep values out of `run:` scripts.
+
+**Correct results**
+
+- Pass-rate gates use the exact rate: 18,999 of 20,000 no longer passes a 95% gate. Case ids stay unique and stable however cases are selected, and `--limit 5` stops reading a huge test file after five cases.
+- Inferred checks pass on the baseline they came from (JSON keys with odd characters, names like "Domino's Pizza", answers with no words). JSON checks reject `NaN` and `Infinity`, which most parsers refuse (a test whose own baseline has them keeps passing, and `NaN` now equals `NaN` in `json_match`).
+- Log sampling keeps a fair share of every prompt template, however late it first appears. Timestamps read the same on Python 3.9 to 3.15 (offsets in hours, decimal commas, basic format, week dates, HTTP dates).
+- `scan` resolves names in their own scope (a parameter no longer picks up another function's model), follows `os.getenv("X", "model")` defaults, and reads files past Windows' 260-character path limit. Skipped files are always listed.
+- `--repeat`: a request that failed is counted against the pass rate but no longer makes a case "flaky".
+- A judge that cannot answer (a wrong key) is reported as such instead of "0 judge calls", and `judge calibrate` keeps the last good result instead of saving an empty one.
+- `fix` carries on with rule-based changes when the optimizer fails, stops when it repeats itself, and no longer lists logs or its own reports as places a prompt lives.
+- Recording: calls through `with_raw_response` and `with_streaming_response` are logged; wrapping a client per request shares one shadow worker set.
+- Providers: `python:` functions honour `timeout` when one is set (and no more than four calls that ran past it keep running), and their cache key covers the project modules they import; `command` providers honour it on Windows and notice an edited script. Compressed and mislabelled responses are read, JSON cut off in transit is fetched again, an HTML error page is summed up in one line, `OLLAMA_HOST` is read the way Ollama reads it, and a mistyped provider gets a "did you mean".
+- Settings: values of the wrong type (`timeout: abc`, `headers` as a list, a `base_url` without `https://`) are reported where they are read; unknown or misspelt settings and severity levels are reported with a suggestion, and `severity: {tone: off}` works (YAML reads `off` as false).
+
+**Fewer surprises**
+
+- Files saved as UTF-16 (Windows PowerShell's `>`) are read, and a file that is not text is named in the error.
+- `init` takes the baseline from the model your code calls most, and its listed replacement as the candidate, instead of writing a model that is itself retiring.
+- `--config` and `--no-color` work after the subcommand too; `llmshift --help | head -1` exits quietly; `doctor` exits 1 when it finds a problem; two reports written in the same second no longer overwrite each other.
+- Corrupted watch history, calibration and cache files are survived. `watch` writes the action's `pass-rate` output.
+- `import openai-evals` imports odd or hostile exports and registries or says what is wrong, instead of crashing; registry samples outside the registry are not read.
+- `shadow report` works from a subfolder, and `snapshot` turns shadow logs into test cases.
+- The lifecycle data update holds back shutdown dates that moved earlier for a person to check, and the retirement calendar is rebuilt right after a data update instead of the next day.
+
 ## 0.1.0 (2026-10-22)
 
 First release. Runs on Python 3.9 to 3.15 on Linux, macOS and Windows; pure Python, so it installs without a compiler (PyYAML's pure-Python parser is included under `llmshift/_vendor`, MIT License).

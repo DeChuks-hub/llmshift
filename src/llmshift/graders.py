@@ -56,7 +56,14 @@ def ask(provider: Any, messages: list[dict], ctx: Any, params: dict | None = Non
         hit = cache.get(key)
         if hit is not None:
             return hit.text
-    resp = provider.complete(request)
+    try:
+        resp = provider.complete(request)
+    except Exception as exc:
+        with _COUNT_LOCK:
+            ctx.judge_failed = getattr(ctx, "judge_failed", 0) + 1
+            if not getattr(ctx, "judge_error", None):
+                ctx.judge_error = f"{exc}"
+        raise
     with _COUNT_LOCK:  # checks run in worker threads
         ctx.judge_calls += 1
     if key is not None:

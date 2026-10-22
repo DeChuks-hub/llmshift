@@ -6,11 +6,13 @@ would re-send the API key to whatever host the redirect names.
 
 from __future__ import annotations
 
+import codecs
 import email.utils
 import http.client
 import json
 import math
 import random
+import re
 import socket
 import ssl
 import threading
@@ -18,6 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from typing import Any, Callable
 
 from ..textutil import clean_surrogates, has_surrogate_escape, json_loads
@@ -28,6 +31,7 @@ NON_RETRYABLE_CODES = ("insufficient_quota", "billing_hard_limit_reached", "inva
 MAX_DELAY = 60.0
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024  # no model answer is this large; a runaway body is cut off
+MAX_ERROR_BYTES = 1024 * 1024  # an error page is read this far
 
 # Set by the runner on Ctrl+C: requests stop retrying and new ones are not sent.
 CANCEL = threading.Event()
@@ -53,6 +57,17 @@ def _host(url: str) -> str:
     return netloc.rsplit("@", 1)[-1] or "the server"
 
 
+def display_url(url: str) -> str:
+    """A URL as it may be shown: no user:password@ part and no query string, also when
+    the scheme is missing (admin:secret@box:8000/v1, a typo in base_url)."""
+    text = str(url)
+    parts = urllib.parse.urlsplit(text)
+    if parts.netloc:
+        return urllib.parse.urlunsplit((parts.scheme, _host(text), parts.path, "", ""))
+    head, sep, tail = text.split("?", 1)[0].split("#", 1)[0].partition("/")
+    return head.rsplit("@", 1)[-1] + sep + tail
+
+
 _SECRET_HEADERS = ("authorization", "x-api-key", "api-key", "x-goog-api-key", "proxy-authorization")
 
 
@@ -76,13 +91,55 @@ def _check_headers(headers: dict) -> None:
             )
 
 
+def _decoded(payload: bytes, headers: Any, url: str) -> bytes:
+    """The body without its Content-Encoding. llmshift asks for none, but some proxies
+    compress anyway; a compressed body is unpacked no further than the size limit."""
+    enc = str((headers.get("Content-Encoding") if headers is not None else None) or "").strip().lower()
+    if enc in ("", "identity") or not payload:
+        return payload
+    if enc not in ("gzip", "x-gzip", "deflate"):
+        raise ProviderError(f"the response from {_host(url)} is compressed with {enc}, which llmshift cannot read", code="invalid_response")
+    # gzip; deflate as the standard says (zlib); deflate as some servers send it (raw)
+    for wbits in ((16 + zlib.MAX_WBITS,) if "gzip" in enc else (zlib.MAX_WBITS, -zlib.MAX_WBITS)):
+        try:
+            return zlib.decompressobj(wbits).decompress(payload, MAX_RESPONSE_BYTES + 1)
+        except zlib.error:
+            continue
+    raise ProviderError(f"the response from {_host(url)} says it is {enc}-compressed but cannot be unpacked", code="invalid_response", retryable=True)
+
+
+def _text(payload: bytes, headers: Any) -> str:
+    """The body as text: UTF-8 (what JSON must be, and what servers that declare
+    ISO-8859-1 by default usually send), else the declared charset."""
+    charset = None
+    try:
+        charset = headers.get_content_charset() if headers is not None else None
+        if charset:
+            codecs.lookup(charset)
+    except (LookupError, AttributeError, TypeError, ValueError):
+        charset = None
+    if payload.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return payload.decode("utf-16", errors="replace")
+    if charset and charset.replace("-", "").replace("_", "").startswith(("utf16", "utf32")):
+        return payload.decode(charset, errors="replace")
+    try:
+        return payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return payload.decode(charset or "utf-8", errors="replace")
+
+
 def _parse_error(status: int | None, raw: bytes, url: str, headers: Any = None) -> ProviderError:
-    text = raw.decode("utf-8", errors="replace") if raw else ""
+    text = _text(raw, headers) if raw else ""
     message, code, param, body = text.strip()[:500] or f"HTTP {status}", None, None, None
     try:
         body = json_loads(text) if text.strip() else None
     except (ValueError, RecursionError):
         body = None
+    if body is None and re.match(r"\s*<(?:!doctype|html|head|body|\?xml)", text, re.I):
+        # A web server's error page (a proxy, a CDN, a wrong URL): its title, not its markup.
+        title = re.search(r"<title[^>]*>(.{0,300}?)</title>", text[:20000], re.I | re.S)
+        page = " ".join(title.group(1).split()) if title else ""
+        message = f"the server sent a web page ({page}), not an API answer" if page else "the server sent a web page, not an API answer"
     if isinstance(body, dict):
         err = body.get("error", body)
         if isinstance(err, dict):
@@ -121,30 +178,41 @@ def _parse_error(status: int | None, raw: bytes, url: str, headers: Any = None) 
     # secondary rate limit (GitHub asks for at least a minute's wait).
     secondary = status == 403 and "secondary rate limit" in message.lower()
     retryable = (status in RETRY_STATUSES or (status == 403 and told_to_wait) or secondary) and str(code) not in NON_RETRYABLE_CODES
-    wait = _retry_delay(headers, 0) if told_to_wait else (MAX_DELAY if secondary else None)
+    wait = _header_delay(headers) if told_to_wait else None  # unreadable: the caller backs off per attempt
+    if wait is None and secondary:
+        wait = MAX_DELAY
     host = _host(url)
     return ProviderError(f"{message} ({host})", status=status, code=str(code) if code is not None else None, param=param, retryable=retryable, body=body, retry_after=wait)
 
 
+def _header_delay(headers: Any) -> float | None:
+    """The wait the server asks for (Retry-After in seconds or as a date, retry-after-ms);
+    None when it says nothing readable."""
+    if headers is None:
+        return None
+    ms = headers.get("retry-after-ms")
+    if ms:
+        try:
+            return min(MAX_DELAY, max(0.0, float(ms) / 1000.0))
+        except ValueError:
+            pass
+    ra = headers.get("retry-after")
+    if ra:
+        try:
+            return min(MAX_DELAY, max(0.0, float(ra)))
+        except ValueError:
+            try:
+                parsed = email.utils.parsedate_to_datetime(ra)
+                return min(MAX_DELAY, max(0.0, parsed.timestamp() - time.time()))
+            except (TypeError, ValueError, IndexError, OverflowError):
+                pass  # unusual value such as "30s"
+    return None
+
+
 def _retry_delay(headers: Any, attempt: int) -> float:
-    if headers is not None:
-        ms = headers.get("retry-after-ms")
-        if ms:
-            try:
-                return min(MAX_DELAY, max(0.0, float(ms) / 1000.0))
-            except ValueError:
-                pass
-        ra = headers.get("retry-after")
-        if ra:
-            try:
-                return min(MAX_DELAY, max(0.0, float(ra)))
-            except ValueError:
-                try:
-                    parsed = email.utils.parsedate_to_datetime(ra)
-                    return min(MAX_DELAY, max(0.0, parsed.timestamp() - time.time()))
-                except (TypeError, ValueError, IndexError, OverflowError):
-                    pass  # unusual value such as "30s": fall back to exponential backoff
-    return min(MAX_DELAY, (0.5 * 2**attempt) + random.uniform(0, 0.5))
+    """What the server asked for, else exponential backoff for this attempt."""
+    delay = _header_delay(headers)
+    return delay if delay is not None else min(MAX_DELAY, (0.5 * 2**attempt) + random.uniform(0, 0.5))
 
 
 def _via_proxy(url: str) -> str:
@@ -202,7 +270,7 @@ def request(
     idempotent=False (a POST that sends an alert or creates something), a request whose
     answer timed out is not sent again: the server may have received it already."""
     data = _encode(body) if body is not None else None
-    hdrs = {"User-Agent": _user_agent(), "Accept": "*/*" if raw else "application/json"}
+    hdrs = {"User-Agent": _user_agent(), "Accept": "*/*" if raw else "application/json", "Accept-Encoding": "identity"}
     if data is not None:
         hdrs["Content-Type"] = "application/json"
     hdrs.update({k: v for k, v in (headers or {}).items() if v is not None})
@@ -211,9 +279,16 @@ def request(
         urllib.request.Request(url)
     except ValueError:  # urllib's message quotes the whole URL, which can hold a secret (a webhook token)
         raise ProviderError(f"invalid URL for {_host(url)}: it must start with https:// or http://", code="invalid_url") from None
-    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):  # urllib would read file:// (a local file) or ftp:// just as happily
         raise ProviderError(f"unsupported URL scheme {scheme}:// - llmshift only talks to https:// and http:// addresses", code="invalid_url")
+    if "@" in parts.netloc:  # urllib would look up "user:password@host" as a host name
+        raise ProviderError(
+            f"the URL for {_host(url)} has a user name or password in it, which is not sent from there: "
+            "set credentials as a header instead (headers: {Authorization: ...} under the provider in llmshift.yaml)",
+            code="invalid_url",
+        )
     attempt = 0
     while True:
         if CANCEL.is_set():
@@ -221,24 +296,31 @@ def request(
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
         try:
             with _OPENER.open(req, timeout=timeout) as resp:
-                payload = resp.read(MAX_RESPONSE_BYTES + 1)
+                payload = _decoded(resp.read(MAX_RESPONSE_BYTES + 1), resp.headers, url)
+                resp_headers = resp.headers
             if len(payload) > MAX_RESPONSE_BYTES:
-                raise ProviderError(f"response from {url} is larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MB", code="invalid_response")
+                raise ProviderError(f"response from {_host(url)} is larger than {MAX_RESPONSE_BYTES // (1024 * 1024)} MB", code="invalid_response")
             if raw:
                 return payload
-            text = payload.decode("utf-8", errors="replace")
+            text = _text(payload, resp_headers)
             if not text.strip():
                 return {}
             try:
-                data = json_loads(text)
-                return clean_surrogates(data) if has_surrogate_escape(text) else data
+                parsed = json_loads(text)
+                return clean_surrogates(parsed) if has_surrogate_escape(text) else parsed
             except RecursionError:
-                raise ProviderError(f"response from {url} is nested too deeply to read", code="invalid_response") from None
+                raise ProviderError(f"response from {_host(url)} is nested too deeply to read", code="invalid_response") from None
             except ValueError:
-                raise ProviderError(f"invalid JSON response from {url}: {text[:200]!r}", code="invalid_response", retryable=True) from None
+                # JSON cut short on the way (a dropped proxy connection) is worth another try;
+                # a web page where the API should be is a wrong URL, and stays one.
+                if idempotent and attempt < max_retries and text.lstrip()[:1] in ("{", "["):
+                    _sleep(_retry_delay(None, attempt), sleep)
+                    attempt += 1
+                    continue
+                raise ProviderError(f"invalid JSON response from {_host(url)}: {text[:200]!r}", code="invalid_response", retryable=True) from None
         except urllib.error.HTTPError as exc:
             try:
-                payload = exc.read()
+                payload = _decoded(exc.read(MAX_ERROR_BYTES), exc.headers, url)
             except Exception:
                 payload = b""
             finally:
@@ -252,7 +334,7 @@ def request(
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, http.client.HTTPException, OSError) as exc:
             cert = next((e for e in (getattr(exc, "reason", None), exc) if isinstance(e, ssl.SSLCertVerificationError)), None)
             if cert is not None:  # retrying cannot fix a certificate problem
-                host = urllib.parse.urlsplit(url).netloc or url
+                host = _host(url)
                 detail = getattr(cert, "verify_message", None) or cert
                 raise ProviderError(
                     f"cannot verify the TLS certificate of {host} ({detail}). With Python from python.org on macOS, run "

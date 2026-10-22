@@ -364,8 +364,14 @@ def embed_all(provider: Any, texts: list[str]) -> tuple[list[list[float]], float
 
     vectors: list[list[float]] = []
     start = time.perf_counter()
+    def embed(batch: list[str]) -> Any:
+        try:
+            return provider.embed(batch)
+        except (AttributeError, TypeError, KeyError, IndexError) as exc:  # a reply of an unexpected shape
+            raise ProviderError(f"{provider.spec} sent an embeddings reply llmshift cannot read ({exc.__class__.__name__}: {exc})", code="invalid_response") from None
+
     batches = [texts[i : i + BATCH] for i in range(0, len(texts), BATCH)]
-    answers = interruptible_map(provider.embed, batches, 1)  # one at a time, off the main thread: Ctrl+C works
+    answers = interruptible_map(embed, batches, 1)  # one at a time, off the main thread: Ctrl+C works
     for batch, got in zip(batches, answers):
         if not isinstance(got, list) or len(got) != len(batch):
             count = len(got) if isinstance(got, list) else "no"

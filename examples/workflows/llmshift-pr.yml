@@ -13,6 +13,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # nothing here pushes: the token is not left in .git/config
 
       - name: Retired / retiring models
         uses: DeChuks-hub/llmshift@v0.1.0   # or: uses: ./  when this repository is LLMShift itself

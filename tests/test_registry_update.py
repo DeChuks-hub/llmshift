@@ -138,3 +138,31 @@ def test_a_newly_scheduled_date_also_keeps_the_field_order(updater):
     assert updater.merge(data, rows, TODAY) == ["google/gemini-3.8-flash-tts: retires not scheduled -> 2027-09-22"]
     assert data["models"][0] == {"id": "gemini-3.8-flash-tts", "provider": "google", "status": "deprecated", "retires": "2027-09-22", "source": "s", "note": "rel 2026-09-22"}
     assert list(data["models"][0]) == ["id", "provider", "status", "retires", "source", "note"]
+
+
+@pytest.mark.parametrize("text", ["No earlier than January 14, 2027", "Earliest: 2027-01-14", "not before Jan 14, 2027", "2027-01-14 (tentative)"])
+def test_vague_dates_are_not_read_as_shutdown_days(updater, text):
+    assert updater.parse_date(text) is None
+
+
+def test_earlier_or_past_dates_wait_for_a_person(updater):
+    data = {"updated": "2026-10-21", "models": [
+        {"id": "a-model", "provider": "openai", "status": "deprecated", "retires": "2027-06-01", "source": "s"},
+        {"id": "b-model", "provider": "openai", "status": "deprecated", "retires": "2027-06-01", "source": "s"},
+        {"id": "c-model", "provider": "openai", "status": "deprecated", "retires": "2027-06-01", "source": "s"},
+    ]}
+    rows = [updater.Row("openai", "a-model", "2027-03-01", None, None, "s"),  # moved earlier
+            updater.Row("openai", "b-model", "2026-10-01", None, None, "s"),  # already past
+            updater.Row("openai", "c-model", "2027-09-01", None, None, "s")]  # moved later: applied
+    review: list = []
+    assert updater.merge(data, rows, TODAY, review) == ["openai/c-model: retires 2027-06-01 -> 2027-09-01"]
+    assert [m["retires"] for m in data["models"]] == ["2027-06-01", "2027-06-01", "2027-09-01"]
+    assert len(review) == 2 and "a-model" in review[0] and "b-model" in review[1]
+
+
+def test_saved_pages_that_are_not_utf8_are_read(updater, tmp_path, capsys):
+    pages = tmp_path / "pages"
+    pages.mkdir()
+    (pages / "openai.html").write_bytes(OPENAI.encode("utf-8") + b"\xff\xfe stray bytes")
+    assert updater.main(["--pages", str(pages), "--today", TODAY]) in (0, 3, 4)
+    assert "Traceback" not in capsys.readouterr().err

@@ -20,7 +20,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .textutil import json_loads
+from .textutil import json_loads, read_text
 
 _ALIAS_NOTE_RE = re.compile(r"^\s*(alias|alternate id)", re.I)
 _NOT_BEFORE_RE = re.compile(r"not_before:(\d{4}-\d{2}-\d{2})")
@@ -57,20 +57,20 @@ STATUSES = ("active", "deprecated", "retired")
 
 
 def today() -> _dt.date:
-    override = os.environ.get("LLMSHIFT_TODAY")
-    if override:
-        try:
-            return _dt.date.fromisoformat(override)
-        except ValueError:
-            pass
-    return _dt.date.today()
+    return _date(os.environ.get("LLMSHIFT_TODAY")) or _dt.date.today()
+
+
+_DATE_RE = re.compile(r"(\d{4})-?(\d{2})-?(\d{2})(?!\d)")
 
 
 def _date(value: Any) -> _dt.date | None:
-    if not value:
+    """2026-03-01 (or 20260301, or the date of a timestamp), read the same way on every
+    Python: date.fromisoformat accepts more forms from 3.11 on."""
+    m = _DATE_RE.match(str(value or "").strip())
+    if not m:
         return None
     try:
-        return _dt.date.fromisoformat(str(value)[:10])
+        return _dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     except ValueError:
         return None
 
@@ -222,15 +222,20 @@ class Registry:
             paths.extend(p for p in env.split(os.pathsep) if p)
         for p in paths:
             try:
-                raw = json_loads(Path(p).read_text(encoding="utf-8-sig"))
+                text = read_text(p)  # names the file when it is not text
             except FileNotFoundError:
                 raise ValueError(f"registry file not found: {p}") from None
+            try:
+                raw = json_loads(text)
             except (ValueError, RecursionError) as exc:
                 raise ValueError(f"registry file {p} is not valid JSON: {exc}") from None
             extra_entries = raw.get("models") if isinstance(raw, dict) else raw
             if not isinstance(extra_entries, list):
                 raise ValueError(f"registry file {p} must be a list of entries or {{\"models\": [...]}}")
-            user = [dict(e, _override=True) for e in extra_entries if isinstance(e, dict) and e.get("id")]
+            for i, e in enumerate(extra_entries):  # a wrong entry would otherwise change nothing, silently
+                if not isinstance(e, dict) or not isinstance(e.get("id"), str) or not e["id"].strip():
+                    raise ValueError(f"registry file {p}: entry {i + 1} must be an object with a model \"id\", got {json.dumps(e)[:80]}")
+            user = [dict(e, _override=True) for e in extra_entries]
             # An entry without a provider replaces every entry with its id; one with a
             # provider replaces only that provider's entry.
             whole_ids = {str(e["id"]).lower() for e in user if not e.get("provider")}

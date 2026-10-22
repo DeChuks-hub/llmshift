@@ -11,7 +11,7 @@ from llmshift.templating import MissingVariable, lookup, render, render_text, us
 
 
 def test_normalize_and_tokenize():
-    assert textutil.normalize("  Hello “World”—ok ") == 'hello "world"-ok'
+    assert textutil.normalize("  Hello\u00a0“World”—ok ") == 'hello "world"-ok'
     assert textutil.tokenize("Don't stop_me now, 42!") == ["don", "t", "stop", "me", "now", "42"]
     assert textutil.tokenize("東京へ行く") == ["東", "京", "へ", "行", "く"]
     assert textutil.word_count("Hello there, it's 5 o'clock") == 5

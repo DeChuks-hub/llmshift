@@ -94,7 +94,7 @@ class GeminiProvider(Provider):
         )
 
     def identity(self) -> dict:
-        shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env")}
+        shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env", "timeout_set")}
         return {"kind": self.kind, "model": self.model, "base_url": self.base_url, "options": stable_hash(shaping, 16)}
 
     def build_body(self, request: dict) -> dict:
@@ -214,7 +214,7 @@ class GeminiProvider(Provider):
     @staticmethod
     def parse(data: Any) -> Response:
         data = http.require_object(data, "Gemini generateContent", "candidates", "promptFeedback")
-        usage = data.get("usageMetadata") or {}
+        usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
         usage_out = {"input_tokens": usage.get("promptTokenCount"), "output_tokens": usage.get("candidatesTokenCount")} if usage else {}
         candidates = data.get("candidates") or []
         if not candidates:

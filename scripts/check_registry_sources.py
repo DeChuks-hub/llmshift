@@ -23,6 +23,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -137,7 +138,7 @@ def report_issue(result: dict) -> str:
         lines += ["", "Could not be fetched this time: " + ", ".join(u["url"] for u in result["unreachable"])]
     lines += ["", f"<!-- registry-watch:{marker} -->"]
     body = "\n".join(lines)
-    issues = _github("GET", f"/repos/{repo}/issues?state=open&per_page=100") or []
+    issues = _github("GET", f"/repos/{repo}/issues?state=open&labels={urllib.parse.quote(LABEL)}&per_page=100") or []  # by label: page 1 holds it, however many issues are open
     existing = next((i for i in issues if isinstance(i, dict) and i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
     if existing is None:
         created = _github("POST", f"/repos/{repo}/issues", {"title": ISSUE_TITLE, "body": body, "labels": [LABEL]})
@@ -154,7 +155,7 @@ def close_issue() -> str:
     repo = os.environ.get("GITHUB_REPOSITORY")
     if not repo or not os.environ.get("GITHUB_TOKEN"):
         raise SystemExit("--issue needs GITHUB_TOKEN and GITHUB_REPOSITORY (both are set inside GitHub Actions)")
-    issues = _github("GET", f"/repos/{repo}/issues?state=open&per_page=100") or []
+    issues = _github("GET", f"/repos/{repo}/issues?state=open&labels={urllib.parse.quote(LABEL)}&per_page=100") or []  # by label: page 1 holds it, however many issues are open
     existing = next((i for i in issues if isinstance(i, dict) and i.get("title") == ISSUE_TITLE and "pull_request" not in i), None)
     if existing is None:
         return "no open issue"

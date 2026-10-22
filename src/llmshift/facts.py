@@ -436,9 +436,16 @@ def _id_found(fact_text: str, candidate: str) -> bool:
     return False
 
 
+_POSSESSIVE_RE = re.compile(r"(?<=\w)['’]s\b")
+
+
 def _entity_found(entity: str, norm_text: str, raw_text: str) -> bool:
     e = normalize(entity)
     if re.search(r"(?<!\w)" + re.escape(e) + r"(?!\w)", norm_text):
+        return True
+    # Names are kept without a possessive ("Domino's Pizza" -> "Domino Pizza"): compare
+    # without them on both sides.
+    if re.search(r"(?<!\w)" + re.escape(_POSSESSIVE_RE.sub("", e)) + r"(?!\w)", _POSSESSIVE_RE.sub("", norm_text)):
         return True
     parts = [p for p in entity.split() if p.lower() not in _CONNECTORS]
     if len(parts) < 2:

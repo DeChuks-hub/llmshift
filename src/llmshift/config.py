@@ -10,10 +10,13 @@ or ${VAR:-default} are expanded from the environment.
 from __future__ import annotations
 
 import copy
+import difflib
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+from .textutil import read_text
 
 CONFIG_NAMES = ("llmshift.yaml", "llmshift.yml", ".llmshift.yaml", ".llmshift.yml", ".llmshift/config.yaml")
 
@@ -125,8 +128,8 @@ def _load_pyproject(pyproject: Path) -> dict | None:
     """The [tool.llmshift] table of a pyproject.toml, or None when it has none.
     Settings that exist but cannot be read are an error, never silently ignored."""
     try:
-        text = pyproject.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError):
+        text = read_text(pyproject)
+    except (OSError, ValueError):
         return None
     if "llmshift" not in text:
         return None
@@ -156,6 +159,7 @@ class Config(dict):
 
     path: Path | None = None
     user: dict = {}
+    warnings: list = []  # settings in the file that llmshift does not read
 
     def section(self, name: str) -> dict:
         value = self.get(name)
@@ -253,6 +257,65 @@ _RULES: dict[tuple, tuple] = {
     ("watch", "alert_on"): ("choice", ("info", "warning", "critical"), None),
 }
 _SECTIONS = ("scan", "snapshot", "fix", "watch", "providers", "severity", "pricing", "pick", "digest")
+# Every setting llmshift reads; anything else in the file is a typo or a leftover, which
+# is reported (and otherwise ignored) instead of silently changing nothing.
+_TOP_KEYS = set(DEFAULTS) | set(_SECTIONS) | {"repeat", "judge_mode"}
+_SECTION_KEYS = {
+    "scan": {"paths", "exclude", "warn_days", "fail_on", "include_docs", "registry"},
+    "snapshot": {"max_cases", "per_group", "max_records", "seed", "redact_secrets", "redact_pii"},
+    "fix": {"rounds", "optimizer", "target_pass_rate", "max_cases_per_group"},
+    "watch": {"model", "history", "min_pass_rate", "max_pass_rate_drop", "max_similarity_drop", "retirement_warn_days", "fail_on", "alert_on", "alerts"},
+    "pick": {"models", "volume"},
+    "digest": {"within", "alerts"},
+}
+
+
+def project_dir(cfg: Any) -> Path:
+    """The folder the config file belongs to (the current folder without one)."""
+    source = getattr(cfg, "path", None)
+    if source is None:
+        return Path.cwd()
+    base = Path(source).resolve().parent
+    return base.parent if base.name == ".llmshift" else base
+
+
+def _shown(source: Path) -> str:
+    """The config file as messages name it: relative to the current folder when inside it."""
+    try:
+        rel = os.path.relpath(source)
+    except ValueError:  # another drive on Windows
+        return str(source)
+    return str(source) if rel.startswith("..") else rel
+
+
+def _unknown(name: str, known: Iterable[str], where: str) -> str:
+    close = difflib.get_close_matches(name.rsplit(".", 1)[-1], sorted(known), n=1, cutoff=0.75)
+    hint = f"did you mean {close[0]!r}?" if close else "it is ignored"
+    return f"{where}unknown setting {name!r} ({hint})"
+
+
+def config_warnings(user: dict, source: Path | None) -> list[str]:
+    """Settings in the file that llmshift does not read: a misspelt name, or a severity
+    level or check type that does not exist."""
+    from .checks import check_types, normalize_severity
+
+    where = f"{_shown(source)}: " if source else ""
+    out = [_unknown(str(key), _TOP_KEYS, where) for key in user if key not in _TOP_KEYS]
+    for section, known in _SECTION_KEYS.items():
+        values = user.get(section)
+        if isinstance(values, dict):
+            out += [_unknown(f"{section}.{key}", known, where) for key in values if key not in known]
+    severity = user.get("severity")
+    if isinstance(severity, dict):
+        known_types = check_types()
+        for ctype, level in severity.items():
+            if str(ctype) not in known_types:
+                out.append(_unknown(f"severity.{ctype}", known_types, where).replace("unknown setting", "unknown check type"))
+            if normalize_severity(level) is None:
+                out.append(f"{where}severity.{ctype} must be error, warn or info, got {level!r} (it is ignored)")
+    return out
+
+
 _TRUE, _FALSE = ("true", "yes", "on", "1"), ("false", "no", "off", "0")
 
 
@@ -292,7 +355,7 @@ def _coerce(value: Any, kind: str, low: Any, high: Any, name: str) -> Any:
 
 def _validate(user: dict, source: Path | None) -> None:
     """Check (and convert) the known settings, so mistakes are reported where they are."""
-    where = f"{source}: " if source else ""
+    where = f"{_shown(source)}: " if source else ""
     for section in _SECTIONS:
         if section in user and user[section] is not None and not isinstance(user[section], dict):
             raise ConfigError(f"{where}'{section}' must be a mapping of settings, got {type(user[section]).__name__}")
@@ -304,6 +367,9 @@ def _validate(user: dict, source: Path | None) -> None:
             node[key] = _coerce(node[key], kind, low, high, ".".join(keys))
         except ValueError as exc:
             raise ConfigError(f"{where}{exc}") from None
+    registry = (user.get("scan") or {}).get("registry")
+    if registry is not None and not (isinstance(registry, str) or (isinstance(registry, list) and all(isinstance(v, str) for v in registry))):
+        raise ConfigError(f"{where}scan.registry must be a registry file name or a list of them")
     for key in ("paths", "exclude"):
         values = (user.get("scan") or {}).get(key)
         if values is not None and not all(isinstance(v, (str, int, float)) and not isinstance(v, bool) for v in values):
@@ -330,7 +396,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         try:
             from . import yamlsafe
 
-            data = yamlsafe.load(source.read_text(encoding="utf-8-sig")) or {}
+            data = yamlsafe.load(read_text(source)) or {}
         except Exception as exc:
             raise ConfigError(f"{source}: could not parse config ({exc})") from None
         if not isinstance(data, dict):
@@ -345,6 +411,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         _rebase(cfg, base, user)
     cfg.path = source
     cfg.user = user
+    cfg.warnings = config_warnings(user, source)
     return cfg
 
 
@@ -354,9 +421,9 @@ SAMPLE_CONFIG = """\
 # gemini:gemini-2.5-flash, azure:my-deployment, ollama:llama3.1 (or a bare model id).
 
 tests: .llmshift/tests.jsonl      # written by `snapshot` / `import`, read by compare/fix/watch
-baseline: {baseline}                 # the model you use today (used to re-run baselines if needed)
-candidate: {candidate}               # the model you are moving to
-# judge: openai:gpt-4.1-mini         # optional LLM judge for meaning/tone checks
+{baseline_off}baseline: {baseline}                 # the model you use today (used to re-run baselines if needed)
+{candidate_off}candidate: {candidate}               # the model you are moving to
+# judge: openai:gpt-5.6-terra        # optional LLM judge for meaning/tone checks
 min_pass_rate: 0.95                  # compare/watch fail below this pass rate
 concurrency: 4
 

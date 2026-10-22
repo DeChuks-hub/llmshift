@@ -18,6 +18,7 @@ from __future__ import annotations
 import codecs
 import csv
 import datetime as _dt
+import email.utils
 import gzip
 import heapq
 import io
@@ -265,8 +266,9 @@ _TZ_COMPACT_RE = re.compile(r"([+-]\d{2})(\d{2})$")
 
 
 def parse_time(value: str | None) -> _dt.datetime | None:
-    """Parse ISO-8601 (Z, UTC or +HHMM offsets), date-only, YYYYMMDD and unix
-    timestamps (Python 3.9 safe). Returns None for anything else."""
+    """Parse ISO-8601 (Z, UTC, +HH or +HHMM offsets, basic format, week dates), date-only,
+    YYYYMMDD, HTTP dates and unix timestamps, the same way on every Python. Returns None
+    for anything else."""
     if not value:
         return None
     s = str(value).strip()
@@ -281,6 +283,25 @@ def parse_time(value: str | None) -> _dt.datetime | None:
         s = _TZ_NAME_RE.sub("", s) + "+00:00"
     s = _TZ_COMPACT_RE.sub(r"\1:\2", s) if len(s) > 10 else s
     s = s.replace(" ", "T", 1) if "T" not in s and len(s) > 10 else s
+    # What Python 3.11 reads and 3.9/3.10 do not: basic format, week dates, decimal commas,
+    # offsets in hours. One reading on every Python.
+    date, sep, clock = s.partition("T")
+    week = re.fullmatch(r"(\d{4})-?W(\d{2})(?:-?([1-7]))?", date)
+    if week:  # 2026-W09-7
+        try:
+            date = _dt.date.fromisocalendar(int(week.group(1)), int(week.group(2)), int(week.group(3) or 1)).isoformat()
+        except ValueError:
+            return None
+        s = date + sep + clock
+    elif sep and re.fullmatch(r"\d{8}", date):  # basic format: 20260301T120000Z
+        date = f"{date[:4]}-{date[4:6]}-{date[6:]}"
+    if sep:
+        basic = re.match(r"(\d{2})(\d{2})(\d{2})?(?=[.,+-]|$)", clock)
+        if basic:
+            clock = ":".join(g for g in basic.groups() if g) + clock[basic.end():]
+        clock = re.sub(r"^([\d:]+),(\d)", r"\1.\2", clock)  # 12:00:00,123 (a decimal comma)
+        clock = re.sub(r"([+-]\d{2})$", r"\1:00", clock)  # +00, -08 (hours only)
+        s = f"{date}T{clock}"
     if "." in s:
         head, _, tail = s.partition(".")
         frac = ""
@@ -297,7 +318,12 @@ def parse_time(value: str | None) -> _dt.datetime | None:
         try:
             dt = _dt.datetime.strptime(s, "%Y-%m-%d")
         except ValueError:
-            return None
+            try:  # Sun, 01 Mar 2026 12:00:00 GMT (HTTP and e-mail dates)
+                dt = email.utils.parsedate_to_datetime(str(value).strip())
+            except (TypeError, ValueError, IndexError, OverflowError):
+                return None
+            if dt is None:
+                return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=_dt.timezone.utc)
     return dt
@@ -541,9 +567,10 @@ def non_chat_reason(req: Any, resp: Any = None, url: Any = None) -> str | None:
     audio), or cannot be replayed from the log alone."""
     if isinstance(url, str) and _NON_CHAT_URL_RE.search(url):
         return "embedding/moderation/image/audio call (not a chat model call)"
-    if isinstance(req, dict) and (req.get("previous_response_id") or req.get("conversation") or isinstance(req.get("prompt"), dict)):
-        # Earlier turns or the prompt itself live on OpenAI's servers: replaying what the
-        # log holds would test a different request.
+    stored = isinstance(req, dict) and (req.get("previous_response_id") or req.get("conversation") or isinstance(req.get("prompt"), dict))
+    if stored and "messages" not in req and "contents" not in req:  # a chat request holding its own turns is not
+        # Responses API: earlier turns or the prompt itself live on OpenAI's servers, and
+        # replaying what the log holds would test a different request.
         return "depends on context stored by OpenAI (previous_response_id, conversation or a stored prompt)"
     if isinstance(resp, dict):
         data = resp.get("data")
@@ -892,6 +919,22 @@ def parse_record(rec: Any, where: str, batch: dict, stats: LogStats) -> Interact
     # LLMShift test cases / records
     if isinstance(rec.get("input"), dict) and "messages" in rec["input"] and ("checks" in rec or "baseline" in rec):
         return from_testcase(rec, where)
+    if rec.get("llmshift_shadow"):  # shadow mode: the request as sent and the production model's answer
+        req, base = rec.get("request"), rec.get("baseline")
+        if not isinstance(req, dict) or not isinstance(base, dict) or not isinstance(req.get("messages"), list):
+            stats.skip("shadow record without its request and answer", where)
+            return None
+        return Interaction(
+            messages=[m for m in req["messages"] if isinstance(m, dict)],
+            params=dict(req["params"]) if isinstance(req.get("params"), dict) else {},
+            output=base["output"] if isinstance(base.get("output"), str) else None,
+            tool_calls=[c for c in base.get("tool_calls") or [] if isinstance(c, dict)] if isinstance(base.get("tool_calls"), list) else [],
+            model=base["model"] if isinstance(base.get("model"), str) else None,
+            usage=dict(base["usage"]) if isinstance(base.get("usage"), dict) else {},
+            timestamp=_ts(rec.get("ts")),
+            source=where,
+            fmt="llmshift_shadow",
+        )
     if rec.get("llmshift_record"):
         reason = non_chat_reason(rec.get("request"), rec.get("response"))
         if reason:
@@ -1009,36 +1052,45 @@ def _finish_batch(batch: dict, stats: LogStats) -> list[Interaction]:
 
 
 class _Sample:
-    """A bounded sample of interactions: up to `limit` are kept. Past that, every prompt
-    template is guaranteed up to `floor` places (taken from the largest template), and
-    within a template each record has the same chance to stay (reservoir sampling)."""
+    """A bounded sample of interactions: up to `limit` are kept. Past that, the places are
+    shared fairly between prompt templates, however late one first appears: a template
+    with fewer kept calls takes a place from the one with the most, so small templates
+    keep every call and large ones share the rest equally. Within a template each call
+    has the same chance to stay (reservoir sampling)."""
 
     def __init__(self, limit: int | None, seed: int = 7):
         self.limit = limit
         self.rng = random.Random(seed)
         self.groups: dict[str, list] = {}
         self.seen: Counter = Counter()
-        self.heap: list = []
+        self.heap: list = []  # (-kept, template), largest first; entries go stale as groups change
         self.size = 0
         self.order = 0
-        self.floor = max(50, (limit or 0) // 50)
 
     @property
     def dropped(self) -> int:
         return sum(self.seen.values()) - self.size
 
-    def _evict(self, exclude: str) -> bool:
-        """Free one place from the largest template that is above its guaranteed share."""
+    def _push(self, key: str) -> None:
+        heapq.heappush(self.heap, (-len(self.groups[key]), key))
+        if len(self.heap) > 4 * len(self.groups) + 1024:  # drop the stale entries
+            self.heap = [(-len(g), k) for k, g in self.groups.items() if g]
+            heapq.heapify(self.heap)
+
+    def _evict(self, taker: str, have: int) -> bool:
+        """Free a place for `taker` (holding `have`) from the largest template, when that
+        one holds at least two more."""
         while self.heap:
-            neg, largest = heapq.heappop(self.heap)
+            neg, largest = self.heap[0]
             group = self.groups[largest]
             if -neg != len(group):
-                continue  # stale entry
-            if largest == exclude or len(group) <= min(self.seen[largest], self.floor):
-                heapq.heappush(self.heap, (neg, largest))
+                heapq.heappop(self.heap)  # stale entry
+                continue
+            if largest == taker or len(group) <= have + 1:
                 return False
+            heapq.heappop(self.heap)
             group.pop(self.rng.randrange(len(group)))
-            heapq.heappush(self.heap, (-len(group), largest))
+            self._push(largest)
             return True
         return False
 
@@ -1051,11 +1103,11 @@ class _Sample:
         if self.limit is None or self.size < self.limit:
             kept.append(item)
             self.size += 1
-            heapq.heappush(self.heap, (-len(kept), key))
+            self._push(key)
             return
-        if len(kept) < min(self.seen[key], self.floor) and self._evict(key):
+        if self._evict(key, len(kept)):
             kept.append(item)
-            heapq.heappush(self.heap, (-len(kept), key))
+            self._push(key)
             return
         if kept:
             j = self.rng.randrange(self.seen[key])

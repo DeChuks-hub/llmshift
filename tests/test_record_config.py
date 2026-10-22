@@ -362,3 +362,63 @@ def test_the_wrapped_client_still_looks_like_the_client(tmp_path):
     assert len(_records(path)) == 1
     with pytest.raises(ValueError):
         Recorder(tmp_path / "x.jsonl", sample_rate=float("nan"))
+
+
+class FakeRawResponse:
+    """What the SDKs' with_raw_response.create(...) returns: headers now, the answer on parse()."""
+
+    def __init__(self, answer):
+        self.headers = {"x-ratelimit-remaining-requests": "99"}
+        self._answer = answer
+        self.parses = 0
+
+    def parse(self):
+        self.parses += 1
+        return self._answer
+
+
+class FakeStreamingResponse:
+    """What with_streaming_response.create(...) returns: a context manager around the response."""
+
+    def __init__(self, answer, fail=False):
+        self._answer, self._fail = answer, fail
+
+    def __enter__(self):
+        if self._fail:
+            raise RuntimeError("400 bad request")
+        return FakeRawResponse(self._answer)
+
+    def __exit__(self, *exc):
+        return False
+
+
+class FakeRawCompletions:
+    def create(self, **kwargs):
+        return FakeRawResponse(completion("raw " + kwargs["messages"][-1]["content"]))
+
+
+class FakeStreamingCompletions:
+    def create(self, **kwargs):
+        return FakeStreamingResponse(completion("streamed " + kwargs["messages"][-1]["content"]), fail=kwargs.get("model") == "boom")
+
+
+def test_raw_and_streaming_response_calls_are_recorded(tmp_path):
+    path = tmp_path / "raw.jsonl"
+    completions = FakeCompletions()
+    completions.with_raw_response = FakeRawCompletions()
+    completions.with_streaming_response = FakeStreamingCompletions()
+    client = wrap(FakeClient(completions), path=path)
+    raw = client.chat.completions.with_raw_response.create(model="gpt-4o", messages=[{"role": "user", "content": "a"}])
+    assert raw.headers["x-ratelimit-remaining-requests"] == "99"  # the app still gets the HTTP response
+    assert raw.parse().choices[0].message.content == "raw a" and raw.parse() is raw.parse()
+    with client.chat.completions.with_streaming_response.create(model="gpt-4o", messages=[{"role": "user", "content": "b"}]) as resp:
+        assert resp.parse().choices[0].message.content == "streamed b"
+    try:
+        with client.chat.completions.with_streaming_response.create(model="boom", messages=[{"role": "user", "content": "c"}]):
+            pass
+    except RuntimeError:
+        pass
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [rec["response"]["choices"][0]["message"]["content"] if rec.get("response") else rec["error"] for rec in lines] == [
+        "raw a", "streamed b", "RuntimeError: 400 bad request",
+    ]  # parsed three times, recorded once

@@ -78,7 +78,7 @@ def fetch_json(url: str) -> tuple[Any, bytes]:
     """(parsed JSON, raw bytes) from an http(s) URL or a local file."""
     if re.match(r"^https?://", url, re.I):
         try:
-            raw = http.request("GET", url, raw=True, timeout=60, max_retries=3)
+            raw = http.request("GET", url, raw=True, timeout=30, max_retries=2)  # a silent server costs about a minute and a half, not four
         except ProviderError as exc:
             raise UpdateError(f"could not download {url}: {exc}") from None
     else:
@@ -109,11 +109,13 @@ def save_data(name: str, raw: bytes) -> Path:
         with os.fdopen(fd, "wb") as fh:
             fh.write(raw)
         os.replace(tmp, directory / name)
-    except BaseException:
+    except BaseException as exc:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+        if isinstance(exc, OSError):  # name the file being replaced, not the temporary one
+            raise UpdateError(f"cannot write {directory / name}: {exc.strerror or exc}") from None
         raise
     return directory / name
 
@@ -395,10 +397,11 @@ def cmd_digest(args: argparse.Namespace, cfg: dict) -> int:
         con.out(con.style(f"  scanned {digest.files_scanned} files in {', '.join(paths)}; lifecycle data {digest.registry_updated}", "grey"))
     destinations = list(section.get("alerts") or []) + list(args.alert or [])
     code = EXIT_OK
-    problems = check_destinations(destinations) if destinations and not args.dry_run else []
+    sending = bool(destinations) and bool(digest.items or args.always)  # nothing to send: no URL is needed either
+    problems = check_destinations(destinations) if sending and not args.dry_run else []
     if problems:
         raise UsageError("the digest could not be delivered: " + "; ".join(problems))
-    if destinations and (digest.items or args.always):
+    if sending:
         if args.dry_run:
             con.out(con.style(f"  (dry run: not sending to {len(destinations)} destination(s))", "grey"), err=True)
         else:

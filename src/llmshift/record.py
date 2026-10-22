@@ -33,13 +33,14 @@ import inspect
 import json
 import os
 import random
+import reprlib
 import threading
 import time
 import uuid
 import warnings
 import weakref
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import fileio
 from .redact import Redactor
@@ -62,6 +63,9 @@ _STREAM_HELPERS = {
 # Attribute paths that lead to an endpoint; everything else is returned untouched.
 _ROUTES = {key[:i] for key in (*_ENDPOINTS, *_STREAM_HELPERS) for i in range(1, len(key))}
 _ROUTES |= {("beta",)} | {("beta",) + route for route in _ROUTES}
+# client.chat.completions.with_raw_response.create(...) (or client.with_raw_response.chat...)
+# answers with the HTTP response; the call is recorded when the app parses it.
+_RESPONSE_WRAPPERS = ("with_raw_response", "with_streaming_response")
 _FORMAT_ARGS = ("response_format", "text_format", "output_format")  # may be a pydantic class
 _CLIENT_FACTORIES = ("with_options", "copy")  # methods that return a configured copy of the client
 
@@ -87,7 +91,8 @@ def _dump(model_dump: Any) -> Any:
 
 
 _MAX_DEPTH = 64
-_MAX_VALUES = 200_000
+_MAX_OBJECTS = 200_000  # objects converted: a Mock in an app's tests invents attributes without end
+_MAX_VALUES = 5_000_000  # values in all, so data that shares itself heavily still ends
 _PLAIN = (dict, list, tuple, str, int, float, bool, type(None))
 
 
@@ -99,38 +104,50 @@ def _sentinel(value: Any) -> bool:
 
 def to_dict(obj: Any) -> Any:
     """Best-effort conversion of SDK objects (pydantic models etc.) to plain data.
-    "Not given" sentinels are dropped; past 64 levels or 200,000 values (a Mock in an
-    app's tests invents attributes without end) the rest becomes text."""
-    return _plain(obj, 0, [_MAX_VALUES])
+    "Not given" sentinels are dropped. Past 64 levels, past 200,000 objects to convert
+    (a Mock invents attributes without end) or where data contains itself, the rest
+    becomes text; plain data of any size (a response with logprobs) stays data."""
+    return _plain(obj, 0, [_MAX_OBJECTS, _MAX_VALUES], set())
 
 
-def _plain(obj: Any, depth: int, budget: list) -> Any:
-    budget[0] -= 1
+def _plain(obj: Any, depth: int, budget: list, path: set) -> Any:
+    budget[1] -= 1
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
-    if depth > _MAX_DEPTH or budget[0] <= 0:
+    if depth > _MAX_DEPTH or budget[1] <= 0 or id(obj) in path:  # id in path: it contains itself
         return _text(obj)
-    if isinstance(obj, dict):
-        return {k: _plain(v, depth + 1, budget) for k, v in obj.items() if not _sentinel(v)}
-    if isinstance(obj, (list, tuple)):
-        return [_plain(v, depth + 1, budget) for v in obj if not _sentinel(v)]
-    for method in ("model_dump", "to_dict", "dict"):
-        fn = getattr(obj, method, None)
-        if callable(fn):
-            try:
-                data = _dump(fn) if method == "model_dump" else fn()
-            except Exception:
-                continue
-            if isinstance(data, _PLAIN):  # a Mock's model_dump() returns another Mock
-                return _plain(data, depth + 1, budget)
-    if hasattr(obj, "__dict__") and not type(obj).__module__.startswith("unittest.mock"):
-        return {k: _plain(v, depth + 1, budget) for k, v in vars(obj).items() if not k.startswith("_") and not _sentinel(v)}
-    return _text(obj)
+    path.add(id(obj))
+    try:
+        if isinstance(obj, dict):
+            return {k: _plain(v, depth + 1, budget, path) for k, v in obj.items() if not _sentinel(v)}
+        if isinstance(obj, (list, tuple)):
+            return [_plain(v, depth + 1, budget, path) for v in obj if not _sentinel(v)]
+        budget[0] -= 1
+        if budget[0] <= 0:
+            return _text(obj)
+        for method in ("model_dump", "to_dict", "dict"):
+            fn = getattr(obj, method, None)
+            if callable(fn):
+                try:
+                    data = _dump(fn) if method == "model_dump" else fn()
+                except Exception:
+                    continue
+                if isinstance(data, _PLAIN):  # a Mock's model_dump() returns another Mock
+                    return _plain(data, depth + 1, budget, path)
+        if hasattr(obj, "__dict__") and not type(obj).__module__.startswith("unittest.mock"):
+            return {k: _plain(v, depth + 1, budget, path) for k, v in vars(obj).items() if not k.startswith("_") and not _sentinel(v)}
+        return _text(obj)
+    finally:
+        path.discard(id(obj))
+
+
+_SHORT = reprlib.Repr()  # a container shown as text is shown in part: str() would render all of it
+_SHORT.maxlevel, _SHORT.maxstring, _SHORT.maxother = 3, 300, 300
 
 
 def _text(obj: Any) -> str:
     try:
-        return str(obj)[:1000]
+        return (_SHORT.repr(obj) if isinstance(obj, (dict, list, tuple, set)) else str(obj))[:1000]
     except Exception:
         return f"<{type(obj).__name__}>"
 
@@ -182,7 +199,7 @@ class Recorder:
                 rec["latency_ms"] = round(latency_ms, 1)
             if error:
                 rec["error"] = error
-            meta = {**self.metadata, **(metadata or {})}
+            meta = to_dict({**self.metadata, **(metadata or {})})  # plain data: an app's own objects too
             if meta:
                 rec["metadata"] = meta
             run = _AGENT_RUN.get()
@@ -422,7 +439,9 @@ class _StreamProxy:
     def _finish(self, error: str | None = None) -> None:
         if not self._finished:
             self._finished = True
-            if error is None and not self._acc.complete:
+            if self._acc.complete:  # the answer reached its finish reason: whole, however the app left
+                error = None        # (apps often stop at finish_reason, before a trailing usage chunk)
+            elif error is None:
                 error = "the stream ended without a finish reason (cut off?)"
             self._done(self._acc, error)
 
@@ -599,6 +618,81 @@ def _final_snapshot(stream: Any) -> Any:
     return None
 
 
+_UNSEEN = object()
+
+
+def _on_parse(response: Any, handle: Callable[[Any], Any], fail: Callable[[BaseException], None]) -> Any:
+    """An SDK HTTP response (with_raw_response) whose parse() hands what it returns to
+    `handle` once: the answer is recorded, a stream wrapped. A with_streaming_response
+    context manager gets the same hook on the response it yields."""
+    if not hasattr(response, "parse") and (hasattr(response, "__enter__") or hasattr(response, "__aenter__")):
+        return _ParseOnEnter(response, handle, fail)
+    original = getattr(response, "parse", None)
+    if not callable(original):
+        return response
+    lock = threading.Lock()
+    state = {"seen": _UNSEEN, "value": None}
+
+    def once(parsed: Any) -> Any:
+        with lock:
+            if state["seen"] is not _UNSEEN:  # the SDK caches the parsed answer: the same object again
+                return state["value"] if parsed is state["seen"] else parsed
+            state["seen"] = parsed
+            try:
+                state["value"] = handle(parsed)
+            except Exception:  # recording never breaks the app
+                state["value"] = parsed
+            return state["value"]
+
+    def parse(*args: Any, **kwargs: Any) -> Any:
+        out = original(*args, **kwargs)
+        if inspect.isawaitable(out):  # AsyncAPIResponse.parse() is a coroutine
+
+            async def later() -> Any:
+                return once(await out)
+
+            return later()
+        return once(out)
+
+    try:
+        response.parse = parse
+    except Exception:
+        pass
+    return response
+
+
+class _ParseOnEnter:
+    """A with_streaming_response context manager: the response it yields is hooked."""
+
+    def __init__(self, manager: Any, handle: Callable[[Any], Any], fail: Callable[[BaseException], None]):
+        self._manager, self._handle, self._fail = manager, handle, fail
+
+    def __enter__(self) -> Any:
+        try:
+            response = self._manager.__enter__()
+        except Exception as exc:  # an error status raises here
+            self._fail(exc)
+            raise
+        return _on_parse(response, self._handle, self._fail)
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._manager.__exit__(*exc)
+
+    async def __aenter__(self) -> Any:
+        try:
+            response = await self._manager.__aenter__()
+        except Exception as exc:
+            self._fail(exc)
+            raise
+        return _on_parse(response, self._handle, self._fail)
+
+    async def __aexit__(self, *exc: Any) -> Any:
+        return await self._manager.__aexit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._manager, name)
+
+
 class _HelperStream:
     """What an SDK stream helper returns (a context manager that makes the request on
     entering). Passed through unchanged; the final answer is recorded when the block ends."""
@@ -685,15 +779,17 @@ class _Proxy:
             raise AttributeError(name)
         attr = getattr(self._target, name)
         parts = self._parts + (name,)
-        api = _ENDPOINTS.get(parts[-3:]) or _ENDPOINTS.get(parts[-2:])
+        raw = any(p in _RESPONSE_WRAPPERS for p in parts)
+        key = tuple(p for p in parts if p not in _RESPONSE_WRAPPERS)
+        api = _ENDPOINTS.get(key[-3:]) or _ENDPOINTS.get(key[-2:])
         if api and callable(attr):
-            return self._wrap_call(attr, api)
-        helper = _STREAM_HELPERS.get(parts[-3:]) or _STREAM_HELPERS.get(parts[-2:])
+            return self._wrap_call(attr, api, raw=raw)
+        helper = None if raw else (_STREAM_HELPERS.get(parts[-3:]) or _STREAM_HELPERS.get(parts[-2:]))
         if helper and callable(attr):
             return self._wrap_helper(attr, helper)
         if not self._parts and name in _CLIENT_FACTORIES and callable(attr):
             return self._wrap_factory(attr)
-        if parts in _ROUTES:
+        if key in _ROUTES or (raw and not key):
             return _Proxy(attr, self._recorder, self._provider, parts, self._shadow)
         return attr
 
@@ -747,7 +843,7 @@ class _Proxy:
 
         return call
 
-    def _wrap_call(self, fn: Any, api: str) -> Any:
+    def _wrap_call(self, fn: Any, api: str, raw: bool = False) -> Any:
         recorder, provider, shadow = self._recorder, self._provider, self._shadow
 
         def elapsed(start: float) -> float:
@@ -765,6 +861,11 @@ class _Proxy:
                 recorder.log(kwargs, None, provider=provider, api=api, error=f"{exc.__class__.__name__}: {exc}"[:500], latency_ms=elapsed(start))
 
         def finished(kwargs: dict, start: float, result: Any, logging: bool) -> Any:
+            if raw:
+                return _on_parse(result, lambda parsed: finished_parsed(kwargs, start, parsed, logging), lambda exc: failed(kwargs, start, exc, logging))
+            return finished_parsed(kwargs, start, result, logging)
+
+        def finished_parsed(kwargs: dict, start: float, result: Any, logging: bool) -> Any:
             if kwargs.get("stream"):
 
                 def done(acc: _StreamAccumulator, error: str | None) -> None:
@@ -843,8 +944,11 @@ def wrap(
     module = type(client).__module__.split(".")[0]
     provider = {"openai": "openai", "anthropic": "anthropic"}.get(module, module)
     if shadow is not None and not hasattr(shadow, "observe"):
-        from .shadow import DEFAULT_PATH, Shadow
+        from .shadow import DEFAULT_PATH, Shadow, shared
 
-        shadow = Shadow(shadow, rate=shadow_rate, path=shadow_path or DEFAULT_PATH)
+        if isinstance(shadow, str):  # one set of workers however many clients are wrapped
+            shadow = shared(shadow, rate=shadow_rate, path=shadow_path or DEFAULT_PATH)
+        else:
+            shadow = Shadow(shadow, rate=shadow_rate, path=shadow_path or DEFAULT_PATH)
     rec = (recorder or Recorder(path, sample_rate=sample_rate, metadata=metadata)) if record else None
     return _Proxy(client, rec, provider, shadow=shadow)

@@ -25,7 +25,7 @@ Providers now retire models roughly every six months. When a model's behaviour c
 | `llmshift shadow report` | Checks a new model on a share of live traffic, copied in the background (shadow mode). |
 | `llmshift watch` | Runs a scheduled check against the live model and alerts you (Slack, Teams, GitHub issue, e-mail, ...) when its behaviour drifts. |
 
-AI coding assistants can use all of this as tools: `llmshift mcp` is an [MCP server](#use-it-from-ai-coding-assistants-mcp) for Claude Code, Cursor and VS Code.
+AI coding assistants can use all of this as tools: `llmshift mcp` is an [MCP server](https://github.com/DeChuks-hub/llmshift#use-it-from-ai-coding-assistants-mcp) for Claude Code, Cursor and VS Code.
 
 LLMShift is a single pure-Python package with no compiled code: its only dependency is `tomli` on Python 3.9 and 3.10 (to read `pyproject.toml`), and a copy of PyYAML's pure-Python YAML parser is included. It talks to OpenAI, Azure OpenAI, Anthropic, Gemini and any OpenAI-compatible endpoint over plain HTTPS, so there are no SDK version conflicts. You can also run it as a GitHub Action.
 
@@ -85,7 +85,7 @@ LLMShift scan  5 files, 6 model references, 4 distinct models   (lifecycle data:
 - **Config**: YAML, JSON, TOML, `.env`, INI, Terraform and Dockerfiles. **Notebooks**: code cells, reported with cell numbers.
 - **ID formats are normalised.** Bedrock (`us.anthropic.claude-...-v1:0`, full ARNs), Vertex (`claude-...@20241022`, `projects/.../models/...`), OpenRouter/LiteLLM prefixes (`openai/gpt-4o`), dotted spellings (`claude-3.5-sonnet`) and fine-tunes (`ft:gpt-4o-mini-...`, which follow their base model's schedule) all map to their base model.
 - In a git repository, files git ignores are skipped unless you name them, and so is LLMShift's own `.llmshift/` folder. `--exclude` takes globs: a bare name (`legacy`) matches at any depth, and paths may be relative to the scanned directory or the current one.
-- **Lifecycle data** covers 617 models from OpenAI, Anthropic, Google (Gemini API and Vertex AI), Mistral, Cohere, xAI and DeepSeek. It was built from the providers' official deprecation pages on 2026-10-21. Status is computed from dates at run time, so a model turns "retired" on its shutdown day. `llmshift update` downloads newer data ([below](#live-retirement-data-update-digest-calendar)); add or override entries with `--registry extra.json`; `llmshift models gpt-4o` searches the data.
+- **Lifecycle data** covers 617 models from OpenAI, Anthropic, Google (Gemini API and Vertex AI), Mistral, Cohere, xAI and DeepSeek. It was built from the providers' official deprecation pages on 2026-10-21. Status is computed from dates at run time, so a model turns "retired" on its shutdown day. `llmshift update` downloads newer data ([below](https://github.com/DeChuks-hub/llmshift#live-retirement-data-update-digest-calendar)); add or override entries with `--registry extra.json`; `llmshift models gpt-4o` searches the data.
 - In CI, use `--fail-on retired|retiring|deprecated|unknown|never` (default `retired`). Output formats: `--format table|json|markdown|sarif`. Inside GitHub Actions, findings appear as annotations on the diff and in the job summary.
 
 ## snapshot: real usage logs become a test set
@@ -118,7 +118,7 @@ Then it:
 | a label / number | exact value, plus the label vocabulary seen across the template |
 | prose / markdown | facts (numbers with units and scale, dates, IDs, URLs, names), language, markdown structure, length band, tone, similarity |
 | tool calls | same tools called, argument keys, short argument values |
-| an agent run | the steps: tool calls, loops, step count ([below](#agents-multi-step-runs)) |
+| an agent run | the steps: tool calls, loops, step count ([below](https://github.com/DeChuks-hub/llmshift#agents-multi-step-runs)) |
 | any | not empty, not a refusal |
 
 Logs without outputs? Pass `--baseline-model openai:gpt-4o-2024-08-06` to generate them.
@@ -130,7 +130,7 @@ from llmshift.record import wrap
 client = wrap(OpenAI(), path="logs/llm.jsonl")   # works with OpenAI, AsyncOpenAI, Anthropic, AsyncAnthropic, streaming
 ```
 
-Streamed responses, including the SDKs' stream helpers (`with client.messages.stream(...)`, `client.chat.completions.stream(...)`), are logged whole once the stream ends, with tool calls and token usage. Pydantic response formats (`parse(response_format=Model)` and friends) are logged as the JSON schema the SDK sends, so the cases replay with the same structured output. Several threads or processes can log to the same file.
+Streamed responses, including the SDKs' stream helpers (`with client.messages.stream(...)`, `client.chat.completions.stream(...)`), are logged whole once the stream ends, with tool calls and token usage. Calls through `with_raw_response` and `with_streaming_response` are logged when your code parses the answer (`.parse()`); helpers that loop over the API inside the SDK, such as Anthropic's `tool_runner`, call the unwrapped client and are not logged. Pydantic response formats (`parse(response_format=Model)` and friends) are logged as the JSON schema the SDK sends, so the cases replay with the same structured output. Several threads or processes can log to the same file.
 
 The test file is plain JSON Lines that you can read, edit and commit:
 
@@ -433,7 +433,7 @@ A model is written `provider:model`; well-known IDs work without a prefix.
 | `gemini:gemini-3.8-flash` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
 | `openrouter:`, `together:`, `groq:`, `mistral:`, `deepseek:`, `xai:`, `fireworks:`, `perplexity:`, `cohere:` | `<NAME>_API_KEY` |
 | `ollama:llama3.1:8b`, `lmstudio:...`, `vllm:...` | local, no key (`OLLAMA_HOST` respected) |
-| `python:my_app.llm:answer` | your own function: test the real pipeline, not just the raw model |
+| `python:my_app.llm:answer` | your own function: test the real pipeline, not just the raw model (it runs as long as it takes, unless `timeout:` is set) |
 | `<name>:model` from `providers:` in `llmshift.yaml` | any OpenAI-compatible endpoint (LiteLLM proxy for Bedrock/Vertex, ...) or a `command` |
 | `mock:legacy`, `mock:nextgen`, `mock:frugal`, `mock:echo` | offline simulated models (demo/tests); `mock:embed-v1`, `mock:embed-v2` for embeddings |
 
@@ -450,7 +450,7 @@ A model is written `provider:model`; well-known IDs work without a prefix.
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-Inputs: `command` (any LLMShift command), `args`, `python-version`, `version` (empty = install from the action's source), `working-directory`. Outputs: `pass-rate`, `retired`, `retiring`, `recommended` (from `pick`). Complete workflows are in [`examples/workflows/`](https://github.com/DeChuks-hub/llmshift/tree/main/examples/workflows): PR checks, a nightly watch, prompt checks on pull requests, weekly upgrade pull requests and a weekly retirement digest.
+Inputs: `command` (any LLMShift command), `args` (split like shell words: quote an argument that holds spaces; nothing is expanded), `python-version`, `version` (empty = install from the action's source), `working-directory`. Outputs: `pass-rate`, `retired`, `retiring`, `recommended` (from `pick`). Complete workflows are in [`examples/workflows/`](https://github.com/DeChuks-hub/llmshift/tree/main/examples/workflows): PR checks, a nightly watch, prompt checks on pull requests, weekly upgrade pull requests and a weekly retirement digest.
 
 ## Configuration
 
@@ -461,8 +461,8 @@ Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`;
 | Code | Meaning |
 |---|---|
 | `0` | success |
-| `1` | the check failed: a retired model was found, the pass rate is below the threshold, drift was detected, the new model is riskier, or no candidate passes |
-| `2` | usage or configuration problem, or every request failed (wrong key or model name) |
+| `1` | the check failed: a retired model was found, the pass rate is below the threshold, drift was detected, the new model is riskier, no candidate passes, or `doctor` found a problem; for `update`, `snapshot` and `import`: nothing could be downloaded, read or imported |
+| `2` | usage or configuration problem, or the provider refused every request the same way (wrong key, model name or URL; an unreachable host). Timeouts and server errors count as failed cases instead (exit `1`) |
 | `130` | interrupted |
 
 ## Privacy and safety

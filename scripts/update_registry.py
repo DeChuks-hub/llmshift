@@ -45,7 +45,10 @@ MIN_ROWS = 5  # fewer readable rows than this: the page layout changed; leave it
 MAX_CHANGES = 40  # more changes than this in one run: write nothing, ask for a review
 ID_RE = re.compile(r"\b[a-z][a-z0-9]*(?:[-._][a-z0-9]+)+\b")
 MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
-_NOT_A_DATE = ("not sooner", "no sooner", "or later", "no shutdown", "no retirement", "not announced", "n/a", "at earliest")
+_NOT_A_DATE = (
+    "not sooner", "no sooner", "or later", "no shutdown", "no retirement", "not announced", "n/a", "earliest",
+    "no earlier than", "not earlier than", "not before", "not until", "tentative", "estimated", "approximately", "tbd",
+)
 
 
 class _Tables(HTMLParser):
@@ -171,8 +174,11 @@ def _ordered(entry: dict) -> dict:
     return {**known, **{k: v for k, v in entry.items() if k not in known}}
 
 
-def merge(data: dict, rows: list[Row], today: str) -> list[str]:
-    """Apply page rows to the data in place; returns one line per change."""
+def merge(data: dict, rows: list[Row], today: str, review: list[str] | None = None) -> list[str]:
+    """Apply page rows to the data in place; returns one line per change. A shutdown date
+    that moved earlier, or one already past, is not applied: users would lose time they were
+    promised, so it goes to `review` for a person to check against the page."""
+    review = review if review is not None else []
     by_key = {(m.get("provider"), m.get("id")): m for m in data["models"]}
     latest: dict[tuple[str, str], Row] = {}
     for r in rows:  # several rows for one model (e.g. fine-tuning and inference): the latest shutdown wins
@@ -198,8 +204,11 @@ def merge(data: dict, rows: list[Row], today: str) -> list[str]:
         if entry.get("status") == "retired" or (entry.get("retires") or "9999") < today:
             continue  # history stays as curated
         before = len(changes)
-        if r.retires and r.retires != entry.get("retires"):
-            changes.append(f"{provider}/{mid}: retires {entry.get('retires') or 'not scheduled'} -> {r.retires}")
+        current = entry.get("retires")
+        if r.retires and r.retires != current and (r.retires < today or (current and r.retires < current)):
+            review.append(f"{provider}/{mid}: the page says it retires {r.retires}, the data says {current or 'not scheduled'} (not applied: earlier or past)")
+        elif r.retires and r.retires != current:
+            changes.append(f"{provider}/{mid}: retires {current or 'not scheduled'} -> {r.retires}")
             entry["retires"] = r.retires
             if entry.get("status") == "active":
                 entry["status"] = "deprecated"
@@ -243,8 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[Row] = []
     read: dict[str, str] = {}  # url -> page text, for pages whose tables were read
     for provider, url, model_words, date_words, replacement_words in SOURCES:
-        try:
-            html = (args.pages / f"{provider}.html").read_text(encoding="utf-8") if args.pages else watcher.fetch(url)
+        try:  # a page saved by a browser may not be UTF-8: read what can be read
+            html = (args.pages / f"{provider}.html").read_bytes().decode("utf-8", "replace") if args.pages else watcher.fetch(url)
         except (OSError, RuntimeError) as exc:
             print(f"! {provider}: cannot read {url} ({exc}); skipped")
             continue
@@ -255,10 +264,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {provider}: {len(found)} rows from {url}")
         rows.extend(found)
         read[url] = watcher.page_text(html)
-    changes = merge(data, rows, today)
+    review: list[str] = []
+    changes = merge(data, rows, today, review)
+    for line in review:
+        print(f"! needs a person: {line}")
     if not changes:
-        print("No changes: the lifecycle data matches the providers' tables.")
-        return 0
+        print("No changes: the lifecycle data matches the providers' tables." if not review else "No changes applied.")
+        return 4 if review else 0
     print(f"{len(changes)} change(s):")
     for line in changes:
         print(f"  - {line}")
@@ -274,6 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.summary:
         body = [f"Lifecycle data update ({today})", "", "From the providers' deprecation tables:", ""] + [f"- {c}" for c in changes]
         args.summary.write_text("\n".join(body) + "\n", encoding="utf-8")
+    if review and args.summary:
+        with args.summary.open("a", encoding="utf-8") as fh:
+            fh.write("\nNot applied, for a person to check:\n\n" + "".join(f"- {line}\n" for line in review))
     if args.write:
         MODELS.write_bytes(dump(data))
         state = json.loads(STATE.read_text(encoding="utf-8")) if STATE.exists() else {}
@@ -283,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         STATE.write_bytes((json.dumps({"checked": today, "pages": dict(sorted(pages.items()))}, indent=2) + "\n").encode("utf-8"))
         shown = MODELS.relative_to(ROOT) if MODELS.is_relative_to(ROOT) else MODELS
         print(f"Wrote {shown} ({summary.get('after', len(data['models']))} models).")
-    return 0
+    return 4 if review else 0  # 4: written, but some dates wait for a person (the workflow publishes, then fails)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
+import re
 import shutil
 import sys
 import threading
@@ -173,8 +174,36 @@ def width() -> int:
         return 100
 
 
+# Text from outside (provider errors, model output, scanned source) can carry escape
+# sequences that move the cursor, retitle the window or hide a line, and bidi controls
+# that reorder it. Only the colours style() adds are obeyed; the rest is shown as escapes,
+# as text. Directional marks that reorder nothing (Hebrew and Arabic text has them) stay.
+_SGR = r"(?:0|1|2|3[1-6]|90)"
+_UNSAFE_RE = re.compile(
+    rf"\033\[(?:{_SGR}(?:;{_SGR})*)?m|[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]"
+)
+
+
+def safe(text: str) -> str:
+    """`text` as it may be written to a terminal."""
+    text = str(text)
+    if "\r" in text:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    colour = color_enabled()
+
+    def shown(m: re.Match) -> str:
+        s = m.group()
+        if len(s) > 1:
+            return s if colour else ""
+        # \u0085 rather than \x85: also a valid escape inside the JSON that --format json prints
+        return f"\\u{ord(s):04x}"
+
+    return _UNSAFE_RE.sub(shown, text)
+
+
 def out(text: str = "", *, err: bool = False) -> None:
     stream = sys.stderr if err else sys.stdout
+    text = safe(text)
     with _lock:
         try:
             try:
@@ -187,6 +216,24 @@ def out(text: str = "", *, err: bool = False) -> None:
             if isinstance(exc, BrokenPipeError) or exc.errno in (errno.EPIPE, errno.EINVAL):
                 _closed_pipe(stream)
             raise
+
+
+def finish_output() -> None:
+    """Flush stdout and stderr before exiting. A reader that went away (`llmshift --help |
+    head -1`) is not an error: the rest goes nowhere, instead of Python's "Exception
+    ignored" message and exit code 120."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except OSError as exc:
+            if isinstance(exc, BrokenPipeError) or exc.errno in (errno.EPIPE, errno.EINVAL):
+                try:
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, stream.fileno())
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 def _closed_pipe(stream: Any) -> None:

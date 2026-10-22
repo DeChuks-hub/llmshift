@@ -66,7 +66,8 @@ _MODES = {"chat", "completion", "responses", "embedding"}
 def _per_million(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
         return None
-    return float(f"{value * 1_000_000:.6g}")
+    per_million = value * 1_000_000
+    return float(f"{per_million:.6g}") if math.isfinite(per_million) else None  # one absurd entry is skipped, not the table
 
 
 def convert_litellm(table: Any) -> dict[str, list[float]]:
@@ -84,13 +85,16 @@ def convert_litellm(table: Any) -> dict[str, list[float]]:
 
 def prices_problems(data: Any, *, min_prices: int = 1) -> list[str]:
     """Why a price table cannot be used; empty when it is valid."""
-    from .registry import _date
+    from .registry import _date, today
 
     if not isinstance(data, dict):
         return ["not a JSON object"]
     problems = []
-    if _date(data.get("fetched")) is None:
+    fetched = _date(data.get("fetched"))
+    if fetched is None:
         problems.append("missing or invalid 'fetched' date")
+    elif fetched > today() + _dt.timedelta(days=2):  # it would win over every later table
+        problems.append(f"'fetched' date {fetched.isoformat()} is in the future")
     prices = data.get("prices")
     if not isinstance(prices, dict):
         return problems + ["'prices' must be an object"]
@@ -220,6 +224,8 @@ def price_for(spec: str, overrides: dict[str, Price] | None = None) -> Price | N
     for key in dict.fromkeys(candidates):
         entry = table.get(key)
         if entry:
+            if not float(entry[0]) and not float(entry[1]):
+                continue  # 0 / 0 in the price list means unknown there, not free: try the other names
             return Price(float(entry[0]), float(entry[1]), f"LiteLLM price list, {fetched}", key)
     return None
 
@@ -238,6 +244,12 @@ def estimate_tokens(text: Any) -> int:
     return cjk + (len(text) - cjk + 3) // 4
 
 
+# Anthropic reports prompt-cache tokens apart from input_tokens and bills them against the
+# input price: writing the cache at 1.25 times it (5-minute cache), reading at 0.1 times.
+CACHE_RATES = {"cache_creation_input_tokens": 1.25, "cache_read_input_tokens": 0.1}
+CACHE_FIELDS = tuple(CACHE_RATES)
+
+
 def usage_tokens(usage: dict | None, prompt: Any = None, output: Any = None) -> tuple[int, int, bool]:
     """(input, output, estimated) tokens, from reported usage where possible."""
     usage = usage or {}
@@ -245,6 +257,11 @@ def usage_tokens(usage: dict | None, prompt: Any = None, output: Any = None) -> 
     estimated = False
     if not isinstance(inp, (int, float)) or isinstance(inp, bool):
         inp, estimated = estimate_tokens(prompt), True
+    else:  # Anthropic counts prompt-cache tokens apart from input_tokens: as input at its cache rates
+        for key, rate in CACHE_RATES.items():
+            extra = usage.get(key)
+            if isinstance(extra, (int, float)) and not isinstance(extra, bool) and extra > 0:
+                inp += extra * rate
     if not isinstance(out, (int, float)) or isinstance(out, bool):
         out, estimated = estimate_tokens(output), True
     return int(inp), int(out), estimated

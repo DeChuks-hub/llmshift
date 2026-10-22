@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from .textutil import json_loads, json_too_deep
+from .textutil import json_too_deep
 
 _FENCE_OPEN_RE = re.compile(r"\s*(```|~~~)[ \t]*([\w+#.-]*)[^\n]*\n")
 
@@ -28,12 +28,22 @@ def strip_fences(text: str) -> tuple[str, bool, str]:
     return text, False, ""
 
 
-def find_embedded_json(text: str, max_attempts: int = 50) -> tuple[Any, int, int] | None:
+def _not_json(name: str) -> Any:
+    raise ValueError(f"{name} is not allowed in JSON")
+
+
+# Model output is JSON for some other program: NaN and Infinity, which Python's json module
+# reads and writes, are not JSON.
+_STRICT = json.JSONDecoder(parse_constant=_not_json)
+_LENIENT = json.JSONDecoder()  # allow_nan: for a test whose own baseline holds NaN (test files from 0.1.0)
+
+
+def find_embedded_json(text: str, max_attempts: int = 50, *, allow_nan: bool = False) -> tuple[Any, int, int] | None:
     """Find the largest JSON object/array embedded in text. Returns (value, start, end).
 
     The largest span wins, so "As noted in [1], here it is: {...}" yields the object.
     """
-    decoder = json.JSONDecoder()
+    decoder = _LENIENT if allow_nan else _STRICT
     best: tuple[Any, int, int] | None = None
     attempts = 0
     pos_limit = len(text or "")
@@ -57,14 +67,16 @@ def find_embedded_json(text: str, max_attempts: int = 50) -> tuple[Any, int, int
     return best
 
 
-def _loads(text: str) -> Any:
+def _loads(text: str, allow_nan: bool = False) -> Any:
     try:
-        return json_loads(text)
+        if json_too_deep(text):
+            raise RecursionError
+        return (_LENIENT if allow_nan else _STRICT).decode(text)
     except RecursionError:
         raise ValueError("JSON nesting is too deep") from None
 
 
-def analyze_json(text: str) -> dict:
+def analyze_json(text: str, *, allow_nan: bool = False) -> dict:
     """Describe whether `text` is JSON and how it is wrapped.
 
     Returns a dict with keys: valid (exact JSON), value (parsed value or None),
@@ -77,7 +89,7 @@ def analyze_json(text: str) -> dict:
         res["error"] = "empty output"
         return res
     try:
-        res["value"] = _loads(raw)
+        res["value"] = _loads(raw, allow_nan)
         res["valid"] = True
         return res
     except ValueError as exc:
@@ -85,14 +97,14 @@ def analyze_json(text: str) -> dict:
     inner, fenced, lang = strip_fences(raw)
     if fenced:
         try:
-            res["value"] = _loads(inner)
+            res["value"] = _loads(inner, allow_nan)
             res["fenced"] = True
             label = f"```{lang}" if lang else "```"
             res["error"] = f"JSON is wrapped in a markdown code fence ({label} ... ```)"
             return res
         except ValueError:
             pass
-    found = find_embedded_json(raw)
+    found = find_embedded_json(raw, allow_nan=allow_nan)
     if found is not None:
         value, start, end = found
         res["value"] = value
@@ -111,9 +123,9 @@ def analyze_json(text: str) -> dict:
     return res
 
 
-def parse_json_lenient(text: str) -> Any:
+def parse_json_lenient(text: str, *, allow_nan: bool = False) -> Any:
     """Parse JSON from text, tolerating fences and surrounding prose. None if absent."""
-    info = analyze_json(text)
+    info = analyze_json(text, allow_nan=allow_nan)
     return info["value"]
 
 

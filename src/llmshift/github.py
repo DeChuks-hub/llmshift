@@ -189,7 +189,10 @@ def commit_files(root: str | os.PathLike, files: dict[str, bytes], modes: dict[s
             records.append(f"{modes[path]} blob {blob}\t{path}\0")
         git("update-index", "-z", "--index-info", cwd=root, env=env, input="".join(records).encode("utf-8"))
         tree = git("write-tree", cwd=root, env=env).strip()
-    return git(*config, "commit-tree", tree, "-p", parent_sha, "-F", "-", cwd=root, input=message.encode("utf-8")).strip()
+    # commit-tree does not read commit.gpgSign as `git commit` does: a repository that signs
+    # its commits (or requires them signed) gets a signed one.
+    sign = git(*config, "config", "--bool", "commit.gpgSign", cwd=root, check=False).strip() == "true"
+    return git(*config, "commit-tree", *(["-S"] if sign else []), tree, "-p", parent_sha, "-F", "-", cwd=root, input=message.encode("utf-8")).strip()
 
 
 def remote_branch(root: str | os.PathLike, branch: str, remote: str = "origin") -> str | None:
@@ -338,8 +341,17 @@ def fit_markdown(body: str, limit: int = MAX_COMMENT, note: str = "_(truncated: 
     if "\n" in cut:
         cut = cut[: cut.rfind("\n")]
     tail = []
-    if sum(1 for line in cut.splitlines() if line.lstrip().startswith(("```", "~~~"))) % 2:
-        tail.append("```")
+    fence = ""  # the code fence still open where the body was cut
+    for line in cut.splitlines():
+        m = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        if not m:
+            continue
+        if not fence:
+            fence = m.group(1)
+        elif m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not line[m.end():].strip():
+            fence = ""
+    if fence:
+        tail.append(fence)
     tail += ["</details>"] * max(0, len(re.findall(r"<details\b", cut, re.I)) - len(re.findall(r"</details\s*>", cut, re.I)))
     return cut.rstrip() + "\n" + "".join(f"{line}\n" for line in tail) + "\n" + note + "\n"
 

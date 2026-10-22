@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import math
 import random
 import sys
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from typing import Any
 
 from . import console as con
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
-from .textutil import json_loads, jsonl_lines
+from .textutil import json_loads, jsonl_lines, read_text
 
 MIN_LABELS = 5
 VALID = ("pass", "fail")
@@ -44,7 +45,7 @@ def load_labels(path: Path) -> list[dict]:
     if not path.exists():
         return []
     out = []
-    for n, line in enumerate(jsonl_lines(path.read_text(encoding="utf-8-sig")), 1):
+    for n, line in enumerate(jsonl_lines(read_text(path)), 1):
         if not line.strip():
             continue
         try:
@@ -177,6 +178,7 @@ class Calibration:
     kappa: float | None = None
     disagreements: list = field(default_factory=list)
     created_at: str = ""
+    error: str | None = None  # why the judge gave no verdict (not saved)
 
     @property
     def rate(self) -> float:
@@ -233,6 +235,7 @@ def run_calibration(labels: list[dict], judge: Any, *, labels_name: str = "", ca
         cal.disagreements.append({"id": rec.get("id"), "label": rec["label"], "judge": got, "candidate": _show(rec["candidate"], 200)})
     cal.n = len(compared)
     cal.kappa = cohen_kappa(compared)
+    cal.error = ctx.judge_error
     return cal
 
 
@@ -250,6 +253,9 @@ def cmd_calibrate(args: Any, cfg: dict) -> int:
     judge = resolve(spec, cfg)
     con.out(con.style(f"Asking {judge.spec} about {len(labels)} labelled pair(s)...", "grey"), err=True)
     cal = run_calibration(labels, judge, labels_name=str(path), cache=_cache(cfg, args), concurrency=args.concurrency or int(cfg.get("concurrency", 4)))
+    if not cal.n:  # nothing to measure: an earlier check of this judge stays as it was
+        con.fail(f"{judge.spec} gave no usable verdict on {len(labels)} pair(s)" + (f": {cal.error}" if cal.error else ""))
+        return EXIT_FAIL
     out = calibration_path(cfg)
     out.parent.mkdir(parents=True, exist_ok=True)
     judges = _calibrations(out)
@@ -266,7 +272,8 @@ def cmd_calibrate(args: Any, cfg: dict) -> int:
             if cal.too_strict:
                 con.out(f"  too strict {cal.too_strict}x: failed an answer you accepted")
         if cal.errors:
-            con.out(con.style(f"  {cal.errors} judge reply(ies) could not be read", "yellow"))
+            why = f": {cal.error}" if cal.error else " (no verdict in the reply)"
+            con.out(con.style(f"  {cal.errors} pair(s) got no verdict from the judge{why}", "yellow"))
         for d in cal.disagreements[:5]:
             con.out(con.style(f"    {d['id']}: you said {d['label']}, the judge said {d['judge']} - {d['candidate']}", "grey"))
         con.out(con.style(f"  saved to {out}; `llmshift compare` will quote this agreement", "grey"))
@@ -298,7 +305,9 @@ def calibration_note(judge_spec: str, cfg: dict) -> str | None:
     data = judges.get(judge_spec)
     if data is None:
         return f"Your labels were checked with {', '.join(sorted(judges))}; run `llmshift judge calibrate --judge {judge_spec}` to check this judge."
-    rate, n = data.get("rate") or 0.0, data.get("n") or 0
+    rate, n = data.get("rate"), data.get("n")
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (rate, n)):
+        return f"The saved check of judge {judge_spec} cannot be read; run `llmshift judge calibrate --judge {judge_spec}` again."
     when = str(data.get("created_at") or "")[:10]
     note = f"Judge {judge_spec} agrees with your labels on {data.get('agree', 0)} of {n} pairs ({rate:.0%}; checked {when})."
     if rate < 0.8:

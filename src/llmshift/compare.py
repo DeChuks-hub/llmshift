@@ -25,9 +25,9 @@ from .messages import request_preview
 from .providers import resolve
 from .providers.base import Provider, Response
 from .runner import adaptations, run_cases
-from .stats import cases_needed, mcnemar_p, pass_rate_interval
+from .stats import cases_needed, mcnemar_p, pass_rate_interval, stored_rate
 from .testset import TestCase, unique_ids
-from .textutil import word_count
+from .textutil import plural, word_count
 
 JUDGE_CHECKS = ("llm_judge", "llm_label", "llm_score", "modelgraded")
 
@@ -225,7 +225,12 @@ def failure_patterns(result: CheckResult) -> list[str]:
         return out or ["tool arguments changed"]
     if result.type == "llm_judge" and d.get("differences"):
         return [_short(str(x)) for x in d["differences"][:3]]
-    msg = re.sub(r"\s*\((?!s\)).*?\)", "", result.message or result.type)  # keep the "(s)" of "call(s)"
+    msg = (result.message or result.type)[:300]  # a pattern is a short phrase; the regex below is quadratic in a long one
+    for _ in range(10):  # asides in brackets, innermost first, so "(a (b) c)" goes whole; the "(s)" of "call(s)" stays
+        shorter = re.sub(r"\s*\((?!s\))[^()]*\)", "", msg)
+        if shorter == msg:
+            break
+        msg = shorter
     msg = re.sub(r'"[^"]*"', '"..."', msg)
     return [_short(msg) or result.type]
 
@@ -297,7 +302,7 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
         "warned": counts["warn"],
         "failed": counts["fail"],
         "errors": counts["error"],
-        "pass_rate": round(rate, 4) if total else 0.0,
+        "pass_rate": stored_rate(rate) if total else 0.0,
         "pass_rate_range": [round(low, 4), round(high, 4)] if total else None,
         "cases_needed": cases_needed(rate) if total else None,  # for a pass rate accurate to +/- 5 points
         "repeats": max((c.runs for c in cases), default=1),
@@ -391,7 +396,7 @@ def build_insights(summary: dict, cases: list[CaseResult], adapt: list[str]) -> 
     if 0 < total < need:
         low, high = summary.get("pass_rate_range") or (0, 1)
         out.append(
-            f"With {total} cases the pass rate is only known to within {low:.0%}-{high:.0%}; "
+            f"With {plural(total, 'case')} the pass rate is only known to within {low:.0%}-{high:.0%}; "
             f"about {need} cases would pin it down to +/-5 points."
         )
     if summary.get("errors") and evaluated == 0:
@@ -540,8 +545,10 @@ def run_compare(
         label=label,
     )
     res.insights = build_insights(summary, results, adapt)
+    if ctx.judge_failed:  # a dead judge is said first, not hidden behind "0 judge calls"
+        res.insights.insert(0, f"The judge failed on {ctx.judge_failed} of {ctx.judge_calls + ctx.judge_failed} call(s), so those checks could not be decided: {ctx.judge_error}")
     if ctx.judge_calls or ctx.judge_skipped:
-        note = f"{ctx.judge_calls} judge call(s) made"
+        note = f"{ctx.judge_calls} judge call(s) answered"
         if ctx.judge_skipped:
             note += f"; {ctx.judge_skipped} skipped because the rule-based checks already decided"
         res.insights.append(note + ".")
@@ -608,10 +615,12 @@ def combine_runs(runs: list[CaseResult]) -> CaseResult:
     shown = max(counts, key=lambda st: (counts[st], _ORDER.get(st, 0)))
     result = next(r for r in runs if r.status == shown)
     passed = sum(1 for st in statuses if st in ("pass", "warn"))
+    answered = sum(1 for st in statuses if st != "error")
     result.runs = len(runs)
     result.run_statuses = statuses
-    result.pass_fraction = round(passed / len(runs), 4)
-    result.flaky = 0 < passed < len(runs)
+    result.pass_fraction = round(passed / len(runs), 4)  # a run that got no answer has not passed
+    # Flaky is the model answering differently, not a request that failed (a timeout, a 429).
+    result.flaky = 0 < passed < answered
     return result
 
 

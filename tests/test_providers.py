@@ -245,7 +245,7 @@ def test_keys_with_stray_characters_never_appear_in_errors(server, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-AUDITSECRET\r\n")
     p = resolve("openai:gpt-test", {"providers": {"openai": {"base_url": server.url + "/v1"}}})
     assert p.complete(req()).text == "ok" and server.requests[-1]["headers"]["authorization"] == "Bearer sk-test-AUDITSECRET"
-    for key in ("sk-test-AUDIT​SECRET", "sk-test-AUDIT\nSECRET"):
+    for key in ("sk-test-AUDIT\u200bSECRET", "sk-test-AUDIT\nSECRET"):
         for spec, options in (("openai:gpt-test", {"base_url": server.url + "/v1"}), ("anthropic:claude-test", {"base_url": server.url}), ("gemini:gemini-test", {"base_url": server.url})):
             provider = resolve(spec, {"providers": {spec.split(":")[0]: {**options, "api_key": key}}, "max_retries": 0})
             with pytest.raises(ProviderError) as info:
@@ -274,3 +274,70 @@ def test_urls_with_secrets_stay_out_of_messages():
         with pytest.raises(ProviderError) as info:
             http.request("GET", url, max_retries=0)
         assert info.value.code == "invalid_url"
+
+
+# ------------------------------------------------------------- odd replies
+
+
+def test_odd_replies_and_cache_entries_never_crash(server):
+    from llmshift.providers.base import Response
+
+    # Whatever a provider or a tampered cache file holds, the fields get usable types.
+    r = Response.from_dict({"text": None, "usage": {"input_tokens": float("nan"), "output_tokens": "12", "x": {"a": 1}, "y": -1, "z": True, "ok": 7},
+                            "model": {"a": 1}, "latency_ms": "slow", "tool_calls": ["x", {"name": "f"}], "cached": "yes"})
+    assert r.text == "" and r.usage == {"ok": 7} and r.model == "{'a': 1}" and r.latency_ms is None and r.tool_calls == [{"name": "f"}] and r.cached is False
+    # A 200 of an unexpected shape is a provider error, never an AttributeError or TypeError.
+    for body in ({"choices": "x"}, {"choices": [{"message": "hi"}]}, {"choices": [None]}, {"choices": [{"message": {"content": "ok"}}], "usage": "x"}):
+        server.route("POST", "/v1/chat/completions", lambda r, body=body: body)
+        try:
+            resp = openai(server).complete(req())
+            assert isinstance(resp.text, str)
+        except ProviderError as exc:
+            assert exc.code in ("invalid_response",), body
+
+
+def test_prices_and_cache_tokens():
+    from llmshift import pricing
+
+    assert pricing.price_for("deepseek:deepseek-v3-2-251201") is None  # 0/0 in LiteLLM's list: unknown, not free
+    assert pricing.price_for("x:y", {"x:y": pricing.Price(0.0, 0.0, "--price")}).input == 0.0  # your own 0 is a price
+    usage = {"input_tokens": 120, "output_tokens": 50, "cache_read_input_tokens": 15000, "cache_creation_input_tokens": 400}
+    assert pricing.usage_tokens(usage) == (120 + 1500 + 500, 50, False)  # cache read at 0.1, writes at 1.25
+    huge = {"a": {"mode": "chat", "input_cost_per_token": 1e308, "output_cost_per_token": 1e-6}, "b": {"mode": "chat", "input_cost_per_token": 2.5e-6, "output_cost_per_token": 1e-5}}
+    assert pricing.convert_litellm(huge) == {"b": [2.5, 10.0]}  # one absurd entry is skipped, not the table
+    assert pricing.prices_problems({"fetched": "2099-01-01", "prices": {"b": [2.5, 10.0]}}) == ["'fetched' date 2099-01-01 is in the future"]
+
+
+def test_command_providers_honour_the_timeout_and_notice_edited_scripts(tmp_path):
+    import time
+
+    sleeper = tmp_path / "sleeper.py"
+    sleeper.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")  # never reads its input
+    prov = resolve("cmd:m", {"providers": {"cmd": {"type": "command", "command": [sys.executable, str(sleeper)], "timeout": 2}}})
+    start = time.monotonic()
+    with pytest.raises(ProviderError) as info:
+        prov.complete(req("x" * 200_000))  # far more than a pipe holds
+    assert info.value.code == "timeout" and time.monotonic() - start < 15
+    # The cache key changes with the script, so an edited script is never answered from cache.
+    script = tmp_path / "answer.py"
+    script.write_text("print('one')\n", encoding="utf-8")
+    spec = {"providers": {"cmd": {"type": "command", "command": f'"{sys.executable}" "{script}"'}}}
+    before = resolve("cmd:m", spec).identity()
+    script.write_text("print('two')\n", encoding="utf-8")
+    assert resolve("cmd:m", spec).identity() != before
+
+
+@pytest.mark.parametrize("value, url", [
+    ("0.0.0.0", "http://127.0.0.1:11434"),  # every interface, to a server: this machine, to a client
+    ("localhost", "http://localhost:11434"),
+    (":11434", "http://127.0.0.1:11434"),
+    ("HTTP://Box:1", "http://Box:1"),
+    ("box:abc", "http://box:11434"),
+    ("https://ollama.example.com/", "https://ollama.example.com:443"),
+    ("https://example.com/ollama", "https://example.com:443/ollama"),
+    ("::1", "http://[::1]:11434"),
+    ("[::]:9", "http://127.0.0.1:9"),
+])
+def test_ollama_host_is_read_the_way_ollama_reads_it(monkeypatch, value, url):
+    monkeypatch.setenv("OLLAMA_HOST", value)
+    assert resolve("ollama:llama3.1").base_url == url + "/v1"

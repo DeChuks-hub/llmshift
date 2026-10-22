@@ -15,7 +15,7 @@ from . import __version__
 from . import console as con
 from .config import SAMPLE_CONFIG, ConfigError, load_config
 from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
-from .textutil import json_loads
+from .textutil import json_loads, plural, read_text
 
 # Commands in their own modules; each provides register(subparsers).
 EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow", "mcp", "prcheck", "upgrade", "embedmig", "feed")
@@ -25,7 +25,10 @@ EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow", "mcp", "
 
 
 def _timestamp() -> str:
-    return _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    """For report file names; down to the millisecond, so two runs in the same second
+    (a script, two CI steps) do not overwrite each other's reports."""
+    now = _dt.datetime.now()
+    return now.strftime("%Y%m%d-%H%M%S-") + f"{now.microsecond // 1000:03d}"
 
 
 def _write(path: str | Path, text: str) -> Path:
@@ -61,9 +64,16 @@ def _github_output(name: str, value: Any) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
         return
+    text = str(value)
     try:
         with open(path, "a", encoding="utf-8", errors="replace") as fh:
-            fh.write(f"{name}={value}\n")
+            if "\n" in text or "\r" in text:  # a line break would start another output: the multi-line form
+                import secrets
+
+                delimiter = f"llmshift_{secrets.token_hex(8)}"
+                fh.write(f"{name}<<{delimiter}\n{text}\n{delimiter}\n")
+            else:
+                fh.write(f"{name}={text}\n")
     except OSError:
         pass
 
@@ -85,17 +95,18 @@ def _load_cases(cfg: dict, args: argparse.Namespace) -> tuple[list, str]:
     path = _tests_path(cfg, args)
     if not Path(path).exists():
         raise UsageError(f"test file {path} not found. Create one with `llmshift snapshot <logs>` or `llmshift import openai-evals ...`.")
-    cases = load_tests(path)
     groups = set(getattr(args, "group", None) or [])
     tags = set(getattr(args, "tag", None) or [])
     ids = set(getattr(args, "case", None) or [])
-    if groups:
-        cases = [c for c in cases if c.group in groups or any(g in (c.group or "") for g in groups)]
-    if tags:
-        cases = [c for c in cases if tags & set(c.tags)]
+    limit = getattr(args, "limit", None)
+
+    def keep(c: Any) -> bool:
+        return (not groups or c.group in groups or any(g in (c.group or "") for g in groups)) and (not tags or bool(tags & set(c.tags)))
+
+    # --case names ids as they are after duplicates are renamed, so it reads the whole file.
+    cases = load_tests(path, limit=int(limit) if limit and not ids else None, keep=keep)
     if ids:
         cases = [c for c in cases if c.id in ids]
-    limit = getattr(args, "limit", None)
     if limit:
         cases = cases[: int(limit)]
     if not cases:
@@ -129,7 +140,7 @@ def _load_compare_json(path: str) -> Any:
     from .compare import CompareResult
 
     try:
-        data = json_loads(Path(path).read_text(encoding="utf-8-sig"))
+        data = json_loads(read_text(path))
     except FileNotFoundError:
         raise UsageError(f"{path} not found") from None
     except (OSError, UnicodeDecodeError, ValueError, RecursionError) as exc:
@@ -223,16 +234,20 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install llmshift
       # Fails the job if the code calls a retired model; annotates retiring ones on the diff.
       - run: llmshift scan --fail-on retired
-      # Re-runs the test set against the candidate model (needs your provider key as a secret).
-      - run: llmshift compare --to "${{ vars.LLMSHIFT_CANDIDATE || 'openai:gpt-5.6-sol' }}"
+      # Re-runs the test set against the candidate model (needs your provider key as a secret):
+      # the repository variable LLMSHIFT_CANDIDATE if set, else candidate: in llmshift.yaml.
+      - run: llmshift compare ${LLMSHIFT_CANDIDATE:+--to "$LLMSHIFT_CANDIDATE"}
         if: ${{ hashFiles('.llmshift/tests.jsonl') != '' }}
         env:
+          LLMSHIFT_CANDIDATE: ${{ vars.LLMSHIFT_CANDIDATE }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -258,6 +273,8 @@ jobs:
       issues: write          # for the github alert
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -268,8 +285,10 @@ jobs:
           path: .llmshift/watch
           key: llmshift-watch-${{ github.run_id }}
           restore-keys: llmshift-watch-
-      - run: llmshift watch --model "${{ vars.LLMSHIFT_MODEL || 'openai:gpt-5.6-sol' }}" --alert github
+      # The repository variable LLMSHIFT_MODEL if set, else watch.model (or candidate:) in llmshift.yaml.
+      - run: llmshift watch ${LLMSHIFT_MODEL:+--model "$LLMSHIFT_MODEL"} --alert github
         env:
+          LLMSHIFT_MODEL: ${{ vars.LLMSHIFT_MODEL }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -278,13 +297,48 @@ jobs:
 """
 
 
+def _init_models(baseline: str | None, candidate: str | None) -> tuple[str | None, str | None]:
+    """init's defaults where --baseline / --candidate are not given: the model this project's
+    code calls most, and the replacement its provider lists for it when it is going away."""
+    if baseline and candidate:
+        return baseline, candidate
+    try:
+        from collections import Counter
+
+        from .providers import known_providers
+        from .scanner import scan_paths
+
+        # a sample is enough to see the model in use; a huge folder must not stall init
+        known = [f.lookup for f in scan_paths(["."], max_files=2000).findings if f.lookup is not None and f.lookup.status != "unknown"]
+        top = Counter(lk.model for lk in known).most_common(1)
+    except Exception:  # an unreadable folder: no defaults rather than no config
+        return baseline, candidate
+    if not top:
+        return baseline, candidate
+    lk = next(lk for lk in known if lk.model == top[0][0])
+    prefix = lk.provider.lower() if lk.provider and lk.provider.lower() in known_providers(None) else None
+
+    def spec(model: str) -> str:
+        return f"{prefix}:{model}" if prefix else model
+
+    if lk.status in ("retired", "retiring", "deprecated") and lk.replacement and not candidate:
+        candidate = spec(lk.replacement)
+    return baseline or spec(lk.model), candidate
+
+
 def cmd_init(args: argparse.Namespace, cfg: dict) -> int:
     path = Path(args.path or "llmshift.yaml")
     if path.exists() and not args.force:
         con.out(f"{path} already exists (use --force to overwrite).")
     else:
-        _write(path, SAMPLE_CONFIG.format(baseline=args.baseline or "openai:gpt-4o-2024-08-06", candidate=args.candidate or "openai:gpt-5.6-sol"))
-        con.out(f"{con.style(con.sym('pass'), 'green')} wrote {_rel(path)}")
+        baseline, candidate = _init_models(args.baseline, args.candidate)
+        _write(path, SAMPLE_CONFIG.format(
+            baseline=baseline or "provider:model", baseline_off="" if baseline else "# ",
+            candidate=candidate or "provider:model", candidate_off="" if candidate else "# ",
+        ))
+        con.out(f"{con.style(con.sym('pass'), 'green')} wrote {_rel(path)}" + (f" (baseline {baseline}, the model your code calls most)" if baseline and not args.baseline else ""))
+        if not candidate:
+            con.out("  Set candidate: in it, or pass --to to compare and fix, once you know the model to move to.")
     if args.github:
         for name, text in (("llmshift.yml", WORKFLOW_PR), ("llmshift-watch.yml", WORKFLOW_WATCH)):
             wf = Path(".github/workflows") / name
@@ -573,7 +627,7 @@ def cmd_fix(args: argparse.Namespace, cfg: dict) -> int:
         if previous.candidate.split(":", 1)[-1] != candidate.split(":", 1)[-1]:
             con.warn(f"{args.from_results} was produced for {previous.candidate}, not {candidate}; re-running compare instead")
             previous = None
-    con.out(con.style(f"Looking for prompt changes so {candidate} matches the baseline ({len(cases)} cases)...", "grey"), err=True)
+    con.out(con.style(f"Looking for prompt changes so {candidate} matches the baseline ({plural(len(cases), 'case')})...", "grey"), err=True)
     result = run_fix(
         cases,
         candidate,
@@ -714,6 +768,7 @@ def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
             sleep_until_next(args.every, args.at)
             continue
         s = outcome.summary
+        _github_output("pass_rate", s.get("pass_rate"))  # the action's pass-rate output, as for compare
         con.out(con.style("LLMShift watch", "bold") + f"  {outcome.model}  run {outcome.run_id}")
         sim = f", similarity to baseline {s['similarity']:.2f}" if s.get("similarity") is not None else ""
         con.out(f"  pass rate {s['pass_rate']:.0%} ({s['passed'] + s['warned']}/{s['evaluated']}), {s['failed']} failing, {s['errors']} errors{sim}")
@@ -910,6 +965,7 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict) -> int:
 
     from .registry import Registry
 
+    problems = 0
     con.out(con.style("LLMShift doctor", "bold"))
     con.out(f"  llmshift {__version__} on Python {platform.python_version()} ({platform.system()})")
     cfg_path = getattr(cfg, "path", None)
@@ -929,8 +985,9 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict) -> int:
 
         try:
             n = len(load_tests(tests))
-            con.out(f"  tests: {tests} ({n} cases)")
+            con.out(f"  tests: {tests} ({plural(n, 'case')})")
         except Exception as exc:
+            problems += 1
             con.out(con.style(f"  tests: {tests} is invalid: {exc}", "red"))
     else:
         con.out(f"  tests: {tests} (not created yet)")
@@ -951,12 +1008,18 @@ def cmd_doctor(args: argparse.Namespace, cfg: dict) -> int:
     for spec in [cfg.get("baseline"), cfg.get("candidate"), cfg.get("judge")]:
         if spec:
             from .providers import resolve
+            from .providers.http import display_url
 
             try:
                 p = resolve(spec, cfg)
-                con.out(f"  {spec}: {p.__class__.__name__} ({getattr(p, 'base_url', '') or p.kind})")
+                base_url = getattr(p, "base_url", "")
+                con.out(f"  {spec}: {p.__class__.__name__} ({display_url(base_url) if base_url else p.kind})")
             except Exception as exc:
+                problems += 1
                 con.out(con.style(f"  {spec}: {exc}", "red"))
+    if problems:  # a CI step running doctor fails on what it found
+        con.out(con.style(f"  {plural(problems, 'problem')} found", "red", "bold"))
+        return EXIT_FAIL
     return EXIT_OK
 
 
@@ -1148,10 +1211,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _global_options_first(argv: list[str]) -> list[str]:
+    """`llmshift compare --config x.yaml` as well as `llmshift --config x.yaml compare`: the
+    global options are moved in front of the subcommand before parsing (giving every
+    subcommand its own copy would make abbreviations like --no-c ambiguous)."""
+    front: list[str] = []
+    rest: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":  # what follows is the subcommand's, as it is
+            rest.extend(argv[i:])
+            break
+        if arg == "--no-color" or arg.startswith("--config="):
+            front.append(arg)
+        elif arg == "--config" and i + 1 < len(argv):
+            front += [arg, argv[i + 1]]
+            i += 1
+        else:
+            rest.append(arg)
+        i += 1
+    return front + rest
+
+
 def main(argv: list[str] | None = None) -> int:
     con.setup_streams()
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_global_options_first(list(sys.argv[1:] if argv is None else argv)))
     if args.no_color:
         con.set_color(False)
     if not getattr(args, "command", None):
@@ -1168,6 +1254,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.command != "mcp":
                 raise
             cfg = {}  # the server reads the config for every tool call, where it works: tools report the problem
+        if args.command != "mcp":  # the server's output is the protocol
+            for warning in getattr(cfg, "warnings", []):
+                con.warn(warning)
         return int(args.func(args, cfg) or 0)
     except KeyboardInterrupt:
         con.err("\ninterrupted")
@@ -1197,7 +1286,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def entry() -> None:
     """Console-script entry point."""
-    code = main()
+    try:
+        code = main()
+    except SystemExit:  # --help and --version end inside argparse
+        con.finish_output()
+        raise
+    con.finish_output()
     if code == EXIT_INTERRUPTED:
         # Worker threads may still be blocked in network reads: exit without waiting for them.
         for stream in (sys.stdout, sys.stderr):

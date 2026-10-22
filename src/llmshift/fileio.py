@@ -18,6 +18,20 @@ from pathlib import Path
 LOCK_TIMEOUT = 15.0  # seconds to wait for other writers
 _LOCK_OFFSET = 1 << 40
 
+
+def long_path(path: str | os.PathLike, *, always: bool = False) -> str:
+    """The path as Windows' file functions accept it past 260 characters (the \\\\?\\ form,
+    absolute) when it is that long, or `always` (a folder to walk: what lies below it may
+    be); elsewhere, and for shorter paths, as it is."""
+    text = os.fspath(path)
+    if os.name != "nt" or text.startswith("\\\\?\\"):
+        return text
+    full = os.path.abspath(text)
+    if len(full) < 240 and not always:  # room for the names below a folder
+        return text
+    return "\\\\?\\UNC\\" + full[2:] if full.startswith("\\\\") else "\\\\?\\" + full
+
+
 if os.name == "nt":
     import msvcrt
 
@@ -67,15 +81,22 @@ def append(path: str | os.PathLike, data: bytes) -> None:
     so the broken line never swallows this record."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(target), os.O_RDWR | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    flags = os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    try:  # read access, to look at the last byte
+        fd = os.open(str(target), os.O_RDWR | flags, 0o644)
+    except OSError:  # a write-only file or device (/dev/stdout in a container)
+        fd = os.open(str(target), os.O_WRONLY | flags, 0o644)
     try:
         _lock(fd)
         try:
-            end = os.lseek(fd, 0, os.SEEK_END)
-            if end > 0:
-                os.lseek(fd, end - 1, os.SEEK_SET)
-                if os.read(fd, 1) != b"\n":
-                    data = b"\n" + data
+            try:
+                end = os.lseek(fd, 0, os.SEEK_END)
+                if end > 0:
+                    os.lseek(fd, end - 1, os.SEEK_SET)
+                    if os.read(fd, 1) != b"\n":
+                        data = b"\n" + data
+            except OSError:  # a pipe or a terminal cannot seek (or be read): nothing to repair there
+                pass
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view):]

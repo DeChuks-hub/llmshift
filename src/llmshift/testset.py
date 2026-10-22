@@ -20,7 +20,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from . import fileio
 from . import messages as msgs
@@ -29,6 +29,7 @@ from .textutil import (
     has_surrogate_escape,
     json_loads,
     jsonl_lines,
+    read_text,
     stable_hash,
 )
 
@@ -118,7 +119,8 @@ class TestCase:
     def _from_dict(cls, data: dict, prefix: str) -> "TestCase":
         raw_input = data.get("input")
         for where, value in (("params", (raw_input or {}).get("params") if isinstance(raw_input, dict) else data.get("params")), ("vars", data.get("vars")), ("metadata", data.get("metadata"))):
-            if value is not None and not isinstance(value, dict):
+            # [] is what some JSON writers (PHP's json_encode) make of an empty map: read as {}
+            if value is not None and not isinstance(value, dict) and value != []:
                 raise TestFileError(f"{prefix}'{where}' must be an object, got {type(value).__name__}")
         try:
             if isinstance(raw_input, dict):
@@ -207,11 +209,11 @@ def case_id_for(inp: dict) -> str:
 def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
     suffix = ".jsonl" if lines else path.suffix.lower()
     try:
-        text = path.read_text(encoding="utf-8-sig")
+        text = read_text(path)
     except FileNotFoundError:
         raise TestFileError(f"test file not found: {path}") from None
-    except UnicodeDecodeError as exc:
-        raise TestFileError(f"{path}: not UTF-8 text ({exc})") from None
+    except ValueError as exc:  # not UTF-8 (or UTF-16) text
+        raise TestFileError(str(exc)) from None
     if suffix in (".jsonl", ".ndjson"):
         for lineno, line in enumerate(jsonl_lines(text), 1):
             if not line.strip():
@@ -254,47 +256,66 @@ def _iter_records(path: Path, lines: bool = False) -> Iterable[tuple[Any, str]]:
         yield item, f"{path}[{i}]"
 
 
-def load_tests(path: str | os.PathLike) -> list[TestCase]:
+def load_tests(path: str | os.PathLike, *, limit: int | None = None, keep: Callable[[TestCase], bool] | None = None) -> list[TestCase]:
+    """The test cases in a file or a folder of files. With `limit`, reading stops once that
+    many cases (those `keep` accepts) are in: `compare --limit 5` on a huge file is quick."""
     p = Path(path)
     if p.is_dir():
         files = sorted(list(p.glob("*.jsonl")) + list(p.glob("*.yaml")) + list(p.glob("*.yml")) + list(p.glob("*.json")))
         if not files:
             raise TestFileError(f"no test files (*.jsonl, *.yaml, *.json) in {p}")
-        cases: list[TestCase] = []
-        for f in files:
-            cases.extend(load_tests(f))
-        return _dedupe_ids(cases)
-    cases = [TestCase.from_dict(rec, where) for rec, where in _iter_records(p)]
-    return _dedupe_ids(cases)
+    else:
+        files = [p]
+    rename = _renamer()  # ids are renamed before `keep` looks: a case has the same id however it is selected
+    cases: list[TestCase] = []
+    for f in files:
+        for rec, where in _iter_records(f):
+            case = rename(TestCase.from_dict(rec, where))
+            if keep is None or keep(case):
+                cases.append(case)
+                if limit and len(cases) >= limit:
+                    return cases
+    return cases
 
 
 def unique_ids(cases: list[TestCase]) -> list[TestCase]:
     """Return the cases, with shallow copies renamed where IDs collide (inputs untouched)."""
     import copy
 
-    seen: dict[str, int] = {}
+    rename = _renamer()
     out = []
     for case in cases:
-        if case.id in seen:
-            seen[case.id] += 1
-            dup = copy.copy(case)
-            dup.id = f"{case.id}-{seen[case.id]}"
-            out.append(dup)
-        else:
-            seen[case.id] = 1
+        new = rename.next_id(case.id)
+        if new == case.id:
             out.append(case)
+        else:
+            dup = copy.copy(case)
+            dup.id = new
+            out.append(dup)
     return out
 
 
-def _dedupe_ids(cases: list[TestCase]) -> list[TestCase]:
-    seen: dict[str, int] = {}
-    for case in cases:
-        if case.id in seen:
-            seen[case.id] += 1
-            case.id = f"{case.id}-{seen[case.id]}"
-        else:
-            seen[case.id] = 1
-    return cases
+class _renamer:
+    """Gives a repeated case id the next free suffix (c, c-2, c-3...), so every id is
+    unique even when a file already holds a "c-2"."""
+
+    def __init__(self) -> None:
+        self.used: set[str] = set()
+        self.last: dict[str, int] = {}
+
+    def next_id(self, case_id: str) -> str:
+        if case_id in self.used:
+            n = self.last.get(case_id, 1) + 1
+            while f"{case_id}-{n}" in self.used:
+                n += 1
+            self.last[case_id] = n
+            case_id = f"{case_id}-{n}"
+        self.used.add(case_id)
+        return case_id
+
+    def __call__(self, case: TestCase) -> TestCase:
+        case.id = self.next_id(case.id)
+        return case
 
 
 def atomic_write(path: str | os.PathLike, text: str) -> None:
@@ -305,11 +326,13 @@ def atomic_write(path: str | os.PathLike, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace", newline="\n") as fh:
             fh.write(text)
         os.replace(tmp, p)
-    except BaseException:
+    except BaseException as exc:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+        if isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):  # name the file, not the temporary one
+            raise OSError(exc.errno, exc.strerror, str(p)) from None
         raise
 
 

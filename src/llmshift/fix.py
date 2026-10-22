@@ -25,8 +25,10 @@ from . import tone as tonelib
 from .compare import CaseResult, CompareResult, run_compare
 from .jsonschema_lite import describe as describe_schema
 from .providers import resolve
+from .providers.base import ProviderError
+from .stats import stored_rate
 from .testset import TestCase, group_key, groups_of, unique_ids
-from .textutil import language_name, normalize, shorten, unified_diff, word_count
+from .textutil import language_name, md_fence, normalize, shorten, unified_diff, word_count
 
 HEADER = "Output requirements:"
 
@@ -125,7 +127,7 @@ def _stats(cases: list[CaseResult]) -> dict:
         "changed": counts["warn"],
         "failed": counts["fail"],
         "errors": counts["error"],
-        "pass_rate": round((counts["pass"] + counts["warn"]) / n, 4) if n else 0.0,
+        "pass_rate": stored_rate((counts["pass"] + counts["warn"]) / n) if n else 0.0,
         "score": _score(cases),
     }
 
@@ -330,7 +332,7 @@ def optimize_prompt(optimizer: Any, original: str, failures: list[CaseResult], c
 
 def find_prompt_locations(prompt: str, paths: list[str], limit: int = 3) -> list[str]:
     """Where does this system prompt live in the codebase?"""
-    from .scanner import _read_text, iter_source_files
+    from .scanner import _read_text, is_llmshift_output, iter_source_files
 
     lines = [ln.strip() for ln in prompt.splitlines() if len(ln.strip()) >= 20]
     if not lines:
@@ -343,9 +345,15 @@ def find_prompt_locations(prompt: str, paths: list[str], limit: int = 3) -> list
     except FileNotFoundError:
         return []
     for _root, path in files[:20000]:
+        if path.suffix.lower() in (".jsonl", ".ndjson"):  # recorded traffic and test files hold every prompt
+            continue
         text, _skipped = _read_text(path)
         if not text or needle[:20] not in text and not any(n in text for n in needles):
             continue
+        if is_llmshift_output(path, text):  # an earlier fix report quotes the prompt too
+            continue
+        if path.suffix.lower() == ".json" and any(k in text for k in ('"choices"', '"usage"', '"llmshift_record"', '"response"')):
+            continue  # a saved request log: it holds the prompt, but the prompt does not live there
         for lineno, line in enumerate(text.splitlines(), 1):
             if any(n in line for n in needles):
                 try:
@@ -382,6 +390,7 @@ def run_fix(
     cases = unique_ids(cases)
     cand = resolve(candidate, config) if isinstance(candidate, str) else candidate
     opt = resolve(optimizer, config) if isinstance(optimizer, str) else optimizer
+    opt_error: str | None = None  # once the optimizer fails, the other groups do without it
     common = dict(judge=judge, config=config, concurrency=concurrency, cache=cache, allow_python=allow_python, severity=severity, show_progress=show_progress)
     initial = previous if previous is not None else run_compare(cases, cand, **common)
     by_result = {c.id: c for c in initial.cases}
@@ -423,14 +432,23 @@ def run_fix(
         elif example:
             candidates.append(("example", [], True, compose(original, [], example)))
         used: list[str] = []
+        tried: set[str] = {original}
         for round_no in range(max(1, rounds)):
-            if opt is not None:
+            if opt is not None and opt_error is None:
                 failing_now = [r for r in best_results if r.status in ("fail", "warn")]
-                rewritten = optimize_prompt(opt, original, failing_now or bad, by_case, best_patch["system"] if best_patch else None)
+                try:
+                    rewritten = optimize_prompt(opt, original, failing_now or bad, by_case, best_patch["system"] if best_patch else None)
+                except ProviderError as exc:  # a wrong key or model: the rule-based fixes still run
+                    opt_error = str(exc)
+                    fix.notes.append(f"The optimizer {opt.spec} failed, so only rule-based changes were tried: {exc}")
+                    rewritten = None
                 if rewritten:
                     candidates.append(("optimizer", [], False, rewritten))
+            # A prompt already tried (the optimizer repeating itself) costs another run and teaches nothing.
+            candidates = [c for c in candidates if c[3] not in tried]
             if not candidates:
                 break
+            tried.update(c[3] for c in candidates)
             round_best = None
             for strategy, added, with_example, prompt in candidates:
                 patch = {"system": prompt}
@@ -528,8 +546,8 @@ def fix_markdown(fix: FixResult) -> str:
             lines.append("Instructions added:")
             lines += [f"- {x}" for x in g.added]
         if g.suggested_prompt:
-            lines += ["", "<details><summary>Diff</summary>", "", "```diff", g.diff.rstrip(), "```", "", "</details>", ""]
-            lines += ["Suggested system prompt:", "", "```text", g.suggested_prompt, "```"]
+            lines += ["", "<details><summary>Diff</summary>", "", md_fence(g.diff.rstrip(), "diff"), "", "</details>", ""]
+            lines += ["Suggested system prompt:", "", md_fence(g.suggested_prompt, "text")]
         if g.remaining:
             lines += ["", "Still different after the fix:"] + [f"- {x}" for x in g.remaining[:8]]
         for note in g.notes:

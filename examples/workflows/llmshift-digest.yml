@@ -1,0 +1,33 @@
+# Copy to .github/workflows/llmshift-digest.yml
+# Every Monday: list the AI models this repository uses that are retired or retire
+# within 30 days, and post the list to Slack (set the SLACK_WEBHOOK_URL secret).
+# To cover several repositories, check each one out into its own folder and pass
+# all the folders to `llmshift digest`.
+name: llmshift-digest
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python -m pip install --disable-pip-version-check llmshift
+
+      - name: Latest retirement dates
+        run: llmshift update
+        continue-on-error: true   # the bundled data is used if the download fails
+
+      - name: Post the digest
+        run: llmshift digest . --within 30 --alert slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

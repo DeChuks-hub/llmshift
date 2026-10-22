@@ -1,8 +1,10 @@
 """Model prices and request costs (USD).
 
 The bundled table (data/pricing.json) is converted from LiteLLM's model price list;
-`scripts/update_pricing.py` refreshes it. Prices can be set per project, in USD per
-1M tokens, which wins over the bundled table:
+`scripts/update_pricing.py` refreshes it, and `llmshift update --prices` downloads a
+newer copy for one machine (used when its `fetched` date is not older than the
+bundled one). Prices can be set per project, in USD per 1M tokens, which wins over
+both tables:
 
     pricing:
       openai:my-finetune: {input: 0.30, output: 1.20}
@@ -11,6 +13,7 @@ The bundled table (data/pricing.json) is converted from LiteLLM's model price li
 
 from __future__ import annotations
 
+import datetime as _dt
 import functools
 import json
 import math
@@ -55,15 +58,92 @@ class Price:
         return (max(0.0, input_tokens) * self.input + max(0.0, output_tokens) * self.output) / 1_000_000
 
 
+_MODES = {"chat", "completion", "responses", "embedding"}
+
+
+def _per_million(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return float(f"{value * 1_000_000:.6g}")
+
+
+def convert_litellm(table: Any) -> dict[str, list[float]]:
+    """LiteLLM's model_prices_and_context_window.json -> {model: [input, output]} per 1M tokens."""
+    prices = {}
+    for key, entry in (table.items() if isinstance(table, dict) else ()):
+        if key == "sample_spec" or not isinstance(entry, dict) or entry.get("mode") not in _MODES:
+            continue
+        inp = _per_million(entry.get("input_cost_per_token"))
+        out = _per_million(entry.get("output_cost_per_token", 0.0))
+        if inp is not None and out is not None:
+            prices[str(key)] = [inp, out]
+    return dict(sorted(prices.items()))
+
+
+def prices_problems(data: Any, *, min_prices: int = 1) -> list[str]:
+    """Why a price table cannot be used; empty when it is valid."""
+    from .registry import _date
+
+    if not isinstance(data, dict):
+        return ["not a JSON object"]
+    problems = []
+    if _date(data.get("fetched")) is None:
+        problems.append("missing or invalid 'fetched' date")
+    prices = data.get("prices")
+    if not isinstance(prices, dict):
+        return problems + ["'prices' must be an object"]
+    if len(prices) < min_prices:
+        problems.append(f"only {len(prices)} prices (expected at least {min_prices})")
+    bad = [
+        k for k, v in prices.items()
+        if not isinstance(v, (list, tuple)) or len(v) < 2
+        or not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in v[:2])
+    ]
+    if bad:
+        problems.append(f"{len(bad)} invalid price entries, e.g. {bad[0]!r}")
+    return problems
+
+
+def _bundled_prices() -> dict:
+    return json.loads(resources.files("llmshift").joinpath("data/pricing.json").read_text(encoding="utf-8"))
+
+
+@functools.lru_cache(maxsize=1)
+def _price_data() -> tuple[dict, str]:
+    """(price table, where it came from): a valid download that is not older than the
+    bundled table wins; a missing or broken download is ignored."""
+    from .registry import _date, user_data_dir
+
+    data, origin = _bundled_prices(), "bundled"
+    path = user_data_dir() / "pricing.json"
+    try:
+        cached = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        cached = None
+    if cached is not None and not prices_problems(cached):
+        if (_date(cached.get("fetched")) or _dt.date.min) >= (_date(data.get("fetched")) or _dt.date.min):
+            data, origin = cached, str(path)
+    return data, origin
+
+
 @functools.lru_cache(maxsize=1)
 def _table() -> tuple[dict, str]:
-    raw = resources.files("llmshift").joinpath("data/pricing.json").read_text(encoding="utf-8")
-    data = json.loads(raw)
+    data, _ = _price_data()
     return {k.lower(): v for k, v in (data.get("prices") or {}).items()}, str(data.get("fetched") or "?")
+
+
+def reload() -> None:
+    """Forget the loaded table (after `llmshift update --prices`)."""
+    _price_data.cache_clear()
+    _table.cache_clear()
 
 
 def table_date() -> str:
     return _table()[1]
+
+
+def table_origin() -> str:
+    return _price_data()[1]
 
 
 def _number(value: Any, what: str) -> float:

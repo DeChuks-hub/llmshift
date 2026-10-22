@@ -1,0 +1,24 @@
+# Checks the provider pages the lifecycle data was built from, every day. When one
+# changes, an issue lists it so the data can be reviewed and updated (see
+# scripts/check_registry_sources.py). Unreachable pages do not fail the job.
+name: registry-watch
+on:
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/check_registry_sources.py --issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

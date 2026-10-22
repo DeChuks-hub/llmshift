@@ -1,0 +1,361 @@
+{
+  "checked": "2026-10-22",
+  "pages": {
+    "https://ai.google.dev/gemini-api/docs/changelog": {
+      "sha256": "51a4a672831b986a93301401fa56936742e074096b66152f6d557e66bc020ddf",
+      "chars": 44030
+    },
+    "https://ai.google.dev/gemini-api/docs/deprecations": {
+      "sha256": "122daa287fbf134be7b020f0b89a0a4a3859d8e890993ec8b3144131f7670393",
+      "chars": 10440
+    },
+    "https://ai.google.dev/gemini-api/docs/models": {
+      "sha256": "34c5229458925049f184bbe8be471f6aa734040aa4db1b296c63206528383135",
+      "chars": 14604
+    },
+    "https://api-docs.deepseek.com/quick_start/pricing": {
+      "sha256": "1b26af5380091f219570400386e439a7dfa41e5ae8c77c82d69300c420c538b6",
+      "chars": 3107
+    },
+    "https://api-docs.deepseek.com/updates": {
+      "sha256": "1259fcd273ca80e14f6c6496bc53fe2660ae5779deac522b631cef6f5ac2a5d7",
+      "chars": 17855
+    },
+    "https://developers.openai.com/api/docs/deprecations": {
+      "sha256": "893a086e5811fe29d9726852f9d57eff76b1fc48d97b086d73b34acccd61492e",
+      "chars": 26175
+    },
+    "https://developers.openai.com/api/docs/models": {
+      "sha256": "bed46dcc4289d95ab52c95ec5a39c475c7186b29fe7f257e8f2d26e2cedf78aa",
+      "chars": 3322
+    },
+    "https://developers.openai.com/api/docs/models/chat-latest": {
+      "sha256": "51da146c5d9bf40f1bfba5474d6d48cbc53e3bb2c311bf2ba0c655103e448f54",
+      "chars": 2622
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4.1": {
+      "sha256": "568566e3b1e2e83e1050720542b9c91c8ee5a9cb4cc85a3e28295b8b693b55a6",
+      "chars": 2435
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4.1-mini": {
+      "sha256": "e4c0b2c5e1afa7110c0c88f6dad02b267768068ada72a337246341349e15187e",
+      "chars": 2471
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4.5-preview": {
+      "sha256": "c0cb3052c5f308bf4d40a1c5aadf77fdbbbd275cfd33880ea479f173d3e9a402",
+      "chars": 2329
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o": {
+      "sha256": "3d14effb17cf72364b310bbfdf2b54223d3a740e97a1ab6a32951a770a86bc93",
+      "chars": 2661
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-audio-preview": {
+      "sha256": "e5cfcdcf17a8f098674c7968b9e01d92c8abdb5670a5e82ca332ce03f8d3cfdd",
+      "chars": 2431
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini": {
+      "sha256": "92f94ebf1662cdfad0d9041ddaf87513cf568f8d8d2fddcd97a85af8e9e2102a",
+      "chars": 2734
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini-audio-preview": {
+      "sha256": "5ad249fb2f79e85010e8e0dc6dcf83c0b3cb036c9ef17815281fabecea12da1d",
+      "chars": 2402
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini-realtime-preview": {
+      "sha256": "fb4fe189e1f699b66f14650eb96a1e2fd0d2ca7fa240562541604031a94addc4",
+      "chars": 2428
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini-search-preview": {
+      "sha256": "c4db5a57952b3951bb72a596aa61bcc3b1603a520ebec19a75baaa3c2f5bd8a1",
+      "chars": 2519
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe": {
+      "sha256": "d3b9c257d45e1e0239a19425ee201e494f7efb25aa71380ce4fd4bb80788deea",
+      "chars": 2292
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-mini-tts": {
+      "sha256": "099e397535150e3fdb6c31f0b006e60258b5885ded5a06ffa5661264d6e8914e",
+      "chars": 2201
+    },
+    "https://developers.openai.com/api/docs/models/gpt-4o-search-preview": {
+      "sha256": "a0647dec66879811735c35b95a46ea40c7f3d1fed53c3efd101c75dc1b117d19",
+      "chars": 2427
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5": {
+      "sha256": "567956208518584b35c55f6897293fb968a27f63241f2673182f13fc35247200",
+      "chars": 2576
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5-mini": {
+      "sha256": "883ba521f83fc07fd8f1c63d3a0718cf109a478a780349188f565659fedb6892",
+      "chars": 2539
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5-nano": {
+      "sha256": "025157d8da668383f399ac88b3229508d6f42d3fe0c7f6edadfa5d752612690a",
+      "chars": 2522
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5-pro": {
+      "sha256": "f37bac0419364ceda4251dfa1cd07298cd9a1e85bdaa8e4e77cf94689e7f1b6b",
+      "chars": 2832
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.1": {
+      "sha256": "d8bfa1fdc2bb871a2371c71c5272cfa08c79b1bac5f4838fb195372d077bee91",
+      "chars": 2534
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.2": {
+      "sha256": "ae169dd1f376124d48ef8a5ff20966849a0f27382dfacb3bab6f74ff6d0c03f0",
+      "chars": 2522
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.2-pro": {
+      "sha256": "f072ec00435a4c8b69fdd105bf7eedb481a9a277925f77c1c0d8d3055adb2656",
+      "chars": 2850
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.4": {
+      "sha256": "b701b6e4912831b5a5f0eb16ee951bc2981f7b7b63cdd97a8452bf95ae20e00d",
+      "chars": 2982
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.4-mini": {
+      "sha256": "d396343c6e3ced51b9d6d635883afb1493092fdecf930801c89dd76a19488607",
+      "chars": 2875
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.4-nano": {
+      "sha256": "18b7be0d64189effaf4842958d7dedc32b4449e430579b35584394b4c0d3b810",
+      "chars": 2907
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.4-pro": {
+      "sha256": "f2a6c72b1e6e667c5ca044b7a905c6a6d7e102748138f5391dddeeb6465c5cfb",
+      "chars": 3314
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.5": {
+      "sha256": "7b781624f839d8ef15e3e11c1b3bd118fda9761bc631561b361c9345f73e2d68",
+      "chars": 2926
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.5-pro": {
+      "sha256": "77254bfcc6576d1ce2b0e18ce3ef2fbcbc3162c2d2993374c7f4b5df8f98a7c0",
+      "chars": 3195
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.6-cyber": {
+      "sha256": "c0dc75d3bea9ee6d8491a923f1d629705d395ed3248c5038e9879b14e962d717",
+      "chars": 3059
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.6-luna": {
+      "sha256": "bc1ed31abed2580589258d7163c95f11853fc962ddd871ecb6eb417400b2cdb4",
+      "chars": 2872
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.6-sol": {
+      "sha256": "d848234f504aa78d2eb90a53745e0593cbb2749fe7980a46fc7ad46fb165a2c6",
+      "chars": 3130
+    },
+    "https://developers.openai.com/api/docs/models/gpt-5.6-terra": {
+      "sha256": "511492cbde4acd1a2dc4a74a6530cb723fb59259e110ab8ec3166111d18b5df2",
+      "chars": 2873
+    },
+    "https://developers.openai.com/api/docs/models/gpt-6-astra": {
+      "sha256": "32a9074ff76ec4916b1215c2337800d8082fa82952ed9b522e105831af9c8926",
+      "chars": 2951
+    },
+    "https://developers.openai.com/api/docs/models/gpt-6-luna": {
+      "sha256": "008f6a98cf66b63cfada307ecc252894acd5e43bb26fc64fb2838b64908937b9",
+      "chars": 3164
+    },
+    "https://developers.openai.com/api/docs/models/gpt-6-sol": {
+      "sha256": "de3060d2f05c2a11b9d86b3e8f1c593af2fe1d0fa7a8ea1075783873fa9e0abb",
+      "chars": 3177
+    },
+    "https://developers.openai.com/api/docs/models/gpt-6.1-sol": {
+      "sha256": "176ef485c1ecad91bb8a5e22db2bc1cd29cfd76f5bc584c103907969da9beddb",
+      "chars": 3383
+    },
+    "https://developers.openai.com/api/docs/models/gpt-audio": {
+      "sha256": "e05eb264ae68a9411aca4a45e47583657ebe292b2a37c268e2a47b6e327d9d36",
+      "chars": 2343
+    },
+    "https://developers.openai.com/api/docs/models/gpt-audio-1.5": {
+      "sha256": "7b4abcba494eca0174d1093d97592899ae2ab4569d52cb96bb4edd258537fd61",
+      "chars": 2345
+    },
+    "https://developers.openai.com/api/docs/models/gpt-audio-mini": {
+      "sha256": "9d0b2cd8aa81bd53d1d0bf9dfba5c928310a97b512cc5ecda1c102ceb8d1b0e2",
+      "chars": 2234
+    },
+    "https://developers.openai.com/api/docs/models/gpt-daybreak-blue-latest": {
+      "sha256": "9558ca29a204900df27978880460e0daf02ddbecd87bdadd2b924b5ddb9b1446",
+      "chars": 2312
+    },
+    "https://developers.openai.com/api/docs/models/gpt-daybreak-red-latest": {
+      "sha256": "3ac15d41971d61de87f488fd857755ec127746fc4098becf88042b42a7620be5",
+      "chars": 2327
+    },
+    "https://developers.openai.com/api/docs/models/gpt-image-1.5": {
+      "sha256": "d4a5678eda1b6d7d9f48d92501cf514500dbd31dfda05e8ac7ebaf1a49685399",
+      "chars": 2504
+    },
+    "https://developers.openai.com/api/docs/models/gpt-image-2": {
+      "sha256": "e8471479c99f162e8d3475681a4d8ba3ed6363d120d81d03a68c53c2ab802538",
+      "chars": 1945
+    },
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare": {
+      "sha256": "a699117691173623be642d7bf605d2dfc9ed3f897df995c688b2670e467ea37f",
+      "chars": 2636
+    },
+    "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst": {
+      "sha256": "7d55a47d56cc7ed564b5da46cc3fcdc9dedd8252be723e9bb86a9ab629e0cde9",
+      "chars": 2661
+    },
+    "https://developers.openai.com/api/docs/models/gpt-live-1": {
+      "sha256": "376c16c2fef07c48eb563191f7f5550b82379cec4621950866f8b61dba4139a1",
+      "chars": 1971
+    },
+    "https://developers.openai.com/api/docs/models/gpt-live-transcribe": {
+      "sha256": "f73a3e395bcf0c450dfeaf826720eb208e06ac295c02cfe299d90e7741385bf6",
+      "chars": 2201
+    },
+    "https://developers.openai.com/api/docs/models/gpt-oss-120b": {
+      "sha256": "e4d2048a565ee5aaa5373911c2b3d0c0a5bfd5278b583fc1dd99f42b94c64336",
+      "chars": 2523
+    },
+    "https://developers.openai.com/api/docs/models/gpt-oss-20b": {
+      "sha256": "9a09c6da02b9cf23362d263464e38326e9d89d1c489fe7427a4c56d65e94f77a",
+      "chars": 2512
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime": {
+      "sha256": "31ee0ad1df696758c7ee74e8ba74d19ca0b7422caae1679f0c1e638ee5ed89db",
+      "chars": 2417
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-1.5": {
+      "sha256": "7ffd7cc989adf91fdad9e506d1addcdae72e824dc3e729792b8e8392ad67258c",
+      "chars": 2289
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-2": {
+      "sha256": "431772a79ade926ab269b7af092492d978eb0b634f96ba5d0df08934d88919b2",
+      "chars": 2631
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-2.1": {
+      "sha256": "e717668522138fb87b3cd8e39aed14ad6a4ecb417ab9a5908c75542b91055a4e",
+      "chars": 2698
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini": {
+      "sha256": "595c8de6a01e6f25c196ab95875030d5b0d898ff3104cd9fdc1ec2168e62fce7",
+      "chars": 2568
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-mini": {
+      "sha256": "0ad8549fdcf96c56ffbff3f2304ae8f96c3aafb6272dc5fdf3a0f9bc774df7a4",
+      "chars": 2355
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-translate": {
+      "sha256": "6091db8648ed15b9d0f81785f3ba887ddd7efccccf86de016d7d010878c13ef6",
+      "chars": 2451
+    },
+    "https://developers.openai.com/api/docs/models/gpt-realtime-whisper": {
+      "sha256": "783c441ac1b0dc1c69183b8b340ade35caff717b8025d234bc6f6f02fd697181",
+      "chars": 2413
+    },
+    "https://developers.openai.com/api/docs/models/gpt-transcribe": {
+      "sha256": "f220f8aad2f55f48cd9241f178bff41e601a44de958df384fcb77f06380fcae0",
+      "chars": 2309
+    },
+    "https://developers.openai.com/api/docs/models/o1-mini": {
+      "sha256": "beaf1345dcfed83379c04cd42169448df2b794e8762d44d237522cd7be442c4a",
+      "chars": 2460
+    },
+    "https://developers.openai.com/api/docs/models/o1-preview": {
+      "sha256": "ab24798900cf6f6299a50a9714a7ae669e3eac99a8f0c0410d0ed1a3f23080d0",
+      "chars": 2462
+    },
+    "https://developers.openai.com/api/docs/models/o3": {
+      "sha256": "974c77fc1214efe3be25ce334b6e2e277749526afc7b43a9dbeacc199a8f2846",
+      "chars": 2684
+    },
+    "https://developers.openai.com/api/docs/models/o3-pro": {
+      "sha256": "7a7b42bc033feed3a871f1e1b493b928848aa5d90bff64c4ba2cb067c5682781",
+      "chars": 2760
+    },
+    "https://developers.openai.com/api/docs/models/omni-moderation-latest": {
+      "sha256": "9074abd9bc553eff9d931a56807c41fdbfff2f2265caa24fca1fbc6bc1001f3b",
+      "chars": 1889
+    },
+    "https://developers.openai.com/api/docs/models/text-embedding-3-large": {
+      "sha256": "3614ea52c715255f3c3bb0097509d2df87080e1dccfd744c22e42d5675ac8cc4",
+      "chars": 2258
+    },
+    "https://developers.openai.com/api/docs/models/text-embedding-3-small": {
+      "sha256": "011ced48cf017aaf5f64c0f9d55283286f96456a87d5a3b33646203fc83519e4",
+      "chars": 2242
+    },
+    "https://developers.openai.com/api/docs/models/text-embedding-ada-002": {
+      "sha256": "0bca70df4f3b74ff3d1a9cba3f0f8fafe29e03cc7c18a4728d6d466bf20fdad8",
+      "chars": 2235
+    },
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/deprecations/partner-models": {
+      "sha256": "e191d2588b6fd05c90211d84a034be3c2aad41c788eb63690fe36eea90645a36",
+      "chars": 12292
+    },
+    "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions": {
+      "sha256": "4a55cf916e58ac2b07bcaaefa18a15052310b42bcf70f0314d95114493dc28e5",
+      "chars": 6092
+    },
+    "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations": {
+      "sha256": "3ce4459e33ac67775cda03a0d5121b69c34312ace6e15e81a41869700fb61d46",
+      "chars": 1581
+    },
+    "https://docs.cohere.com/docs/deprecations": {
+      "sha256": "b166f56f3ac83c20df00112df7c54a9102d50ef5e9046a9fe40bef37fc3b0a4f",
+      "chars": 6246
+    },
+    "https://docs.cohere.com/docs/models": {
+      "sha256": "6d5aded31bc551d6f5b97c64054447024d6bacdbd286c94f061fc3e667bb8075",
+      "chars": 19346
+    },
+    "https://docs.mistral.ai/models": {
+      "sha256": "441baf32dbd108a0aa064a3a656a73f9749ede744fee1a44ac62014aaa1390d1",
+      "chars": 9213
+    },
+    "https://docs.x.ai/developers/migration/imagine-image-quality-nov-2": {
+      "sha256": "23c1b01e8b3aa03ea7ccfa303b5609b07f54c3da4c11e343fae480b1480b261d",
+      "chars": 3968
+    },
+    "https://docs.x.ai/developers/migration/may-15-retirement": {
+      "sha256": "a842f5c73515e54e28544d8165b09eced5c6e6381727702259c652d7a9e653ce",
+      "chars": 3819
+    },
+    "https://docs.x.ai/developers/models": {
+      "sha256": "28fc9c82615c34bd58d7e2ecfb403f6e768a816a41182ce5aaf6a6371420393b",
+      "chars": 2831
+    },
+    "https://docs.x.ai/developers/release-notes": {
+      "sha256": "8ea7cdb5732e48c00a217b784ffe206773edb0c958ee6d5e823ed5b92710ea58",
+      "chars": 15347
+    },
+    "https://docs.x.ai/docs/models": {
+      "sha256": "28fc9c82615c34bd58d7e2ecfb403f6e768a816a41182ce5aaf6a6371420393b",
+      "chars": 2831
+    },
+    "https://github.com/anthropics/anthropic-sdk-python/blob/402be64af1a7/src/anthropic/types/model.py": {
+      "sha256": "8f383ff14a740ed3513766c7b223b263c631f9144bc62c854b4fb46f4f5b8d3f",
+      "chars": 1166
+    },
+    "https://github.com/anthropics/anthropic-sdk-python/blob/53cb651479ec/src/anthropic/types/model.py": {
+      "sha256": "0095303e39d8b6ede9b623db25f8a20566ac2cecb59eb9f8414d7451f6214cdf",
+      "chars": 1157
+    },
+    "https://github.com/anthropics/anthropic-sdk-python/blob/9843a8e6a62d/src/anthropic/types/model.py": {
+      "sha256": "feade218ed4944846b914d03171f2ee57089f78f0dc098d0c607ad040781375c",
+      "chars": 1225
+    },
+    "https://platform.claude.com/docs/en/about-claude/model-deprecations": {
+      "sha256": "b352a0ce9bf5827a0329b76876ba170717a425308ff49a0f436b3cc748b44732",
+      "chars": 9661
+    },
+    "https://platform.claude.com/docs/en/models/haiku-4-5/overview": {
+      "sha256": "fc75e58a19b6033cbe4fdd68fe6e3adc960ecb9c89b2bc8c69bfdae9cf929eb6",
+      "chars": 2965
+    },
+    "https://platform.claude.com/docs/en/models/opus-4-5/overview": {
+      "sha256": "cd939d12b6fe8fdb02b24a97e0c844646062d4d46d39b1aacc65311cf20171b6",
+      "chars": 2454
+    },
+    "https://platform.claude.com/docs/en/models/sonnet-4-5/overview": {
+      "sha256": "f5b5d6e84720dff95941ebad471e6f239629a552b76ab4a91064f1691ba2bbb5",
+      "chars": 2593
+    }
+  }
+}

@@ -3,7 +3,9 @@ what replaces them.
 
 The bundled data (data/models.json) was built from the providers' official
 deprecation pages. Status is recomputed from the dates every run, so a model
-flips to "retired" on its shutdown day without a new release. Extra or newer
+flips to "retired" on its shutdown day without a new release. `llmshift update`
+downloads newer data into the user data directory; it is used instead of the
+bundled copy when it is valid and its `updated` date is later. Extra or newer
 entries can be layered on with --registry FILE or LLMSHIFT_REGISTRY.
 """
 
@@ -39,6 +41,8 @@ _CLAUDE_DOT_RE = re.compile(r"^(claude-(?:[a-z]+-)?\d)\.(\d)")  # claude-3.5-son
 
 PLATFORM_PROVIDER = {"vertex": "google-vertex"}
 SEVERITY_ORDER = {"critical": 4, "warning": 3, "notice": 2, "info": 1, "ok": 0}
+REGISTRY_SCHEMA = 1  # the newest data format this version reads
+STATUSES = ("active", "deprecated", "retired")
 
 
 def today() -> _dt.date:
@@ -58,6 +62,83 @@ def _date(value: Any) -> _dt.date | None:
         return _dt.date.fromisoformat(str(value)[:10])
     except ValueError:
         return None
+
+
+def user_data_dir() -> Path:
+    """Where `llmshift update` keeps downloaded data: LLMSHIFT_HOME, else the user cache directory."""
+    home = os.environ.get("LLMSHIFT_HOME")
+    if home:
+        return Path(home)
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "llmshift"
+    return Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "llmshift"
+
+
+def _entry_problem(e: Any) -> str | None:
+    if not isinstance(e, dict):
+        return "not an object"
+    if not isinstance(e.get("id"), str) or not e["id"].strip():
+        return "missing id"
+    if e.get("status", "active") not in STATUSES:
+        return f"unknown status {e.get('status')!r}"
+    for key in ("retires", "deprecated"):
+        if e.get(key) is not None and _date(e[key]) is None:
+            return f"{key} is not a date: {e[key]!r}"
+    for key in ("provider", "replacement", "source", "note"):
+        if e.get(key) is not None and not isinstance(e[key], str):
+            return f"{key} must be text"
+    return None
+
+
+def registry_problems(data: Any, *, min_models: int = 1) -> list[str]:
+    """Why a lifecycle registry document cannot be used; empty when it is valid."""
+    if not isinstance(data, dict):
+        return ["not a JSON object"]
+    problems = []
+    schema = data.get("schema", REGISTRY_SCHEMA)
+    if not isinstance(schema, int) or isinstance(schema, bool):
+        problems.append(f"schema must be a number, got {schema!r}")
+    elif schema > REGISTRY_SCHEMA:
+        problems.append(f"data format {schema} needs a newer llmshift (this one reads format {REGISTRY_SCHEMA}): pip install -U llmshift")
+    updated = _date(data.get("updated"))
+    if updated is None:
+        problems.append("missing or invalid 'updated' date")
+    elif updated > today() + _dt.timedelta(days=2):
+        problems.append(f"'updated' date {updated.isoformat()} is in the future")
+    models = data.get("models")
+    if not isinstance(models, list):
+        return problems + ["'models' must be a list"]
+    if len(models) < min_models:
+        problems.append(f"only {len(models)} models (expected at least {min_models})")
+    bad = [f"models[{i}]: {why}" for i, e in enumerate(models) for why in [_entry_problem(e)] if why]
+    problems.extend(bad[:5])
+    if len(bad) > 5:
+        problems.append(f"... and {len(bad) - 5} more invalid entries")
+    return problems
+
+
+def bundled_registry() -> dict:
+    return json.loads(resources.files("llmshift").joinpath("data/models.json").read_text(encoding="utf-8"))
+
+
+def cached_registry() -> tuple[dict, Path] | None:
+    """The downloaded registry, when present and valid (whatever its date)."""
+    path = user_data_dir() / "models.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return (data, path) if not registry_problems(data) else None
+
+
+def effective_registry() -> tuple[dict, str]:
+    """(registry data, where it came from): the downloaded copy when it is newer than
+    the bundled one, else the bundled data. A missing or broken download is ignored."""
+    data, origin = bundled_registry(), "bundled"
+    cached = cached_registry()
+    if cached is not None and (_date(cached[0].get("updated")) or _dt.date.min) > (_date(data.get("updated")) or _dt.date.min):
+        data, origin = cached[0], str(cached[1])
+    return data, origin
 
 
 @dataclass
@@ -105,16 +186,17 @@ class Lookup:
 
 
 class Registry:
-    def __init__(self, entries: list[dict], updated: str | None = None):
+    def __init__(self, entries: list[dict], updated: str | None = None, origin: str = "bundled"):
         self.entries = entries
         self.updated = updated
+        self.origin = origin  # "bundled" or the path of the data `llmshift update` downloaded
         self.by_id: dict[str, list[dict]] = {}
         for e in entries:
             self.by_id.setdefault(str(e.get("id", "")).lower(), []).append(e)
 
     @classmethod
     def load(cls, extra: list[str] | None = None) -> "Registry":
-        data = json.loads(resources.files("llmshift").joinpath("data/models.json").read_text(encoding="utf-8"))
+        data, origin = effective_registry()
         entries = list(data.get("models") or [])
         updated = data.get("updated")
         paths = list(extra or [])
@@ -141,7 +223,7 @@ class Registry:
                 if str(e.get("id", "")).lower() not in whole_ids and (str(e.get("id", "")).lower(), e.get("provider")) not in pairs
             ]
             entries.extend(user)
-        return cls(entries, updated)
+        return cls(entries, updated, origin)
 
     # ----------------------------------------------------------- normalise
 

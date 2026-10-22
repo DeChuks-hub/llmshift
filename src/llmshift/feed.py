@@ -1,0 +1,714 @@
+"""The live retirement feed: `llmshift update`, `llmshift digest` and `llmshift calendar`.
+
+* update   downloads the latest lifecycle data (and, with --prices, model prices) into
+           the user data directory; valid, newer data is then used instead of the copy
+           bundled with this release.
+* digest   sends one message listing the models your repositories use that are retired
+           or retire soon (made for a weekly Slack, Teams or e-mail post).
+* calendar builds a static website and an iCalendar feed of retirement dates.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import html
+import json
+import os
+import re
+import tempfile
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from . import console as con
+from . import registry as reglib
+from .errors import EXIT_FAIL, EXIT_OK, UsageError
+from .providers import http
+from .providers.base import ProviderError
+
+DEFAULT_REGISTRY_URL = "https://raw.githubusercontent.com/DeChuks-hub/llmshift/main/src/llmshift/data/models.json"
+DEFAULT_PRICES_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+MAX_DOWNLOAD_BYTES = 64_000_000
+PROVIDER_NAMES = {
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+    "google": "Google (Gemini API)",
+    "google-vertex": "Google Vertex AI",
+    "mistral": "Mistral",
+    "cohere": "Cohere",
+    "xai": "xAI",
+    "deepseek": "DeepSeek",
+}
+
+
+class UpdateError(Exception):
+    """Data could not be downloaded, or was rejected by validation."""
+
+
+# ------------------------------------------------------------------ update
+
+
+@dataclass
+class UpdateResult:
+    what: str  # lifecycle data | prices
+    status: str  # updated | current | available
+    current: str | None
+    latest: str | None
+    path: str | None = None
+    counts: dict = field(default_factory=dict)
+    changes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "what": self.what,
+            "status": self.status,
+            "current": self.current,
+            "latest": self.latest,
+            "path": self.path,
+            "counts": self.counts,
+            "changes": self.changes,
+        }
+
+
+def fetch_json(url: str) -> tuple[Any, bytes]:
+    """(parsed JSON, raw bytes) from an http(s) URL or a local file."""
+    if re.match(r"^https?://", url, re.I):
+        try:
+            raw = http.request("GET", url, raw=True, timeout=60, max_retries=3)
+        except ProviderError as exc:
+            raise UpdateError(f"could not download {url}: {exc}") from None
+    else:
+        path = Path(urllib.request.url2pathname(urllib.parse.urlparse(url).path)) if url.lower().startswith("file:") else Path(url)
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise UpdateError(f"cannot read {url}: {exc.strerror or exc}") from None
+    if not isinstance(raw, (bytes, bytearray)):
+        raise UpdateError(f"{url} returned no data")
+    if len(raw) > MAX_DOWNLOAD_BYTES:
+        raise UpdateError(f"{url} is unexpectedly large ({len(raw):,} bytes)")
+    try:
+        return json.loads(bytes(raw).decode("utf-8-sig")), bytes(raw)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise UpdateError(f"{url} did not return valid JSON ({exc})") from None
+
+
+def save_data(name: str, raw: bytes) -> Path:
+    """Write a data file into the user data directory atomically."""
+    directory = reglib.user_data_dir()
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=str(directory))
+    except OSError as exc:
+        raise UpdateError(f"cannot write to {directory}: {exc.strerror or exc} (set LLMSHIFT_HOME to another folder)") from None
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        os.replace(tmp, directory / name)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return directory / name
+
+
+def registry_changes(old: dict, new: dict, limit: int = 12) -> tuple[dict, list[str]]:
+    """Counts and the most useful lines describing how the lifecycle data changed."""
+
+    def index(data: dict) -> dict:
+        return {(str(e.get("id", "")).lower(), e.get("provider")): e for e in data.get("models") or [] if isinstance(e, dict)}
+
+    a, b = index(old), index(new)
+    added = [b[key] for key in b.keys() - a.keys()]
+    removed = [a[key] for key in a.keys() - b.keys()]
+    changed = []
+    for key in a.keys() & b.keys():
+        before, after = a[key], b[key]
+        fields = [f for f in ("status", "retires", "replacement", "deprecated") if before.get(f) != after.get(f)]
+        if fields:
+            changed.append((after, before, fields))
+
+    def soonest(e: dict) -> tuple:
+        return (str(e.get("retires") or "9999-99-99"), str(e.get("id", "")))
+
+    lines = []
+    for e in sorted(added, key=soonest):
+        lines.append(f"new: {e.get('id')} ({e.get('provider')})" + (f", retires {e['retires']}" if e.get("retires") else f", {e.get('status', 'active')}"))
+    for after, before, fields in sorted(changed, key=lambda t: soonest(t[0])):
+        diffs = ", ".join(f"{f} {before.get(f) or '-'} -> {after.get(f) or '-'}" for f in fields)
+        lines.append(f"changed: {after.get('id')} ({after.get('provider')}): {diffs}")
+    for e in sorted(removed, key=soonest):
+        lines.append(f"removed: {e.get('id')} ({e.get('provider')})")
+    counts = {"before": len(a), "after": len(b), "added": len(added), "removed": len(removed), "changed": len(changed)}
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"... and {len(lines) - limit} more"]
+    return counts, lines
+
+
+def update_registry(url: str | None = None, *, check: bool = False) -> UpdateResult:
+    url = url or os.environ.get("LLMSHIFT_REGISTRY_URL") or DEFAULT_REGISTRY_URL
+    data, raw = fetch_json(url)
+    bundled = reglib.bundled_registry()
+    floor = max(50, len(bundled.get("models") or []) // 2)  # a truncated file must not wipe the data
+    problems = reglib.registry_problems(data, min_models=floor)
+    if problems:
+        raise UpdateError(f"the lifecycle data from {url} was rejected: " + "; ".join(problems[:4]))
+    current, _origin = reglib.effective_registry()
+    current_date, latest_date = current.get("updated"), data.get("updated")
+    counts, changes = registry_changes(current, data)
+    if (reglib._date(latest_date) or _dt.date.min) <= (reglib._date(current_date) or _dt.date.min):
+        return UpdateResult("lifecycle data", "current", current_date, latest_date, counts=counts)
+    if check:
+        return UpdateResult("lifecycle data", "available", current_date, latest_date, counts=counts, changes=changes)
+    path = save_data("models.json", raw)
+    return UpdateResult("lifecycle data", "updated", current_date, latest_date, str(path), counts, changes)
+
+
+def update_prices(url: str | None = None, *, check: bool = False) -> UpdateResult:
+    from . import pricing
+
+    url = url or os.environ.get("LLMSHIFT_PRICES_URL") or DEFAULT_PRICES_URL
+    table, _raw = fetch_json(url)
+    if isinstance(table, dict) and isinstance(table.get("prices"), dict):  # already in llmshift's format
+        data = dict(table)
+    else:
+        data = {
+            "about": "Model prices in USD per 1M tokens [input, output], converted from LiteLLM's "
+            "model_prices_and_context_window.json (MIT License, Copyright (c) 2023 Berri AI).",
+            "source": url,
+            "fetched": reglib.today().isoformat(),
+            "unit": "USD per 1M tokens",
+            "prices": pricing.convert_litellm(table),
+        }
+    problems = pricing.prices_problems(data, min_prices=500)
+    if problems:
+        raise UpdateError(f"the prices from {url} were rejected: " + "; ".join(problems[:4]))
+    current, current_date = pricing._table()
+    latest = {str(k).lower(): list(v[:2]) for k, v in data["prices"].items()}
+    changed = sum(1 for k, v in latest.items() if current.get(k) != v) + len(current.keys() - latest.keys())
+    counts = {"prices": len(latest), "changed": changed}
+    older = (reglib._date(data.get("fetched")) or _dt.date.min) < (reglib._date(current_date) or _dt.date.min)
+    if not changed or older:
+        return UpdateResult("prices", "current", current_date, data.get("fetched"), counts=counts)
+    if check:
+        return UpdateResult("prices", "available", current_date, data.get("fetched"), counts=counts)
+    raw = (json.dumps(data, separators=(",", ":"), ensure_ascii=True) + "\n").encode("utf-8")
+    path = save_data("pricing.json", raw)
+    pricing.reload()
+    return UpdateResult("prices", "updated", current_date, data.get("fetched"), str(path), counts)
+
+
+def _update_line(r: UpdateResult) -> str:
+    if r.status == "updated":
+        if r.what == "prices":
+            detail = f"{r.counts.get('prices', 0):,} models, {r.counts.get('changed', 0):,} prices changed"
+        else:
+            c = r.counts
+            detail = f"{c.get('before', 0)} -> {c.get('after', 0)} models: {c.get('added', 0)} new, {c.get('changed', 0)} changed, {c.get('removed', 0)} removed"
+        return con.style(con.sym("pass"), "green") + f" {r.what} updated: {r.current} -> {r.latest} ({detail})"
+    verb = "are" if r.what == "prices" else "is"
+    if r.status == "available":
+        return f"newer {r.what} {verb} available: {r.latest} (you have {r.current}). Run `llmshift update{' --prices' if r.what == 'prices' else ''}` to download {'them' if verb == 'are' else 'it'}."
+    return f"{r.what} {verb} up to date ({r.current})"
+
+
+def cmd_update(args: argparse.Namespace, cfg: dict) -> int:
+    jobs = [lambda: update_registry(args.url, check=args.check)]
+    if args.prices:
+        jobs.append(lambda: update_prices(args.prices_url, check=args.check))
+    results, failed = [], False
+    for job in jobs:
+        try:
+            results.append(job())
+        except UpdateError as exc:
+            con.fail(str(exc))
+            failed = True
+    if args.format == "json":
+        con.out(json.dumps([r.to_dict() for r in results], indent=2, ensure_ascii=False))
+    else:
+        for r in results:
+            con.out(_update_line(r))
+            for line in r.changes:
+                con.out(con.style(f"    {line}", "grey"))
+            if r.path:
+                con.out(con.style(f"    saved to {r.path}", "grey"))
+    return EXIT_FAIL if failed else EXIT_OK
+
+
+# ------------------------------------------------------------------ digest
+
+
+@dataclass
+class DigestItem:
+    model: str
+    provider: str
+    status: str  # retired | retiring | deprecated
+    retires: str | None = None
+    days_left: int | None = None
+    replacement: str | None = None
+    locations: list[str] = field(default_factory=list)
+
+    def line(self) -> str:
+        if self.status == "retired":
+            when = f"retired on {self.retires}" if self.retires else "retired"
+        elif self.status == "retiring":
+            days = self.days_left or 0
+            when = f"retires {self.retires} ({'today' if days == 0 else 'tomorrow' if days == 1 else f'in {days} days'})"
+        else:
+            when = "deprecated, no shutdown date yet"
+        text = f"{self.model} ({self.provider}): {when}"
+        if self.replacement:
+            text += f"; replacement: {self.replacement}"
+        if self.locations:
+            shown = ", ".join(self.locations[:3])
+            more = len(self.locations) - 3
+            text += f"; used in {shown}" + (f" and {more} more place{'s' if more != 1 else ''}" if more > 0 else "")
+        return text
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if v not in (None, [])}
+
+
+@dataclass
+class Digest:
+    items: list[DigestItem]
+    within: int
+    paths: list[str]
+    files_scanned: int = 0
+    registry_updated: str | None = None
+    errors: list[str] = field(default_factory=list)
+
+    def count(self, status: str) -> int:
+        return sum(1 for i in self.items if i.status == status)
+
+    @property
+    def severity(self) -> str:
+        if self.count("retired"):
+            return "critical"
+        return "warning" if self.items else "info"
+
+    def title(self) -> str:
+        n = len(self.items)
+        if not n:
+            return f"No models in your code are retired or retire within {self.within} days"
+        noun = f"{n} model{'s' if n != 1 else ''} in your repos"
+        if self.count("retiring") == n:
+            return f"{noun} retire within {self.within} days"
+        parts = [f"{c} {label}" for c, label in ((self.count("retired"), "retired"), (self.count("retiring"), f"retiring within {self.within} days"), (self.count("deprecated"), "deprecated")) if c]
+        return f"{noun} need attention: {', '.join(parts)}"
+
+    def lines(self) -> list[str]:
+        return [item.line() for item in self.items]
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": "digest",
+            "title": self.title(),
+            "within_days": self.within,
+            "paths": self.paths,
+            "files_scanned": self.files_scanned,
+            "registry_updated": self.registry_updated,
+            "counts": {s: self.count(s) for s in ("retired", "retiring", "deprecated")},
+            "items": [i.to_dict() for i in self.items],
+            "errors": self.errors,
+        }
+
+    def markdown(self) -> str:
+        lines = [f"## {self.title()}", ""]
+        lines += [f"- {line}" for line in self.lines()] or ["Nothing to do."]
+        lines += ["", f"_Scanned {self.files_scanned} files in {', '.join(self.paths)}; lifecycle data {self.registry_updated}._"]
+        return "\n".join(lines) + "\n"
+
+
+def build_digest(paths: list[str], *, within: int = 30, registry: Any = None, exclude: Any = (), include_deprecated: bool = False) -> Digest:
+    from .scanner import scan_paths
+
+    if within < 0:
+        raise UsageError("--within must be zero or more days")
+    reg = registry or reglib.Registry.load()
+    found: dict[str, DigestItem] = {}
+    digest = Digest(items=[], within=within, paths=list(paths), registry_updated=reg.updated)
+    for path in paths:
+        try:
+            result = scan_paths([path], registry=reg, exclude=exclude, warn_days=within)
+        except FileNotFoundError as exc:
+            raise UsageError(str(exc)) from None
+        digest.files_scanned += result.files_scanned
+        digest.errors.extend(result.errors)
+        for m in result.models():
+            lk = m["lookup"]
+            if lk is None:
+                continue
+            if lk.status == "retired":
+                status = "retired"
+            elif lk.status == "retiring" and lk.days_left is not None and lk.days_left <= within:
+                status = "retiring"
+            elif include_deprecated and lk.status == "deprecated":
+                status = "deprecated"
+            else:
+                continue
+            item = found.get(m["model"])
+            if item is None:
+                item = found[m["model"]] = DigestItem(
+                    model=m["model"],
+                    provider=lk.provider,
+                    status=status,
+                    retires=lk.retires.isoformat() if lk.retires else None,
+                    days_left=lk.days_left,
+                    replacement=lk.replacement,
+                )
+            for finding in m["findings"]:
+                if finding.location not in item.locations:
+                    item.locations.append(finding.location)
+    rank = {"retired": 0, "retiring": 1, "deprecated": 2}
+    digest.items = sorted(found.values(), key=lambda i: (rank[i.status], i.retires or "9999-99-99", i.model))
+    return digest
+
+
+def cmd_digest(args: argparse.Namespace, cfg: dict) -> int:
+    from .alerts import AlertMessage, deliver, run_url
+
+    section = cfg.get("digest") if isinstance(cfg.get("digest"), dict) else {}
+    scan_cfg = cfg.get("scan") if isinstance(cfg.get("scan"), dict) else {}
+    paths = args.paths or ["."]
+    digest = build_digest(
+        paths,
+        within=args.within if args.within is not None else int(section.get("within", 30)),
+        exclude=list(scan_cfg.get("exclude") or []) + list(args.exclude or []),
+        include_deprecated=args.include_deprecated,
+    )
+    if args.format == "json":
+        con.out(json.dumps(digest.to_dict(), indent=2, ensure_ascii=False))
+    elif args.format == "markdown":
+        con.out(digest.markdown())
+    else:
+        con.out(con.style(digest.title(), "bold"))
+        for line in digest.lines():
+            con.out(f"  {con.sym('info')} {line}")
+        con.out(con.style(f"  scanned {digest.files_scanned} files in {', '.join(paths)}; lifecycle data {digest.registry_updated}", "grey"))
+    destinations = list(section.get("alerts") or []) + list(args.alert or [])
+    code = EXIT_OK
+    if destinations and (digest.items or args.always):
+        if args.dry_run:
+            con.out(con.style(f"  (dry run: not sending to {len(destinations)} destination(s))", "grey"), err=True)
+        else:
+            msg = AlertMessage(
+                title=digest.title(),
+                severity=digest.severity,
+                model="your repositories",
+                lines=digest.lines(),
+                alerts=[i.to_dict() for i in digest.items],
+                summary=digest.to_dict()["counts"],
+                run_url=run_url(),
+            )
+            for name, err in deliver(destinations, msg, default_min_severity="info"):
+                if err:
+                    con.warn(f"digest via {name} failed: {err}")
+                    code = EXIT_FAIL
+                else:
+                    con.out(con.style(f"  sent via {name}", "grey"), err=True)
+    fail_on = args.fail_on or "never"
+    if fail_on == "retired" and digest.count("retired"):
+        return EXIT_FAIL
+    if fail_on == "retiring" and (digest.count("retired") or digest.count("retiring")):
+        return EXIT_FAIL
+    return code
+
+
+# ---------------------------------------------------------------- calendar
+
+
+def _ics_text(value: Any) -> str:
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def fold_ics_line(line: str) -> str:
+    """RFC 5545 line folding: at most 75 octets per line, continuation lines start with a space."""
+    parts: list[str] = []
+    cur, size, limit = "", 0, 75
+    for ch in line:
+        n = len(ch.encode("utf-8"))
+        if size + n > limit:
+            parts.append(cur)
+            cur, size, limit = ch, n, 74
+        else:
+            cur += ch
+            size += n
+    parts.append(cur)
+    return "\r\n ".join(parts)
+
+
+def calendar_entries(reg: Any, days_back: int = 90) -> dict[str, list]:
+    """Lookups grouped as upcoming, recently retired and deprecated without a date."""
+    now = reglib.today()
+    upcoming, recent, undated = [], [], []
+    for lk in reg.search(warn_days=0):
+        if lk.retires:
+            if lk.retires >= now:
+                upcoming.append(lk)
+            elif (now - lk.retires).days <= days_back:
+                recent.append(lk)
+        elif lk.status == "deprecated":
+            undated.append(lk)
+    upcoming.sort(key=lambda lk: (lk.retires, lk.provider, lk.model))
+    recent.sort(key=lambda lk: (lk.retires, lk.provider, lk.model), reverse=True)
+    undated.sort(key=lambda lk: (lk.provider, lk.model))
+    return {"upcoming": upcoming, "recent": recent, "undated": undated}
+
+
+def build_ics(entries: dict[str, list], updated: str | None) -> bytes:
+    now = reglib.today()
+    stamp = (reglib._date(updated) or now).strftime("%Y%m%dT000000Z")
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//llmshift//AI model retirement calendar//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "X-WR-CALNAME:AI model retirements",
+        "X-WR-CALDESC:" + _ics_text(f"Shutdown dates of AI models (lifecycle data {updated}), from llmshift"),
+        "REFRESH-INTERVAL;VALUE=DURATION:PT12H",
+        "X-PUBLISHED-TTL:PT12H",
+    ]
+    uids: set[str] = set()
+    for lk in entries["upcoming"] + entries["recent"]:
+        start = lk.retires
+        verb = "retires" if start >= now else "retired"
+        uid = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{lk.provider}-{lk.model}").strip("-") or "model"
+        if uid in uids:
+            uid += f"-{start:%Y%m%d}"
+        uids.add(uid)
+        about = [f"{lk.model} ({PROVIDER_NAMES.get(lk.provider, lk.provider)}) {verb} on {start.isoformat()}."]
+        if lk.replacement:
+            about.append(f"Replacement: {lk.replacement}")
+        if lk.note:
+            about.append(f"Note: {lk.note}")
+        if lk.source:
+            about.append(f"Source: {lk.source}")
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{uid}@llmshift",
+            f"DTSTAMP:{stamp}",
+            f"DTSTART;VALUE=DATE:{start:%Y%m%d}",
+            f"DTEND;VALUE=DATE:{start + _dt.timedelta(days=1):%Y%m%d}",
+            "SUMMARY:" + _ics_text(f"{lk.model} {verb} ({lk.provider})"),
+            "DESCRIPTION:" + _ics_text("\n".join(about)),
+        ]
+        if lk.source and re.match(r"^https?://[^\s\"<>\\]+$", lk.source):
+            lines.append(f"URL:{lk.source}")
+        lines += ["CATEGORIES:" + _ics_text(lk.provider), "TRANSP:TRANSPARENT", "END:VEVENT"]
+    lines.append("END:VCALENDAR")
+    return "".join(fold_ics_line(line) + "\r\n" for line in lines).encode("utf-8")
+
+
+_PAGE_CSS = """
+:root { color-scheme: light dark; --bg: #ffffff; --fg: #1d1d1f; --muted: #5f6368; --line: #e3e3e8; --soft: #f4f5f7; --accent: #0b57d0; --warn: #9a5b00; --bad: #b3261e; }
+@media (prefers-color-scheme: dark) { :root { --bg: #121214; --fg: #ececf1; --muted: #a4a4ad; --line: #2c2c33; --soft: #1b1b20; --accent: #8ab4f8; --warn: #f2b84b; --bad: #f28b82; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+main { max-width: 1120px; margin: 0 auto; padding: 28px 16px 56px; }
+h1 { font-size: 28px; margin: 0 0 6px; }
+h2 { font-size: 19px; margin: 30px 0 10px; }
+p { margin: 6px 0; }
+.lede, .foot, .days, .count-note { color: var(--muted); }
+a { color: var(--accent); }
+.actions a { margin-right: 14px; }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
+.filters input, .filters select { font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--fg); }
+.filters input { flex: 1 1 240px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { background: var(--soft); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+code { font: 13px ui-monospace, SFMono-Regular, Consolas, monospace; word-break: break-all; }
+.days { font-size: 13px; white-space: nowrap; }
+.soon .days { color: var(--warn); font-weight: 600; }
+.gone .days { color: var(--bad); }
+.empty { padding: 14px; color: var(--muted); }
+"""
+
+_PAGE_JS = """
+(function () {
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  document.querySelectorAll("tr[data-date]").forEach(function (row) {
+    var p = row.getAttribute("data-date").split("-");
+    var days = Math.round((new Date(+p[0], +p[1] - 1, +p[2]) - today) / 86400000);
+    var cell = row.querySelector(".days");
+    if (cell) cell.textContent = days > 1 ? "in " + days + " days" : days === 1 ? "tomorrow" : days === 0 ? "today" : days === -1 ? "yesterday" : (-days) + " days ago";
+    row.className = days < 0 ? "gone" : days <= 30 ? "soon" : "";
+  });
+  var q = document.getElementById("q"), provider = document.getElementById("provider"), status = document.getElementById("status");
+  function apply() {
+    var text = q.value.trim().toLowerCase(), prov = provider.value, st = status.value;
+    document.querySelectorAll("section[data-section]").forEach(function (section) {
+      var name = section.getAttribute("data-section"), show = st ? st === name : name !== "undated", visible = 0;
+      section.querySelectorAll("tr[data-model]").forEach(function (row) {
+        var ok = show && (!prov || row.getAttribute("data-provider") === prov) && (!text || row.getAttribute("data-search").indexOf(text) !== -1);
+        row.hidden = !ok;
+        if (ok) visible++;
+      });
+      section.hidden = !show;
+      var count = section.querySelector(".count");
+      if (count) count.textContent = visible;
+      var empty = section.querySelector(".empty");
+      if (empty) empty.hidden = visible !== 0;
+    });
+  }
+  [q, provider, status].forEach(function (el) { el.addEventListener("input", apply); el.addEventListener("change", apply); });
+  var webcal = document.getElementById("webcal");
+  if (webcal && /^https?:$/.test(location.protocol)) {
+    webcal.href = "webcal://" + location.host + location.pathname.replace(/[^\\/]*$/, "") + "retirements.ics";
+    webcal.hidden = false;
+  }
+  apply();
+})();
+"""
+
+
+def _days_text(days: int) -> str:
+    if days > 1:
+        return f"in {days} days"
+    if days == 1:
+        return "tomorrow"
+    if days == 0:
+        return "today"
+    return "yesterday" if days == -1 else f"{-days} days ago"
+
+
+def _rows(items: list, now: _dt.date, dated: bool) -> str:
+    esc = html.escape
+    out = []
+    for lk in items:
+        provider = PROVIDER_NAMES.get(lk.provider, lk.provider)
+        search = " ".join(x for x in (lk.model, lk.provider, provider, lk.replacement or "") if x).lower()
+        source = f'<a href="{esc(lk.source)}" rel="noopener">source</a>' if lk.source and re.match(r"^https?://", lk.source) else ""
+        when = ""
+        if dated:
+            days = (lk.retires - now).days
+            when = f'<td><time datetime="{lk.retires.isoformat()}">{lk.retires.isoformat()}</time><div class="days">{_days_text(days)}</div></td>'
+        out.append(
+            f'<tr data-model="{esc(lk.model)}" data-provider="{esc(lk.provider)}"'
+            + (f' data-date="{lk.retires.isoformat()}"' if dated else "")
+            + f' data-search="{esc(search)}">{when}<td><code>{esc(lk.model)}</code></td><td>{esc(provider)}</td>'
+            f"<td>{esc(lk.replacement or '-')}</td><td>{source}</td></tr>"
+        )
+    return "\n".join(out)
+
+
+def build_page(entries: dict[str, list], updated: str | None, *, title: str, days_back: int) -> str:
+    esc = html.escape
+    now = reglib.today()
+    providers = sorted({lk.provider for group in entries.values() for lk in group})
+    options = "".join(f'<option value="{esc(p)}">{esc(PROVIDER_NAMES.get(p, p))}</option>' for p in providers)
+    head_dated = "<tr><th>Date</th><th>Model</th><th>Provider</th><th>Replacement</th><th>Source</th></tr>"
+    head_undated = "<tr><th>Model</th><th>Provider</th><th>Replacement</th><th>Source</th></tr>"
+
+    def section(name: str, heading: str, items: list, dated: bool) -> str:
+        head = head_dated if dated else head_undated
+        empty = '<p class="empty" hidden>No matching models.</p>' if items else '<p class="empty">None.</p>'
+        return (
+            f'<section data-section="{name}"><h2>{esc(heading)} (<span class="count">{len(items)}</span>)</h2>'
+            f'<div class="table-wrap"><table><thead>{head}</thead><tbody>\n{_rows(items, now, dated)}\n</tbody></table>{empty}</div></section>'
+        )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{esc(title)}</title>
+<meta name="description" content="Upcoming shutdown dates of AI models from OpenAI, Anthropic, Google, Mistral, Cohere, xAI and DeepSeek.">
+<style>{_PAGE_CSS}</style>
+</head>
+<body>
+<main>
+<h1>{esc(title)}</h1>
+<p class="lede">When AI models shut down, and what replaces them. Lifecycle data updated {esc(str(updated))}; page built {now.isoformat()}.</p>
+<p class="actions"><a id="webcal" href="retirements.ics" hidden>Subscribe in your calendar</a><a href="retirements.ics">Download the calendar (.ics)</a><a href="retirements.json">JSON</a><a href="https://github.com/DeChuks-hub/llmshift">Find these models in your code with llmshift</a></p>
+<div class="filters">
+<input id="q" type="search" placeholder="Search models or replacements" aria-label="Search models or replacements">
+<select id="provider" aria-label="Provider"><option value="">All providers</option>{options}</select>
+<select id="status" aria-label="Which models"><option value="">Upcoming and recently retired</option><option value="upcoming">Upcoming only</option><option value="recent">Recently retired only</option><option value="undated">Deprecated, no date yet</option></select>
+</div>
+{section("upcoming", "Upcoming retirements", entries["upcoming"], True)}
+{section("recent", f"Retired in the last {days_back} days", entries["recent"], True)}
+{section("undated", "Deprecated, no shutdown date yet", entries["undated"], False)}
+<p class="foot">Collected from the providers' official deprecation pages. Dates can move: check the source before you plan around one.</p>
+</main>
+<script>{_PAGE_JS}</script>
+</body>
+</html>
+"""
+
+
+def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int = 90, title: str = "AI model retirement calendar") -> dict:
+    """Write index.html, retirements.ics and retirements.json; return what was written."""
+    if days_back < 0:
+        raise UsageError("--days-back must be zero or more")
+    reg = registry or reglib.Registry.load()
+    entries = calendar_entries(reg, days_back)
+    out = Path(out_dir)
+    if out.exists() and not out.is_dir():
+        raise UsageError(f"{out} exists and is not a folder")
+    out.mkdir(parents=True, exist_ok=True)
+    data = {
+        "generated": reglib.today().isoformat(),
+        "updated": reg.updated,
+        "upcoming": [lk.to_dict() for lk in entries["upcoming"]],
+        "recent": [lk.to_dict() for lk in entries["recent"]],
+        "deprecated_without_date": [lk.to_dict() for lk in entries["undated"]],
+    }
+    (out / "index.html").write_bytes(build_page(entries, reg.updated, title=title, days_back=days_back).encode("utf-8"))
+    (out / "retirements.ics").write_bytes(build_ics(entries, reg.updated))
+    (out / "retirements.json").write_bytes((json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    return {"dir": str(out), "files": ["index.html", "retirements.ics", "retirements.json"], "counts": {k: len(v) for k, v in entries.items()}}
+
+
+def cmd_calendar(args: argparse.Namespace, cfg: dict) -> int:
+    reg = reglib.Registry.load(args.registry or [])
+    written = build_calendar(args.out, registry=reg, days_back=args.days_back, title=args.title)
+    c = written["counts"]
+    con.out(
+        con.style(con.sym("pass"), "green")
+        + f" wrote {', '.join(written['files'])} to {written['dir']} ({c['upcoming']} upcoming, {c['recent']} recently retired, {c['undated']} without a date)"
+    )
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------- cli
+
+
+def register(sub: Any) -> None:
+    p = sub.add_parser("update", help="download the latest retirement data (and, with --prices, model prices)")
+    p.add_argument("--prices", action="store_true", help="also download current model prices (LiteLLM's price list)")
+    p.add_argument("--check", action="store_true", help="only report whether newer data is available")
+    p.add_argument("--url", metavar="URL", help="where to download the lifecycle data from (default: the llmshift repository)")
+    p.add_argument("--prices-url", metavar="URL", help="where to download prices from")
+    p.add_argument("--format", choices=["text", "json"], default="text")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("digest", help="one message listing the models your repos use that are retired or retire soon")
+    p.add_argument("paths", nargs="*", help="repositories or folders to scan (default: .)")
+    p.add_argument("--within", type=int, metavar="DAYS", help="include models retiring within this many days (default 30)")
+    p.add_argument("--alert", action="append", metavar="DEST", help="slack:<url> | teams:<url> | discord:<url> | webhook:<url> | email:<addr> | file:<path>")
+    p.add_argument("--always", action="store_true", help="send even when nothing needs attention")
+    p.add_argument("--dry-run", action="store_true", help="print the digest but do not send it")
+    p.add_argument("--include-deprecated", action="store_true", help="also list deprecated models without a shutdown date")
+    p.add_argument("--exclude", action="append", help="glob of paths to skip (repeatable)")
+    p.add_argument("--fail-on", choices=["retired", "retiring", "never"], help="exit 1 when such models are found (default never)")
+    p.add_argument("--format", choices=["text", "json", "markdown"], default="text")
+    p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("calendar", help="build a retirement-calendar website and iCalendar feed")
+    p.add_argument("--out", required=True, metavar="DIR", help="folder to write index.html, retirements.ics and retirements.json")
+    p.add_argument("--days-back", type=int, default=90, help="also list models retired in the last N days (default 90)")
+    p.add_argument("--title", default="AI model retirement calendar")
+    p.add_argument("--registry", action="append", help="extra lifecycle registry JSON (overrides bundled entries)")
+    p.set_defaults(func=cmd_calendar)

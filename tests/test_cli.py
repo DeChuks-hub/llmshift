@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from llmshift import __version__
 from llmshift.cli import main
 from llmshift.demo import create_project
 
@@ -28,7 +29,7 @@ def test_version_and_help(capsys):
     with pytest.raises(SystemExit) as info:
         main(["--version"])
     assert info.value.code == 0
-    assert "llmshift 0.1.0" in capsys.readouterr().out
+    assert f"llmshift {__version__}" in capsys.readouterr().out
     assert main([]) == 2
 
 

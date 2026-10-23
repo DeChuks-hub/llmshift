@@ -22,7 +22,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest -q
+      - name: Run the tests
+        shell: bash  # runs with -eo pipefail: the step fails when pytest does
+        run: python -m pytest -q -rfE 2>&1 | tee pytest.log
+      - name: Name the failing tests in annotations (readable without signing in)
+        if: failure()
+        shell: bash
+        run: grep -E "^(FAILED|ERROR) " pytest.log | head -n 20 | sed -e 's/%/%25/g' -e 's/^/::error title=pytest::/' || true
       - run: llmshift demo
 
   action:

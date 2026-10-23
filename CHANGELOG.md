@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 (2026-10-24)
 
 - `pick`: when the model you use today is also a candidate, today's cost is measured on the same tests, so its row reads "same" instead of a saving against itself. The header says where today's cost comes from (your recorded usage, or these tests), and "Keep" is recommended whenever today's model is the cheapest that passes.
 - `pick` from Python and the MCP `llmshift_pick` tool read `pick.volume` the way the command line does: `100k` in `llmshift.yaml` failed there with a TypeError.

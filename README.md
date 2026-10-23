@@ -443,7 +443,7 @@ A model is written `provider:model`; well-known IDs work without a prefix.
 ## GitHub Action
 
 ```yaml
-- uses: DeChuks-hub/llmshift@v0.1.0
+- uses: DeChuks-hub/llmshift@v0.1.1
   with:
     command: compare
     args: --to openai:gpt-5.6-sol --min-pass-rate 0.95 --junit llmshift-junit.xml

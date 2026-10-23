@@ -35,6 +35,8 @@
 - Files saved as UTF-16 (Windows PowerShell's `>`) are read, and a file that is not text is named in the error.
 - `init` takes the baseline from the model your code calls most, and its listed replacement as the candidate, instead of writing a model that is itself retiring.
 - `--config` and `--no-color` work after the subcommand too; `llmshift --help | head -1` exits quietly; `doctor` exits 1 when it finds a problem; two reports written in the same second no longer overwrite each other.
+- `demo --dir new-folder` works on Windows with Python 3.9 before 3.9.23: it created the project, then stopped with "config file not found".
+- The action, the example workflows and those `init --github` writes use the Node 24 releases of GitHub's own actions, so runs no longer warn that Node.js 20 is deprecated.
 - Corrupted watch history, calibration and cache files are survived. `watch` writes the action's `pass-rate` output.
 - `import openai-evals` imports odd or hostile exports and registries or says what is wrong, instead of crashing; registry samples outside the registry are not read.
 - `shadow report` works from a subfolder, and `snapshot` turns shadow logs into test cases.

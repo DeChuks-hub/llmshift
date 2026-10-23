@@ -149,6 +149,28 @@ def test_demo_command(tmp_path, capsys):
     assert "Exit code" not in out + captured.err
 
 
+def test_demo_in_a_new_relative_folder_where_resolve_keeps_it_relative(tmp_path, monkeypatch, capsys):
+    # On Windows, Python 3.9 before 3.9.23 (3.9.13 is its last installer) returns
+    # Path("new").resolve() unchanged while nothing along the path exists; the demo then
+    # looked for new/llmshift.yaml from inside new/.
+    import pathlib
+
+    real = pathlib.Path.resolve
+
+    def resolve_like_old_windows(self, strict=False):
+        if not self.is_absolute() and not any(p.exists() for p in [self, *self.parents] if str(p) != "."):
+            return self
+        return real(self, strict=strict)
+
+    monkeypatch.setattr(pathlib.Path, "resolve", resolve_like_old_windows)
+    monkeypatch.chdir(tmp_path)
+    code = main(["demo", "--dir", "proj"])
+    out = capsys.readouterr().out
+    assert code == 0 and "Demo complete" in out
+    assert f"Created a demo project in {tmp_path / 'proj'}" in out
+    assert (tmp_path / "proj" / ".llmshift" / "tests.fixed.jsonl").exists()
+
+
 def test_github_actions_outputs(demo, monkeypatch, capsys):
     summary = demo / "summary.md"
     outputs = demo / "outputs.txt"

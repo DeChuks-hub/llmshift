@@ -9,6 +9,7 @@ scan -> snapshot -> compare -> fix against two simulated models
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -150,7 +151,9 @@ def _anthropic_pair(system: str, user: str, ts: str) -> dict:
 
 
 def create_project(directory: str | None = None, *, force: bool = False) -> Path:
-    root = (Path(directory) if directory else Path(tempfile.mkdtemp(prefix="llmshift-demo-"))).resolve()
+    # Made absolute first: on Windows, Python 3.9 before 3.9.23 returns Path("new").resolve()
+    # unchanged while nothing along it exists, and the demo then runs from inside it.
+    root = Path(os.path.abspath(directory) if directory else tempfile.mkdtemp(prefix="llmshift-demo-")).resolve()
     if directory and root.is_dir() and any(root.iterdir()) and not force:
         raise FileExistsError(f"{root} is not empty; the demo writes app/, logs/ and llmshift.yaml there. Use a new directory or --force")
     (root / "app").mkdir(parents=True, exist_ok=True)

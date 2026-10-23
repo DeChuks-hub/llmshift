@@ -455,7 +455,7 @@ def register(sub: Any) -> None:
     rp = ssub.add_parser("report", help="check the shadow answers against the real ones")
     rp.add_argument("logs", nargs="*", help=f"shadow logs (default {DEFAULT_PATH})")
     rp.add_argument("--min-pass-rate", type=cli.rate_arg, help="exit 1 below this pass rate (default from config)")
-    rp.add_argument("--judge", metavar="MODEL", help="LLM judge for meaning checks")
+    rp.add_argument("--judge", metavar="MODEL", type=cli.model_arg, help="LLM judge for meaning checks")
     rp.add_argument("--format", choices=["table", "json", "markdown"], default="table")
     rp.add_argument("--html", nargs="?", const="", metavar="FILE", help="also write an HTML report")
     rp.add_argument("--show", type=cli.show_arg, help="how many changed cases to print (number or 'all')")

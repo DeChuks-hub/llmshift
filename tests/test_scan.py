@@ -236,3 +236,36 @@ def test_llmshift_reports_are_not_scanned(in_tmp, capsys, monkeypatch):
     assert cli.main(["scan", ".", "--format", "sarif"]) in (0, 1)
     (root / "scan.sarif").write_text(capsys.readouterr().out, encoding="utf-8")
     assert {(f.file, f.model) for f in scan_paths(["."]).findings} == before
+
+
+def test_every_known_model_id_passes_the_trigger_prefilter():
+    """has_trigger runs before the big model-id regex: an id with none of its triggers
+    would never be found."""
+    from llmshift.scanner import KNOWN_RE, has_trigger
+
+    ids = {v for e in Registry.load().entries for v in (e.get("id"), e.get("replacement")) if isinstance(v, str) and v}
+    known = sorted(i for i in ids if KNOWN_RE.fullmatch(i))
+    assert len(known) > 300
+    assert [i for i in known if not has_trigger(i.lower())] == []
+
+
+def test_comment_stripping_skips_lines_that_cannot_hold_a_model(monkeypatch):
+    """Only lines with model words, or a /* block */ to follow, go through strip_comment:
+    walking every character of every line made scan twice as slow on large repositories."""
+    from llmshift import scanner
+
+    seen = []
+    real = scanner.strip_comment
+    monkeypatch.setattr(scanner, "strip_comment", lambda line, markers, state: seen.append(line) or real(line, markers, state))
+    lines = [
+        "const a = 1;",
+        "let total = price * count;",
+        "/* the old settings",
+        '   model: "gpt-4-turbo" */',
+        "const b = 2;",
+        '// model: "gpt-4o-mini"',
+        'const model = "gpt-4o"; // was gpt-4',
+    ]
+    found = scanner.scan_generic("\n".join(lines) + "\n", code=True, comments=scanner.COMMENT_SYNTAX[".ts"])
+    assert [(lineno, value) for lineno, _col, value, *_ in found] == [(7, "gpt-4o")]
+    assert seen == [lines[2], lines[3], lines[6]]

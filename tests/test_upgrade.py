@@ -105,6 +105,62 @@ def test_apply_changes_exactly_the_model_and_its_settings(project, capsys):
     assert "llmshift's own configuration" in out
 
 
+def test_apply_outside_git_saves_the_originals_first(project, capsys):
+    """With no git history there is no other undo: each file is copied to NAME.bak before
+    it is changed, and a later run keeps that copy (it is the older original)."""
+    files = ("app/chat.py", "web/client.ts", "config/models.yaml")
+    originals = {rel: (project / rel).read_bytes() for rel in files}
+    code, out, _ = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--apply")
+    assert code == 0 and "updated 3 file(s)" in out and "git checkout" not in out
+    assert "originals are saved as app/chat.py.bak, config/models.yaml.bak, web/client.ts.bak" in out
+    assert {rel: (project / f"{rel}.bak").read_bytes() for rel in files} == originals
+    once = (project / "app" / "chat.py").read_bytes()
+    code, out, _ = run(capsys, "upgrade", "--from", "gpt-5.6-sol", "--to", "gpt-6-luna", "--apply")
+    assert code == 0 and (project / "app" / "chat.py.bak").read_bytes() == originals["app/chat.py"]
+    assert (project / "app" / "chat.py.bak2").read_bytes() == once
+    assert not list(project.rglob("*.bak.bak"))  # the copies are not upgraded themselves
+
+
+def test_apply_in_git_saves_only_what_git_cannot_restore(project, capsys):
+    _git(project, "init", "-q")
+    _git(project, "config", "core.autocrlf", "false")
+    _git(project, "add", "app/chat.py", "web/client.ts")
+    _git(project, "commit", "-q", "-m", "start")
+    (project / "web" / "client.ts").write_bytes((project / "web" / "client.ts").read_bytes() + b"// not committed yet\n")
+    code, out, _ = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--apply")
+    assert code == 0 and "to undo: git checkout -- app/chat.py" in out
+    assert not (project / "app" / "chat.py.bak").exists()  # committed and unchanged: git has it
+    assert (project / "web" / "client.ts.bak").read_bytes().endswith(b"// not committed yet\n")  # uncommitted work
+    assert (project / "config" / "models.yaml.bak").exists()  # not tracked
+
+
+def test_the_undo_command_works_from_a_subfolder(project, capsys, monkeypatch):
+    _git(project, "init", "-q")
+    _git(project, "config", "core.autocrlf", "false")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-q", "-m", "start")
+    original = (project / "app" / "chat.py").read_bytes()
+    monkeypatch.chdir(project / "app")
+    code, out, _ = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--apply")
+    undo = next(line for line in out.splitlines() if "to undo: git checkout -- " in line).split("git checkout -- ", 1)[1].split()
+    assert code == 0 and undo == ["chat.py"] and (project / "app" / "chat.py").read_bytes() != original
+    _git(project / "app", "checkout", "--", *undo)
+    assert (project / "app" / "chat.py").read_bytes() == original and not list(project.rglob("*.bak"))
+
+
+def test_apply_without_backups_and_after_an_edit(project, capsys):
+    from llmshift.cli import UsageError
+    from llmshift.upgrade import apply_plan
+
+    plan = plan_upgrade(["."], old="gpt-4o-2024-05-13")
+    (project / "web" / "client.ts").write_bytes(b'const MODEL = "gpt-4o-2024-05-13"; // edited meanwhile\n')
+    with pytest.raises(UsageError, match="web/client.ts changed after the upgrade was planned; nothing was changed"):
+        apply_plan(plan)
+    assert b"gpt-4o-2024-05-13" in (project / "app" / "chat.py").read_bytes() and not list(project.rglob("*.bak"))
+    code, out, _ = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--apply", "--no-backup")
+    assert code == 0 and "updated 3 file(s)" in out and not list(project.rglob("*.bak"))
+
+
 def test_guards(project, capsys):
     code, out, _ = run(capsys, "upgrade", "--from", "gpt-4o-2024-05-13", "--to", "claude-sonnet-5-5")
     assert code == 0 and "different providers" in out and "Nothing to change" in out

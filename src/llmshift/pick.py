@@ -578,8 +578,8 @@ def register(sub: Any) -> None:
         description="Run the test set on several candidate models at once and recommend the cheapest one that keeps quality, "
         "with its pass rate, cost per 1,000 requests and speed.",
     )
-    p.add_argument("--models", "--model", dest="models", action="append", metavar="MODEL[,MODEL...]", help="candidate models (repeatable or comma-separated); default pick.models in llmshift.yaml")
-    p.add_argument("--baseline", metavar="MODEL", help="the model you use today, for today's cost (default: baseline in llmshift.yaml, else the recorded model)")
+    p.add_argument("--models", "--model", dest="models", action="append", metavar="MODEL[,MODEL...]", type=cli.models_arg, help="candidate models (repeatable or comma-separated); default pick.models in llmshift.yaml")
+    p.add_argument("--baseline", metavar="MODEL", type=cli.model_arg, help="the model you use today, for today's cost (default: baseline in llmshift.yaml, else the recorded model)")
     p.add_argument("--min-pass-rate", type=cli.rate_arg, help="quality bar a candidate must reach (default min_pass_rate in llmshift.yaml: 0.95)")
     p.add_argument("--volume", metavar="N", help="requests per month, for a monthly saving, e.g. 100000 or 100k (default pick.volume)")
     p.add_argument("--price", action="append", metavar="MODEL=IN/OUT", help="price in USD per 1M tokens, e.g. azure:prod=2.5/10 (repeatable; wins over pricing: in llmshift.yaml)")

@@ -145,6 +145,14 @@ def test_package_metadata_is_launch_ready():
     assert (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").count(f"## {llmshift.__version__} ") == 1
 
 
+def test_action_examples_use_this_version():
+    """A version bump must move the `uses:` lines too, or everyone who copies them keeps
+    running the old action."""
+    files = [ROOT / "README.md", *sorted((ROOT / "examples" / "workflows").glob("*.yml"))]
+    refs = {f.name: re.findall(r"DeChuks-hub/llmshift@([\w.-]+)", f.read_text(encoding="utf-8")) for f in files}
+    assert sum(map(len, refs.values())) >= 5 and {r for found in refs.values() for r in found} == {f"v{llmshift.__version__}"}, refs
+
+
 def test_no_leftovers_of_the_old_name_or_placeholders():
     shipped = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "action.yml", ROOT / "pyproject.toml", ROOT / "LICENSE"]
     shipped += [p for p in (ROOT / "src").rglob("*") if p.suffix in (".py", ".json")]

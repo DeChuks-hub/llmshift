@@ -129,11 +129,11 @@ _LLM_KEY_RE = re.compile(
     r"(?:^|_)(?:llm|llms|lm|gpt|openai|anthropic|claude|gemini|genai|ai|chat|completion|completions|embedding|embeddings|judge|grader)(?:_|$)"
 )
 # Files that talk to an LLM somewhere; generic keys such as DEFAULT_MODEL only count in them.
+# Searched in the lower-cased text (twice as fast as re.I over a whole file).
 _LLM_HINT_RE = re.compile(
     r"openai|anthropic|gemini|genai|litellm|langchain|llama_?index|bedrock|vertexai|mistral|ollama|cohere|groq|deepseek"
     r"|chat\.completions|messages\.create|generate_?content|\bllms?\b|_llm|llm_|\bgpt|claude"
-    r"|max_(?:completion_|output_)?tokens|\btop_p\b|system_?prompt",
-    re.I,
+    r"|max_(?:completion_|output_)?tokens|\btop_p\b|system_?prompt"
 )
 
 
@@ -168,21 +168,23 @@ def accepts_value(strength: str | None, value: str, llm_hint: bool) -> bool:
 
 
 def has_llm_hint(text: str) -> bool:
-    return bool(_LLM_HINT_RE.search(text))
+    return bool(_LLM_HINT_RE.search(text.lower()))
 
 
 _BARE_O_SERIES_RE = re.compile(r"o[134]")
-# Cheap substring test run before the big regex (keeps large repositories fast).
-# Every pattern in _KNOWN must contain one of these (tests/test_scan.py checks it).
+# Cheap substring test run before the big regex (keeps large repositories fast). Every
+# model id KNOWN_RE matches must contain one of these (tests/test_scan.py checks the
+# lifecycle registry's ids).
 _TRIGGERS = (
     "gpt", "o1", "o3", "o4", "claude", "gemini", "davinci", "babbage", "curie", "-ada-", "cushman", "embed", "moderation",
     "similarity", "search", "dall-e", "whisper", "tts-", "codex", "computer-use", "sora", "ft:", "bison", "gecko", "stral",
     "xtral", "command", "rerank", "grok", "deepseek", "llama", "chat-latest", "/",
 )
+_TRIGGER_RE = re.compile("|".join(map(re.escape, _TRIGGERS)))  # one search instead of a test per trigger
 
 
 def has_trigger(text_lower: str) -> bool:
-    return any(t in text_lower for t in _TRIGGERS)
+    return _TRIGGER_RE.search(text_lower) is not None
 
 
 MAX_ID = 256  # a Bedrock inference-profile ARN alone is over 100 characters
@@ -802,12 +804,21 @@ def comment_syntax(path: Path) -> tuple[str, ...] | None:
     return COMMENT_SYNTAX.get(path.suffix.lower()) or COMMENT_SYNTAX.get(name)
 
 
+@functools.lru_cache(maxsize=None)
+def _comment_stops(markers: tuple[str, ...]) -> re.Pattern:
+    """The characters strip_comment looks at outside quotes: quotes and the first character
+    of each comment marker. The text between two of them is copied in one piece."""
+    return re.compile("[" + re.escape("\"'`" + "".join(sorted({m[0] for m in markers}))) + "]")
+
+
 def strip_comment(line: str, markers: tuple[str, ...], state: dict) -> str:
     """The line without its comment (text outside quotes after a marker), and without the
     part inside a /* block */ that `state` carries from line to line. "#" and ";" count
     only at the start or after a space, so a URL's #fragment or a value's ";" stays."""
     out: list[str] = []
     i, n, quote = 0, len(line), ""
+    stops = _comment_stops(markers)
+    blocks = [m for m in (_BLOCK, _HTML) if m in markers]
     while i < n:
         if state.get("block"):  # the closing token of the open block
             end = line.find(state["block"], i)
@@ -818,18 +829,28 @@ def strip_comment(line: str, markers: tuple[str, ...], state: dict) -> str:
             out.append(" " * (end + close - i))  # keep the columns of what follows
             i = end + close
             continue
+        if quote:  # copied up to the closing quote or an escape
+            ends = [j for j in (line.find(quote, i), line.find("\\", i)) if j >= 0]
+            j = min(ends) if ends else n
+        else:  # copied up to the next quote or possible comment marker
+            hit = stops.search(line, i)
+            j = hit.start() if hit else n
+        if j > i:
+            out.append(line[i:j])
+            i = j
+            if i >= n:
+                break
         ch = line[i]
         if quote:
             if ch == "\\":
                 out.append(line[i : i + 2])
                 i += 2
                 continue
-            if ch == quote:
-                quote = ""
+            quote = ""  # the closing quote
         elif ch in "\"'`":
             quote = ch
         else:
-            opened = next((m for m in (_BLOCK, _HTML) if m in markers and line.startswith(m, i)), None)
+            opened = next((m for m in blocks if line.startswith(m, i)), None)
             # A block opens only where a comment can start, and only if the file closes it
             # somewhere: a "/*" in a path glob or a regex would otherwise hide the rest of the file.
             if opened and (i == 0 or line[i - 1] in _BEFORE_BLOCK) and _BLOCK_END[opened] in state.get("closers", (_BLOCK_END[opened],)):
@@ -860,6 +881,9 @@ def scan_generic(
     llm_hint = has_llm_hint(text) if llm_hint is None else llm_hint
     out = []
     block: dict = {"closers": {end for end in _BLOCK_END.values() if end in text}}  # blocks this file can close
+    openers = [m for m in (_BLOCK, _HTML) if m in (comments or ())]
+    # A line that starts with one of these is all comment and cannot open a block.
+    whole_line = tuple("#" if m == _HASH_AT_START else m for m in (comments or ()) if m not in (_BLOCK, _HTML))
     for lineno, line in enumerate(source_lines(text), 1):
         if len(line) > MAX_LINE:
             if has_trigger(line.lower()):
@@ -871,12 +895,23 @@ def scan_generic(
                 out.extend((lineno, col, val, "string" if code else "config", None, None) for val, col in found.items())
             continue
         if comments:
-            line = strip_comment(line, comments, block)
+            if whole_line and not block.get("block") and line.lstrip().startswith(whole_line):
+                continue
         elif code and _COMMENT_RE.match(line):
             continue
         lower = line.lower()
         keyed = "model" in lower or "engine" in lower or "deployment" in lower
         triggered = has_trigger(lower)
+        if comments:
+            # Taking out a comment only removes text, so a line without model words has
+            # nothing to find; it is skipped unless it is in, or opens, a /* block */.
+            if not keyed and not triggered and not block.get("block") and not any(m in line for m in openers):
+                continue
+            stripped = strip_comment(line, comments, block)
+            if stripped != line:
+                line, lower = stripped, stripped.lower()
+                keyed = "model" in lower or "engine" in lower or "deployment" in lower
+                triggered = has_trigger(lower)
         if not keyed and not triggered:
             continue
         hits: dict[str, tuple[int, str]] = {}

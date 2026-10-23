@@ -654,7 +654,7 @@ def _models_tool(args: dict, cfg: Any) -> dict:
             "max_cases": {"type": "integer", "minimum": 1, "maximum": 100000},
             "per_group": {"type": "integer", "minimum": 1, "maximum": 100000, "description": "Maximum cases per prompt template."},
             "redact_pii": {"type": "boolean", "description": "Also replace e-mails, phone and card numbers with placeholders."},
-            "baseline_model": {"type": "string", "description": "Generate answers with this model for logs that have none (makes model calls)."},
+            "baseline_model": {"type": "string", "minLength": 1, "description": "Generate answers with this model for logs that have none (makes model calls)."},
         },
         required=("sources",),
     ),
@@ -756,8 +756,8 @@ def _case_summary(c: Any) -> dict:
         {
             "to": {"type": "string", "minLength": 1, "description": "The model to test, e.g. openai:gpt-5.6-sol (default: candidate in llmshift.yaml)."},
             "tests": TESTS,
-            "baseline_model": {"type": "string", "description": "Also run the old model live; failures it shares are treated as noise."},
-            "judge": {"type": "string", "description": "Model for LLM-judged checks (default: judge in llmshift.yaml)."},
+            "baseline_model": {"type": "string", "minLength": 1, "description": "Also run the old model live; failures it shares are treated as noise."},
+            "judge": {"type": "string", "minLength": 1, "description": "Model for LLM-judged checks (default: judge in llmshift.yaml)."},
             "min_pass_rate": {"type": "number", "minimum": 0, "maximum": 1, "description": "Threshold for passed_threshold (default: min_pass_rate in llmshift.yaml)."},
             "groups": {**STRINGS, "description": "Only these prompt templates (substring match)."},
             "tags": {**STRINGS, "description": "Only cases with these tags."},
@@ -846,9 +846,9 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
         {
             "to": {"type": "string", "minLength": 1, "description": "The new model, e.g. openai:gpt-5.6-sol (default: candidate in llmshift.yaml)."},
             "tests": TESTS,
-            "optimizer": {"type": "string", "description": "Optional model that rewrites prompts, e.g. openai:gpt-5.6-sol (rule-based fixes work without it)."},
+            "optimizer": {"type": "string", "minLength": 1, "description": "Optional model that rewrites prompts, e.g. openai:gpt-5.6-sol (rule-based fixes work without it)."},
             "rounds": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Improvement rounds per prompt template (default 3)."},
-            "judge": {"type": "string", "description": "Model for LLM-judged checks."},
+            "judge": {"type": "string", "minLength": 1, "description": "Model for LLM-judged checks."},
             "groups": {**STRINGS, "description": "Only these prompt templates (substring match)."},
             "limit": {"type": "integer", "minimum": 1, "description": "Only the first N cases."},
             "source": {**STRINGS, "description": "Where to look for the prompts in the code (default: the project)."},
@@ -943,7 +943,7 @@ _KEY_ENV = (
         {
             "models": {**STRINGS, "minItems": 1, "description": "Candidate models, e.g. openai:gpt-6-luna, anthropic:claude-haiku-5-5."},
             "tests": TESTS,
-            "baseline": {"type": "string", "description": "The model used today, for its cost (default: baseline in llmshift.yaml, else the recorded model)."},
+            "baseline": {"type": "string", "minLength": 1, "description": "The model used today, for its cost (default: baseline in llmshift.yaml, else the recorded model)."},
             "min_pass_rate": {"type": "number", "minimum": 0, "maximum": 1, "description": "Quality bar (default: min_pass_rate in llmshift.yaml)."},
             "volume": {"type": "integer", "minimum": 1, "description": "Requests per month, to state the monthly saving."},
             "groups": {**STRINGS, "description": "Only these prompt templates (substring match)."},
@@ -1028,7 +1028,7 @@ def _safety_tool(args: dict, cfg: Any) -> dict:
     "the model answers. Use it after editing a prompt in the code. Calls the model once per affected test case.",
     _schema(
         {
-            "model": {"type": "string", "description": "Model to test with (default: baseline in llmshift.yaml, else candidate)."},
+            "model": {"type": "string", "minLength": 1, "description": "Model to test with (default: baseline in llmshift.yaml, else candidate)."},
             "base": {"type": "string", "description": "Git ref to compare against (default: origin/main)."},
             "files": {**STRINGS, "description": "Only look at these changed files."},
             "all": {"type": "boolean", "description": "Run every prompt template, not only the edited ones."},
@@ -1066,11 +1066,11 @@ def _check_tool(args: dict, cfg: Any) -> dict:
     "retiring model that has a known replacement.",
     _schema(
         {
-            "from": {"type": "string", "description": "The model to move off, e.g. gpt-4o-2024-05-13."},
-            "to": {"type": "string", "description": "The replacement (default: the registry's recommended replacement)."},
+            "from": {"type": "string", "minLength": 1, "description": "The model to move off, e.g. gpt-4o-2024-05-13."},
+            "to": {"type": "string", "minLength": 1, "description": "The replacement (default: the registry's recommended replacement)."},
             "auto": {"type": "boolean", "description": "Every retired or retiring model found that has a replacement."},
             "paths": {**STRINGS, "description": "Where to look (default: scan.paths in llmshift.yaml, else the project)."},
-            "apply": {"type": "boolean", "description": "Write the changes to the files (default false: only the diff)."},
+            "apply": {"type": "boolean", "description": "Write the changes to the files (default false: only the diff). A file git cannot restore is first copied to NAME.bak, listed in `backups`."},
             "force": {"type": "boolean", "description": "Allow swaps across providers (the calling code is never rewritten)."},
         }
     ),
@@ -1091,6 +1091,8 @@ def _upgrade_tool(args: dict, cfg: Any) -> dict:
     out = plan.to_dict()
     if args.get("apply"):
         out["written"] = apply_plan(plan)
+        if plan.backups:  # files git could not give back
+            out["backups"] = plan.backups
         out["next"] = "Run llmshift_compare with to=<the new model> to prove nothing broke."
     return out
 

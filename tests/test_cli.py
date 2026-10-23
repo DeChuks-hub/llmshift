@@ -181,3 +181,37 @@ def test_github_actions_outputs(demo, monkeypatch, capsys):
     assert code == 1 and "::error file=app/summaries.py,line=10" in out and "::warning file=app/triage.py" in out
     assert "## LLMShift scan" in summary.read_text(encoding="utf-8")
     assert "retired=1" in outputs.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "argv, words",
+    [
+        (["compare", "--to", "mock:nextgen", "--temperature", "99"], "must be from 0 to 2, got 99"),
+        (["compare", "--to", "mock:nextgen", "--temperature", "nan"], "must be from 0 to 2"),
+        (["compare", "--to", "mock:nextgen", "--max-tokens", "0"], "must be 1 or more, got 0"),
+        # An unset variable in CI must not quietly test the configured model instead.
+        (["compare", "--to", ""], "argument --to/--model/--candidate: is empty"),
+        (["compare", "--to", "mock:nextgen", "--judge", " "], "argument --judge: is empty"),
+        (["upgrade", "--from", "gpt-4o-2024-05-13", "--to", ""], "argument --to: is empty"),
+        (["safety", "--baseline-model", ""], "argument --baseline-model: is empty"),
+        (["watch", "--model", ""], "argument --model: is empty"),
+        (["pick", "--models", " , "], "argument --models/--model: is empty"),
+        (["embeddings", "--from", "", "--to", "mock:embed-v2", "--corpus", "docs"], "argument --from: is empty"),
+        (["init", "--candidate", ""], "argument --candidate: is empty"),
+    ],
+    ids=lambda v: "-".join(v) if isinstance(v, list) else None,
+)
+def test_bad_run_options_stop_before_any_request(argv, words, capsys):
+    with pytest.raises(SystemExit) as info:
+        main(argv)
+    assert info.value.code == 2 and words in capsys.readouterr().err
+
+
+def test_embeddings_checks_the_corpus_before_announcing_work(in_tmp, capsys):
+    code, _, err = run(capsys, "embeddings", "--from", "mock:embed-v1", "--to", "mock:embed-v2", "--corpus", "missing-folder")
+    assert code == 2 and "corpus path not found: missing-folder" in err and "Embedding a sample" not in err
+    (in_tmp / "docs").mkdir()
+    for i in range(3):
+        (in_tmp / "docs" / f"doc{i}.txt").write_text(f"Refunds take {i + 3} days. Orders ship from warehouse {i}.", encoding="utf-8")
+    code, _, err = run(capsys, "embeddings", "--from", "mock:embed-v1", "--to", "mock:embed-v2", "--corpus", "docs")
+    assert code in (0, 1) and "Embedding a sample of your corpus with mock:embed-v1 and mock:embed-v2" in err

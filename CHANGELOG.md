@@ -16,6 +16,7 @@
 - Redaction covers more key formats (xAI, Groq, Perplexity, Fireworks, Hugging Face, Replicate, Stripe, GitLab, npm, temporary AWS keys), `password=`/`api-key:` values, credentials in connection strings, Basic auth headers and the live values of key environment variables.
 - Alerts: SMTP logs in only over TLS; Slack and Discord messages cannot ping `@channel`/`@everyone`. MCP tools read and write only inside the project.
 - GitHub: a comment by another user is never edited, a POST that may have arrived is never sent again, and a value can no longer inject extra step outputs. The action's `args` are split like shell words (quote an argument with spaces) and never expanded. The workflows (and those `init --github` writes) ask for the least permissions and keep values out of `run:` scripts.
+- `upgrade --apply` first saves a file git cannot give back as it is now (no repository, untracked, uncommitted changes) as `NAME.bak` (`--no-backup` skips that), and stops before writing anything if a file was edited after the diff was made.
 
 **Correct results**
 
@@ -37,6 +38,8 @@
 - `--config` and `--no-color` work after the subcommand too; `llmshift --help | head -1` exits quietly; `doctor` exits 1 when it finds a problem; two reports written in the same second no longer overwrite each other.
 - `demo --dir new-folder` works on Windows with Python 3.9 before 3.9.23: it created the project, then stopped with "config file not found".
 - The action, the example workflows and those `init --github` writes use the Node 24 releases of GitHub's own actions, so runs no longer warn that Node.js 20 is deprecated.
+- An empty model (`--to "$CANDIDATE"` with the variable unset) is refused by every command and MCP tool instead of quietly testing the configured model. `--temperature` must be 0 to 2 and `--max-tokens` at least 1, checked before any request; `embeddings` checks the corpus before it starts.
+- `scan` is faster on large repositories: lines that cannot name a model are passed over quickly.
 - Corrupted watch history, calibration and cache files are survived. `watch` writes the action's `pass-rate` output.
 - `import openai-evals` imports odd or hostile exports and registries or says what is wrong, instead of crashing; registry samples outside the registry are not read.
 - `shadow report` works from a subfolder, and `snapshot` turns shadow logs into test cases.

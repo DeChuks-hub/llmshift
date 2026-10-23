@@ -535,8 +535,8 @@ def register(sub: Any) -> None:
         description="Run refusal, prompt-injection and PII-leak probes, built from your test cases, on the new and the old model, "
         "and report whether the new model is riskier. Both models are called live.",
     )
-    p.add_argument("--to", "--model", dest="to", metavar="MODEL", help="the new model (default: candidate in llmshift.yaml)")
-    p.add_argument("--baseline-model", metavar="MODEL", help="the model you use today (default: baseline in llmshift.yaml)")
+    p.add_argument("--to", "--model", dest="to", metavar="MODEL", type=cli.model_arg, help="the new model (default: candidate in llmshift.yaml)")
+    p.add_argument("--baseline-model", metavar="MODEL", type=cli.model_arg, help="the model you use today (default: baseline in llmshift.yaml)")
     p.add_argument("--tests", help="test file or directory (default: tests in llmshift.yaml, else .llmshift/tests.jsonl)")
     p.add_argument("--group", action="append", help="only cases from this prompt template (repeatable)")
     p.add_argument("--tag", action="append", help="only cases with this tag (repeatable)")

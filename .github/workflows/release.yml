@@ -44,6 +44,11 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
             exit 1
           fi
+          code=$(PYTHONPATH=src python -c "import llmshift; print(llmshift.__version__)")
+          if [ "$code" != "$version" ]; then
+            echo "::error::src/llmshift/__init__.py says $code but pyproject.toml says $version: llmshift --version would be wrong"
+            exit 1
+          fi
       - run: python -m pip install build twine
       - run: python -m build
       - run: python -m twine check --strict dist/*

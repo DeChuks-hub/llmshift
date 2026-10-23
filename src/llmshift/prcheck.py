@@ -822,7 +822,7 @@ def register(sub: Any) -> None:
         description="Find the system prompts this change edits (against --base) and run only their test cases, with the "
         "edited text, on the model in production. In a GitHub pull request, the result is posted as one comment.",
     )
-    p.add_argument("--model", metavar="MODEL", help="model to test with (default: baseline, then candidate, from llmshift.yaml)")
+    p.add_argument("--model", metavar="MODEL", type=cli.model_arg, help="model to test with (default: baseline, then candidate, from llmshift.yaml)")
     p.add_argument("--base", metavar="REF", help="git ref to compare with (default: the pull request's base in GitHub Actions, else origin/main)")
     p.add_argument("--files", nargs="+", metavar="FILE", help="only look at these files")
     p.add_argument("--all", action="store_true", help="also run the groups whose prompts did not change")

@@ -193,6 +193,34 @@ def rate_arg(text: str) -> float:
     return number
 
 
+def model_arg(text: str) -> str:
+    """A model spec. An empty one (`--to "$CANDIDATE"` with the variable unset) is refused:
+    quietly testing the configured model instead would report on the wrong model."""
+    value = text.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("is empty (an unset variable?); leave the option out to use the model in llmshift.yaml")
+    return value
+
+
+def models_arg(text: str) -> str:
+    """One or more comma-separated model specs; see model_arg."""
+    if not any(part.strip() for part in text.split(",")):
+        raise argparse.ArgumentTypeError("is empty (an unset variable?); leave the option out to use the models in llmshift.yaml")
+    return text
+
+
+def temperature_arg(text: str) -> float:
+    """A sampling temperature from 0 to 2, the widest range providers accept (Anthropic's
+    provider keeps it within its own 0 to 1)."""
+    try:
+        number = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number from 0 to 2, e.g. 0.7, got {text!r}") from None
+    if not 0.0 <= number <= 2.0:  # also refuses nan
+        raise argparse.ArgumentTypeError(f"must be from 0 to 2, got {text}")
+    return number
+
+
 def positive_int(text: str) -> int:
     """A whole number of 1 or more (a count, a limit, a number of requests)."""
     try:
@@ -1042,7 +1070,7 @@ def _add_run_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--group", action="append", help="only cases from this prompt template (repeatable)")
     p.add_argument("--tag", action="append", help="only cases with this tag (repeatable)")
     p.add_argument("--case", action="append", help="only this case id (repeatable)")
-    p.add_argument("--judge", metavar="MODEL", help="model for LLM-judged checks and imported model graders, e.g. openai:gpt-5.6-terra")
+    p.add_argument("--judge", metavar="MODEL", type=model_arg, help="model for LLM-judged checks and imported model graders, e.g. openai:gpt-5.6-terra")
     p.add_argument("--judge-mode", choices=["auto", "always"], help="auto (default): ask the judge only when the rule-based checks cannot decide")
     p.add_argument("--allow-python", action="store_true", help="run imported python graders (executes their code locally)")
     p.add_argument("--severity", action="append", metavar="CHECK=LEVEL", help="override a check's severity, e.g. tone=error or facts=warn")
@@ -1061,8 +1089,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     p = sub.add_parser("init", help="create llmshift.yaml (and GitHub workflows with --github)")
-    p.add_argument("--candidate", help="the model you are moving to")
-    p.add_argument("--baseline", help="the model you use today")
+    p.add_argument("--candidate", type=model_arg, help="the model you are moving to")
+    p.add_argument("--baseline", type=model_arg, help="the model you use today")
     p.add_argument("--github", action="store_true", help="also write .github/workflows for PR checks and nightly watch")
     p.add_argument("--path", help="where to write the config (default llmshift.yaml)")
     p.add_argument("--force", action="store_true", help="overwrite existing files")
@@ -1099,7 +1127,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("sources", nargs="+", help="log files, directories or globs")
     p.add_argument("--output", "-o", help="test file to write (default .llmshift/tests.jsonl)")
-    p.add_argument("--model", action="append", help="only calls to this model (glob, repeatable), e.g. 'gpt-4o*'")
+    p.add_argument("--model", action="append", type=model_arg, help="only calls to this model (glob, repeatable), e.g. 'gpt-4o*'")
     p.add_argument("--since", help="only calls on/after this date (YYYY-MM-DD or ISO-8601)")
     p.add_argument("--until", help="only calls on/before this date")
     p.add_argument("--max-cases", type=positive_int, help="maximum test cases (default 200)")
@@ -1109,7 +1137,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-redact", action="store_true", help="do not redact API keys and tokens")
     p.add_argument("--include-errors", action="store_true", help="keep calls that failed")
     p.add_argument("--include-truncated", action="store_true", help="keep outputs cut off by the token limit")
-    p.add_argument("--baseline-model", metavar="MODEL", help="generate baseline outputs with this model when logs lack them")
+    p.add_argument("--baseline-model", metavar="MODEL", type=model_arg, help="generate baseline outputs with this model when logs lack them")
     p.add_argument("--regenerate", action="store_true", help="re-generate every baseline with --baseline-model")
     p.add_argument("--with-judge-checks", action="store_true", help="add an LLM-judged equivalence check to free-text cases")
     p.add_argument("--append", action="store_true", help="add to an existing test file instead of replacing it")
@@ -1119,12 +1147,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("compare", help="run the tests on a new model and show exactly what changed")
-    p.add_argument("--to", "--model", "--candidate", dest="to", metavar="MODEL", help="the new model, e.g. openai:gpt-5.6-sol, anthropic:claude-sonnet-5-5")
-    p.add_argument("--baseline-model", metavar="MODEL", help="also run the old model live; failures it shares are treated as noise")
-    p.add_argument("--embedder", metavar="MODEL", help="embedding model for cosine similarity checks, e.g. openai:text-embedding-3-small")
+    p.add_argument("--to", "--model", "--candidate", dest="to", metavar="MODEL", type=model_arg, help="the new model, e.g. openai:gpt-5.6-sol, anthropic:claude-sonnet-5-5")
+    p.add_argument("--baseline-model", metavar="MODEL", type=model_arg, help="also run the old model live; failures it shares are treated as noise")
+    p.add_argument("--embedder", metavar="MODEL", type=model_arg, help="embedding model for cosine similarity checks, e.g. openai:text-embedding-3-small")
     p.add_argument("--min-pass-rate", type=rate_arg, help="exit 1 below this pass rate (default from config: 0.95)")
-    p.add_argument("--temperature", type=float, help="override temperature for every request")
-    p.add_argument("--max-tokens", type=int, help="override the output token limit for every request")
+    p.add_argument("--temperature", type=temperature_arg, help="override temperature for every request (0 to 2)")
+    p.add_argument("--max-tokens", type=positive_int, help="override the output token limit for every request")
     p.add_argument("--show", type=show_arg, help="how many changed cases to print (number or 'all', default 5)")
     p.add_argument("--verbose", "-v", action="store_true", help="print every changed case with full diffs and skipped checks")
     p.add_argument("--html", nargs="?", const="", metavar="FILE", help="HTML report (default: in the reports directory)")
@@ -1138,8 +1166,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_compare)
 
     p = sub.add_parser("fix", help="suggest prompt changes until the new model matches the old one")
-    p.add_argument("--to", "--model", "--candidate", dest="to", metavar="MODEL", help="the new model")
-    p.add_argument("--optimizer", metavar="MODEL", help="model that rewrites prompts (optional; rule-based fixes work without it)")
+    p.add_argument("--to", "--model", "--candidate", dest="to", metavar="MODEL", type=model_arg, help="the new model")
+    p.add_argument("--optimizer", metavar="MODEL", type=model_arg, help="model that rewrites prompts (optional; rule-based fixes work without it)")
     p.add_argument("--rounds", type=positive_int, help="improvement rounds per prompt template (default 3)")
     p.add_argument("--max-cases-per-group", type=positive_int, help="cases used to score each candidate prompt (default 12)")
     p.add_argument("--from-results", help="reuse a compare JSON instead of re-running the baseline comparison")
@@ -1152,7 +1180,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_fix)
 
     p = sub.add_parser("watch", help="check the live model on a schedule and alert when its behaviour drifts")
-    p.add_argument("--model", metavar="MODEL", help="the live model to watch, e.g. openai:gpt-5.6-sol")
+    p.add_argument("--model", metavar="MODEL", type=model_arg, help="the live model to watch, e.g. openai:gpt-5.6-sol")
     p.add_argument("--history", help="history directory (default .llmshift/watch)")
     p.add_argument("--alert", action="append", help="slack:<url> | discord:<url> | teams:<url> | webhook:<url> | github | email:<addr> | file:<path>")
     p.add_argument("--alert-on", choices=["info", "warning", "critical"], help="lowest drift severity that sends alerts (default warning)")

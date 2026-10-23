@@ -117,6 +117,7 @@ class UpgradePlan:
     notes: list[str] = field(default_factory=list)
     prompt_fixes: list[dict] = field(default_factory=list)
     compare: dict[str, Any] = field(default_factory=dict)  # replacement model -> CompareResult
+    backups: dict[str, str] = field(default_factory=dict)  # file -> the copy apply_plan saved first
 
     @property
     def changed(self) -> list[FileChange]:
@@ -641,15 +642,88 @@ def _ending(lines: list[str]) -> str:
     return "\n"
 
 
-def apply_plan(plan: UpgradePlan) -> list[str]:
+def git_restorable(plan: UpgradePlan) -> set[str]:
+    """The planned files git can give back exactly as they are now: tracked, with no
+    uncommitted changes, staged or not. Empty outside a repository."""
+    top = gh.repo_root(plan.root)
+    if top is None:
+        return set()
+    try:
+        tracked = set(filter(None, gh.git("ls-files", "-z", "--full-name", cwd=top).split("\0")))
+        status = gh.git("status", "--porcelain=v1", "-z", "--untracked-files=no", cwd=top).split("\0")
+    except gh.GitError:
+        return set()
+    changed = set()
+    fields = iter(status)
+    for entry in fields:
+        if len(entry) > 3:
+            changed.add(entry[3:])
+            if "R" in entry[:2] or "C" in entry[:2]:
+                changed.add(next(fields, ""))  # the name it was renamed or copied from
+    out = set()
+    for change in plan.changed:
+        try:
+            rel = Path(os.path.relpath(plan.root / change.path, top)).as_posix()
+        except ValueError:  # another drive on Windows
+            continue
+        if rel in tracked and rel not in changed:
+            out.add(change.path)
+    return out
+
+
+def _from_here(path: Path) -> str:
+    """`path` as a command run in the current folder needs it."""
+    try:
+        return Path(os.path.relpath(path)).as_posix()
+    except ValueError:  # another drive on Windows
+        return path.as_posix()
+
+
+def _save_backup(path: Path, data: bytes) -> Path:
+    """Copy `data` to NAME.bak beside `path`, or NAME.bak2, ... : an earlier backup is the
+    older original, so it is never overwritten."""
+    for k in range(1, 1000):
+        copy = path.with_name(f"{path.name}.bak{k if k > 1 else ''}")
+        try:
+            with open(copy, "xb") as fh:
+                fh.write(data)
+            return copy
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"{path.name}.bak to {path.name}.bak999 all exist")
+
+
+def apply_plan(plan: UpgradePlan, *, backup: bool = True, restorable: set[str] | None = None) -> list[str]:
     """Write the planned edits; returns the files written (relative paths). Every file is
-    checked first, so a read-only one stops the upgrade before anything is changed."""
+    checked first, so a read-only one, or one edited since the plan was made, stops the
+    upgrade before anything is changed. A file git cannot give back as it is now (no
+    repository, untracked, uncommitted changes) is first copied to NAME.bak unless
+    `backup` is off; plan.backups lists the copies. `restorable`: git_restorable(plan),
+    if the caller has it already."""
     targets = [(change, plan.root / change.path) for change in plan.changed]
     blocked = [change.path for change, path in targets if not path.is_file() or not os.access(path, os.W_OK)]
     if blocked:
         raise UsageError(f"cannot write {', '.join(blocked)} (read-only or missing); nothing was changed")
+    edited = []
+    for change, path in targets:
+        try:
+            if path.read_bytes() != change.original:
+                edited.append(change.path)
+        except OSError:
+            edited.append(change.path)
+    if edited:
+        raise UsageError(f"{', '.join(edited)} changed after the upgrade was planned; nothing was changed (run the upgrade again)")
+    if backup and restorable is None:
+        restorable = git_restorable(plan)
     written: list[str] = []
     for change, path in targets:
+        if backup and change.path not in (restorable or ()):
+            try:
+                copy = _save_backup(path, change.original)
+            except OSError as exc:
+                done = f"; already updated: {', '.join(written)}" if written else "; nothing was changed"
+                raise UsageError(f"could not save a backup of {change.path} ({exc.strerror or exc}){done}") from None
+            plan.backups[change.path] = Path(change.path).with_name(copy.name).as_posix()
         tmp = path.with_name(f".{path.name}.llmshift-tmp")
         try:
             tmp.write_bytes(change.updated or b"")
@@ -748,12 +822,13 @@ def register(sub: Any) -> None:
         "test the replacement and open a pull request. Without --apply or --pr, only the diff is shown.",
     )
     p.add_argument("paths", nargs="*", help="where to look (default: scan.paths, else .)")
-    p.add_argument("--from", dest="old", metavar="MODEL", help="the model to move off")
-    p.add_argument("--to", dest="new", metavar="MODEL", help="its replacement (default: the lifecycle registry's)")
+    p.add_argument("--from", dest="old", metavar="MODEL", type=cli.model_arg, help="the model to move off")
+    p.add_argument("--to", dest="new", metavar="MODEL", type=cli.model_arg, help="its replacement (default: the lifecycle registry's)")
     p.add_argument("--auto", action="store_true", help="every retired or retiring model found that has a known replacement")
-    p.add_argument("--apply", action="store_true", help="write the edits (default: show the diff only)")
+    p.add_argument("--apply", action="store_true", help="write the edits (default: show the diff only); a file git cannot restore is first saved as NAME.bak")
+    p.add_argument("--no-backup", action="store_true", help="with --apply: do not save NAME.bak copies")
     p.add_argument("--compare", action="store_true", help="run the test set on the replacement and include the results")
-    p.add_argument("--compare-with", metavar="MODEL", help="run the comparison on this model instead (e.g. a proxy route)")
+    p.add_argument("--compare-with", metavar="MODEL", type=cli.model_arg, help="run the comparison on this model instead (e.g. a proxy route)")
     p.add_argument("--fix", action="store_true", help="also apply the prompt changes `llmshift fix` suggests")
     p.add_argument("--pr", action="store_true", help="commit to a branch, push and open a pull request")
     p.add_argument("--branch", help="branch name for --pr (default: llmshift/upgrade-OLD-to-NEW)")
@@ -855,9 +930,15 @@ def cmd_upgrade(args: argparse.Namespace, cfg: dict) -> int:
     con.out("")
     con.out(plan.diff.rstrip())
     if args.apply:
-        written = apply_plan(plan)
+        restorable = git_restorable(plan)  # before writing: afterwards every file has changes
+        written = apply_plan(plan, backup=not args.no_backup, restorable=restorable)
         con.out("")
         con.out(f"{con.style(con.sym('pass'), 'green')} updated {len(written)} file(s): {', '.join(written)}")
+        if plan.backups:
+            con.out(f"  git cannot give these back, so the originals are saved as {', '.join(plan.backups.values())}; delete the copies once you are happy")
+        undo = [_from_here(plan.root / p) for p in written if p in restorable]
+        if undo:
+            con.out(con.style("  to undo: git checkout -- " + " ".join(f'"{p}"' if " " in p else p for p in undo), "grey"))
     else:
         con.out("")
         con.out(con.style("Dry run: nothing was changed. Re-run with --apply to write these edits, or --pr to open a pull request.", "grey"))

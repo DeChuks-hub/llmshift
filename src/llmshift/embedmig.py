@@ -441,7 +441,9 @@ def run_embedding_migration(
     min_overlap: float = 0.6,
     seed: int = 7,
     config: dict | None = None,
+    on_start: Any = None,
 ) -> EmbeddingReport:
+    """`on_start()` is called once everything is checked, before the first (paid) request."""
     from . import pricing
     from .providers import resolve
 
@@ -472,6 +474,8 @@ def run_embedding_migration(
     if depth < k:
         notes.append(f"Only {len(sample)} document chunks, so the top {depth} were compared instead of the top {k}.")
 
+    if on_start is not None:
+        on_start()
     texts = [d.text for d in sample]
     old_docs, _ = embed_all(old_p, texts)
     new_docs, new_seconds = embed_all(new_p, texts)
@@ -606,7 +610,6 @@ def cmd_embeddings(args: argparse.Namespace, cfg: dict) -> int:
         queries, source = queries_from_logs(args.queries_from), "logs"
         if not queries:
             raise UsageError(f"no embedding requests with text inputs found in {', '.join(args.queries_from)}")
-    con.out(con.style(f"Embedding a sample of your corpus with {args.old} and {args.new}...", "grey"), err=True)
     report = run_embedding_migration(
         args.corpus,
         args.old,
@@ -620,6 +623,7 @@ def cmd_embeddings(args: argparse.Namespace, cfg: dict) -> int:
         min_overlap=args.min_overlap,
         seed=args.seed,
         config=cfg,
+        on_start=lambda: con.out(con.style(f"Embedding a sample of your corpus with {args.old} and {args.new}...", "grey"), err=True),
     )
     data = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
     if args.json:
@@ -643,8 +647,8 @@ def register(sub: Any) -> None:
         description="Embed a sample of your documents and queries with both models, compare the top-k results per query, "
         "and estimate the cost and time of re-embedding the whole corpus.",
     )
-    p.add_argument("--from", dest="old", required=True, metavar="MODEL", help="the embedding model you use today")
-    p.add_argument("--to", dest="new", required=True, metavar="MODEL", help="the embedding model you are moving to")
+    p.add_argument("--from", dest="old", required=True, metavar="MODEL", type=cli.model_arg, help="the embedding model you use today")
+    p.add_argument("--to", dest="new", required=True, metavar="MODEL", type=cli.model_arg, help="the embedding model you are moving to")
     p.add_argument("--corpus", nargs="+", action="extend", required=True, metavar="PATH", help="documents: files or folders (.txt .md .rst .html .json .jsonl)")
     q = p.add_mutually_exclusive_group()
     q.add_argument("--queries", metavar="FILE", help="real search queries: one per line, or JSON/JSONL records")

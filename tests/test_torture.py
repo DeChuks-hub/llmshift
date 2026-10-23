@@ -293,7 +293,7 @@ def test_provider_chaos(server, monkeypatch):
     behaviours = iter([
         (200, "<html>gateway</html>"),  # garbage 200
         (502, "<html>bad gateway</html>"), (200, _ok("after a 502")),  # retried
-        (429, {"error": {"message": "slow down"}}, {"Retry-After": "99999"}), (200, _ok("after a 429")),
+        (429, {"error": {"message": "slow down"}}, {"Retry-After": "99999"}),  # more than a day: not waited for
         (429, {"error": {"message": "slow down"}}, {"Retry-After": "-5"}), (200, _ok()),
         (429, {"error": {"message": "slow down"}}, {"Retry-After": "soon"}), (200, _ok()),
         (200, "[" * 50_000 + "]" * 50_000),  # nested too deeply
@@ -305,7 +305,10 @@ def test_provider_chaos(server, monkeypatch):
     with pytest.raises(ProviderError):
         p.complete(REQUEST)
     assert p.complete(REQUEST).text == "after a 502"
-    assert p.complete(REQUEST).text == "after a 429"
+    waited = len(delays)
+    with pytest.raises(ProviderError, match=r"asks to wait 1 day before trying again, longer than llmshift waits \(60 s\)"):
+        p.complete(REQUEST)
+    assert len(delays) == waited  # failed at once instead of sleeping a minute per retry
     assert max(delays) <= http.MAX_DELAY
     p.complete(REQUEST)
     p.complete(REQUEST)
@@ -315,6 +318,28 @@ def test_provider_chaos(server, monkeypatch):
     assert p.complete(REQUEST).text == "broken � emoji"
     with pytest.raises(ProviderError):
         p.complete(REQUEST)
+
+
+def test_a_slow_server_is_not_called_unreachable_and_a_day_long_wait_is_refused(server, monkeypatch):
+    import email.utils
+
+    from llmshift.runner import _repeats
+
+    monkeypatch.setattr(http, "_sleep", lambda seconds, sleep: None)
+    server.route("POST", "/v1/chat/completions", lambda req: (time.sleep(2), _ok())[1])
+    with pytest.raises(ProviderError) as info:
+        _provider(server, timeout=0.5).complete(REQUEST)
+    message = str(info.value)
+    assert info.value.code == "timeout" and "no answer from 127.0.0.1" in message and "within 0.5s" in message
+    assert "was reached but is slow" in message and "cannot reach" not in message
+    assert _repeats(info.value)  # every case would wait as long: the run stops early, as before
+    in_two_days = email.utils.formatdate(time.time() + 2 * 86400, usegmt=True)
+    server.route("POST", "/v1/chat/completions", lambda req: (429, {"error": {"message": "quota"}}, {"Retry-After": in_two_days}))
+    before = len(server.requests)
+    with pytest.raises(ProviderError, match="asks to wait 2 days") as info:
+        _provider(server).complete(REQUEST)
+    assert len(server.requests) - before == 1 and not info.value.retryable
+    assert [http._human_wait(s) for s in (90, 900, 7200, 86400, 3 * 86400)] == ["90 s", "15 min", "2 h", "1 day", "3 days"]
 
 
 def test_resets_timeouts_and_oversized_bodies(server, monkeypatch):

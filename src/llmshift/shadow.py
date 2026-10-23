@@ -30,7 +30,7 @@ from . import console as con
 from . import fileio
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import Response
-from .textutil import json_loads, jsonl_lines
+from .textutil import json_loads, jsonl_lines, report_json
 
 DEFAULT_PATH = "logs/llmshift-shadow.jsonl"
 IDLE_SECONDS = 10.0  # a worker with nothing to do for this long stops (a new one starts with the next copy)
@@ -260,6 +260,8 @@ class Shadow:
             })
             if resp.error:
                 shadow["error"] = resp.error
+            if resp.rejected:  # settings of the live request this model refused
+                shadow["rejected"] = resp.rejected
         except Exception as exc:
             shadow["error"] = f"{exc.__class__.__name__}: {exc}"[:500]
         record = {
@@ -397,6 +399,7 @@ def build_cases(records: list[dict]) -> tuple[list, dict[str, Response], str]:
                 text=shadow.get("output") or "", tool_calls=shadow.get("tool_calls") or [], model=shadow.get("model"),
                 usage=shadow.get("usage") or {}, latency_ms=shadow.get("latency_ms"),
                 error=shadow.get("error"), error_code="shadow_error" if shadow.get("error") else None,
+                rejected=shadow.get("rejected") or [],
             )
             answers[cid] = resp
     return cases, answers, ", ".join(sorted(specs)) or "shadow"
@@ -431,7 +434,7 @@ def cmd_shadow_report(args: Any, cfg: dict) -> int:
     if times:
         result.insights.insert(0, f"{len(records)} shadowed request(s) from {times[0][:16].replace('T', ' ')} to {times[-1][:16].replace('T', ' ')} UTC.")
     if args.format == "json":
-        con.out(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+        con.out(report_json(result.to_dict()))
     elif args.format == "markdown":
         con.out(report.compare_markdown(result, title="LLMShift shadow report"))
     else:

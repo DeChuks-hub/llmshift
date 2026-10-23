@@ -145,12 +145,37 @@ def test_package_metadata_is_launch_ready():
     assert (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").count(f"## {llmshift.__version__} ") == 1
 
 
+def test_third_party_notices_carry_the_full_licenses_into_both_packages():
+    text = (ROOT / "THIRD_PARTY_NOTICES").read_text(encoding="utf-8")
+    assert "Copyright (c) 2023 Berri AI" in text and "Copyright (c) 2006-2016 Kirill Simonov" in text  # price list, PyYAML
+    assert text.count("Permission is hereby granted, free of charge") == 2 and text.count('THE SOFTWARE IS PROVIDED "AS IS"') == 2
+    targets = _toml(ROOT / "pyproject.toml")["tool"]["hatch"]["build"]["targets"]
+    assert "THIRD_PARTY_NOTICES" in targets["sdist"]["include"]
+    assert targets["wheel"]["force-include"] == {"THIRD_PARTY_NOTICES": "llmshift/THIRD_PARTY_NOTICES"}
+
+
 def test_action_examples_use_this_version():
-    """A version bump must move the `uses:` lines too, or everyone who copies them keeps
-    running the old action."""
+    """The `uses:` lines name the moving major tag (v0, which the release workflow moves) or
+    this exact version: a bump must move an exact pin too, or whoever copies it keeps running
+    the old action."""
     files = [ROOT / "README.md", *sorted((ROOT / "examples" / "workflows").glob("*.yml"))]
     refs = {f.name: re.findall(r"DeChuks-hub/llmshift@([\w.-]+)", f.read_text(encoding="utf-8")) for f in files}
-    assert sum(map(len, refs.values())) >= 5 and {r for found in refs.values() for r in found} == {f"v{llmshift.__version__}"}, refs
+    major = "v" + llmshift.__version__.split(".")[0]
+    assert sum(map(len, refs.values())) >= 5 and {r for found in refs.values() for r in found} <= {major, f"v{llmshift.__version__}"}, refs
+
+
+# What a workflow can pass to and read from the action: `@v0` moves to every 0.x release,
+# so a name removed or renamed here would break workflows that never chose to upgrade.
+V0_INPUTS = {"command", "args", "python-version", "version", "working-directory"}
+V0_OUTPUTS = {"pass-rate", "retired", "retiring", "recommended"}
+
+
+def test_the_action_keeps_its_inputs_and_outputs_within_v0():
+    from llmshift._vendor import yaml
+
+    action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+    assert V0_INPUTS <= set(action["inputs"]) and V0_OUTPUTS <= set(action["outputs"])
+    assert all(not spec.get("required") or name in V0_INPUTS for name, spec in action["inputs"].items())  # no new required input
 
 
 def test_no_leftovers_of_the_old_name_or_placeholders():

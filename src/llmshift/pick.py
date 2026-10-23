@@ -28,7 +28,7 @@ from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .pricing import Price, money
 from .stats import pass_rate_interval
 from .testset import TestCase, unique_ids
-from .textutil import plural
+from .textutil import plural, report_json, show_bidi
 
 DEFAULT_MIN_PASS_RATE = 0.95
 
@@ -563,7 +563,7 @@ def pick_markdown(res: PickResult) -> str:
         lines.append(_md(price_line))
     for note in res.notes:
         lines.append(f"- {_md(note)}")
-    return "\n".join(lines) + "\n"
+    return show_bidi("\n".join(lines) + "\n")
 
 
 # --------------------------------------------------------------------- cli
@@ -637,7 +637,7 @@ def cmd_pick(args: argparse.Namespace, cfg: dict) -> int:
     )
     markdown = pick_markdown(res)
     if args.format == "json":
-        con.out(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+        con.out(report_json(res.to_dict()))
     elif args.format == "markdown":
         con.out(markdown)
     else:
@@ -645,7 +645,7 @@ def cmd_pick(args: argparse.Namespace, cfg: dict) -> int:
     reports_dir = Path(cfg.get("reports_dir") or ".llmshift/reports")
     stamp = cli._timestamp()
     written = []
-    for value, suffix, text in ((args.json, ".json", lambda: json.dumps(res.to_dict(), indent=2, ensure_ascii=False) + "\n"), (args.markdown, ".md", lambda: markdown)):
+    for value, suffix, text in ((args.json, ".json", lambda: report_json(res.to_dict()) + "\n"), (args.markdown, ".md", lambda: markdown)):
         if value is None:
             continue
         target = Path(value) if value else reports_dir / f"pick-{stamp}{suffix}"

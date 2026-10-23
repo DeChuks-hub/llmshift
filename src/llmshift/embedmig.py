@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import heapq
 import html
-import json
 import math
 import operator
 import random
@@ -25,7 +24,7 @@ from . import __version__
 from . import console as con
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import ProviderError
-from .textutil import json_loads, jsonl_lines
+from .textutil import json_loads, jsonl_lines, report_json, show_bidi
 
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".json", ".jsonl", ".ndjson"}
 TEXT_FIELDS = ("text", "content", "body", "page_content", "chunk", "document", "passage", "summary")
@@ -571,6 +570,7 @@ def report_text(r: EmbeddingReport) -> str:
 
 def report_markdown(r: EmbeddingReport) -> str:
     from .pricing import money
+    from .report import _md
 
     verdict = "meets" if r.passed else "is below"
     lines = [
@@ -590,11 +590,11 @@ def report_markdown(r: EmbeddingReport) -> str:
     if r.worst:
         lines += ["", "**Queries whose results change most**", ""]
         for w in r.worst:
-            query = w["query"].replace("|", "\\|")[:100]
+            query = _md(str(w["query"])[:100])  # queries come from your users' logs: no live links or images
             lines.append(f"- {query} (overlap {w['overlap']:.0%})")
     for note in r.notes:
-        lines += ["", f"> {note}"]
-    return "\n".join(lines) + "\n"
+        lines += ["", f"> {_md(note)}"]
+    return show_bidi("\n".join(lines) + "\n")
 
 
 def cmd_embeddings(args: argparse.Namespace, cfg: dict) -> int:
@@ -625,7 +625,7 @@ def cmd_embeddings(args: argparse.Namespace, cfg: dict) -> int:
         config=cfg,
         on_start=lambda: con.out(con.style(f"Embedding a sample of your corpus with {args.old} and {args.new}...", "grey"), err=True),
     )
-    data = json.dumps(report.to_dict(), indent=2, ensure_ascii=False)
+    data = report_json(report.to_dict())
     if args.json:
         cli._write(args.json, data + "\n")
     if args.format == "json":

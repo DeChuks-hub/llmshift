@@ -167,6 +167,8 @@ class GeminiProvider(Provider):
             gen["temperature"] = params["temperature"]
         if params.get("top_p") is not None:
             gen["topP"] = params["top_p"]
+        if params.get("top_k") is not None:
+            gen["topK"] = params["top_k"]
         max_out = params.get("max_tokens") or params.get("max_completion_tokens")
         if max_out:
             gen["maxOutputTokens"] = int(max_out)

@@ -23,7 +23,15 @@ _SECRET_VALUE = r"(?=[\w+/=.~!@#$%^*-]{0,255}\d)(?=[\w+/=.~!@#$%^*-]{0,255}[A-Za
 _SECRETS = [
     (r"\bsk-ant-[A-Za-z0-9_\-]{20,}", ("sk-ant-",)),  # Anthropic
     (r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_\-]{20,}", ("sk-",)),  # OpenAI (and DeepSeek)
-    (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", ("AKIA", "ASIA")),  # AWS, long-lived and temporary
+    # An AWS secret access key has no prefix, only its 40 characters: it is known by what
+    # surrounds it, a "secret access key" label in any spelling (aws_secret_access_key =,
+    # SecretAccessKey:, --aws-secret-access-key, => ...) or the access key id just before it.
+    (
+        r"(?i)secret[ \t_.-]?access[ \t_.-]?key(?:[ \t]+(?:is|was))?[^A-Za-z0-9/+\n]{1,8}(?P<v>[A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])",
+        ("secret",),
+    ),
+    (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b[^\n]{0,80}?(?<![A-Za-z0-9/+])(?P<v>[A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])", ("AKIA", "ASIA")),
+    (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", ("AKIA", "ASIA")),  # AWS access key ids, long-lived and temporary
     (r"\bgh[pousr]_[A-Za-z0-9]{30,}\b", ("ghp_", "gho_", "ghu_", "ghs_", "ghr_")),
     (r"\bgithub_pat_[A-Za-z0-9_]{40,}\b", ("github_pat_",)),
     (r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b", ("xox",)),  # Slack

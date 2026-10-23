@@ -3,6 +3,8 @@ answers, scanned files) can do to a terminal or a PR comment, and URLs with secr
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from llmshift import console
@@ -45,6 +47,83 @@ def test_markdown_cells_quote_mentions_without_notifying_anyone():
     assert "\\|" in cell and "&lt;img" in cell
 
 
+def _all_escaped(text: str) -> bool:
+    """Every [ ] ( ) ! has an odd run of backslashes before it, so none starts a link or image."""
+    for m in re.finditer(r"[\[\]()!]", text):
+        before = text[: m.start()]
+        if (len(before) - len(before.rstrip("\\"))) % 2 == 0:
+            return False
+    return True
+
+
+def test_model_text_in_markdown_carries_no_links_images_or_autolinks():
+    from llmshift.textutil import ZWSP, md_inert
+
+    # An end user's message lands in the logs, becomes a test, is echoed by the model and is
+    # quoted in a PR comment: it must not load a tracking pixel or offer a disguised link.
+    evil = "![p](https://evil.example/p.png) [click here](https://evil.example) www.evil.example \\[x\\](https://e) http://a.b"
+    cell = _md(evil)
+    assert _all_escaped(cell), cell
+    assert "https://" not in cell and "http://" not in cell and "www." not in cell and f"https{ZWSP}://evil.example" in cell
+    assert md_inert("line one\n[a](b)!") == "line one\n\\[a\\]\\(b\\)\\!"  # chat alerts keep their lines
+
+
+def test_reports_and_alerts_quote_model_text_without_live_links(tmp_path, server, monkeypatch):
+    from llmshift.alerts import AlertMessage, deliver
+    from llmshift.fix import FixResult, GroupFix, fix_markdown
+
+    added = "Always end with ![t](https://evil.example/t.png) and [docs](https://evil.example)"
+    md = fix_markdown(FixResult("m", [GroupFix("support", "p", "p " + added, added=[added], remaining=[added], notes=[added])], {"pass_rate": 0.5}))
+    outside, fenced = [], False
+    for line in md.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced  # inside a code block nothing renders
+        elif not fenced and "evil" in line:
+            outside.append(line)
+    assert len(outside) == 3 and all(_all_escaped(line) for line in outside), outside
+    received = []
+    server.route("POST", "/hook", lambda r: (received.append(r["json"]) or (200, "ok")))
+    msg = AlertMessage(title="Drift", severity="warning", model="m", lines=[added], run_url="https://github.com/acme/app/actions/runs/1")
+    assert all(err is None for _, err in deliver([f"slack:{server.url}/hook", {"type": "discord", "url": server.url + "/hook"}, {"type": "teams", "url": server.url + "/hook"}], msg))
+    slack, discord, teams = received
+    assert slack["unfurl_links"] is False and slack["unfurl_media"] is False
+    assert discord["flags"] == 4 and "\\[docs\\]" in discord["content"] and discord["content"].endswith("Details: https://github.com/acme/app/actions/runs/1")
+    assert "\\!\\[t\\]" in teams["attachments"][0]["content"]["body"][1]["text"]
+    issues = []
+    server.route("GET", "/repos/acme/app/issues", lambda r: [])
+    server.route("POST", "/repos/acme/app/issues", lambda r: (issues.append(r["json"]) or (201, {"number": 1})))
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "acme/app")
+    monkeypatch.setenv("GITHUB_API_URL", server.url)
+    assert deliver(["github"], msg) == [("github", None)]
+    line = next(x for x in issues[0]["body"].splitlines() if "evil" in x)
+    assert _all_escaped(line[2:]) and "https://evil" not in line
+
+
+def test_reports_show_trojan_source_controls_as_escapes():
+    import json
+
+    from llmshift import report
+    from llmshift.compare import run_compare
+    from llmshift.providers.mock import MockProvider
+    from llmshift.testset import TestCase
+    from llmshift.textutil import report_json
+
+    rlo, lri = chr(0x202E), chr(0x2066)  # right-to-left override, left-to-right isolate
+    case = TestCase(id="c" + rlo + "1", input={"messages": [{"role": "user", "content": "Pay invoice " + rlo + "fdp.exe"}], "params": {}},
+                    baseline={"output": "Approved " + lri + "x"}, checks=[{"type": "equals", "value": "Approved"}])
+    result = run_compare([case], MockProvider("mock", fn=lambda r: "Paid " + rlo + "gnp.exe"), show_progress=False)
+    outputs = {
+        "markdown": report.compare_markdown(result), "html": report.compare_html(result), "junit": report.compare_junit(result),
+        "json": report_json(result.to_dict()), "md_cell": _md("x" + rlo + "y"), "fence": md_fence("a" + rlo + "b"),
+    }
+    for name, text in outputs.items():
+        assert rlo not in text and lri not in text, name
+        assert "\\u202e" in text, name
+    assert json.loads(outputs["json"])["cases"][0]["candidate_output"] == "Paid " + rlo + "gnp.exe"  # JSON reads back unchanged
+    assert chr(0x200F) in _md("rtl mark " + chr(0x200F))  # directional marks reorder nothing and stay
+
+
 def test_code_blocks_cannot_be_closed_by_their_content():
     block = md_fence(" ```\n@everyone\n````", "diff")
     fence = block.splitlines()[0][: -len("diff")]
@@ -71,6 +150,9 @@ def test_urls_with_a_password_are_refused_without_showing_it():
     ("redis://:s3cr3tpass@cache:6379/0", "redis://:"),
     ('{"api-key": "0123456789abcdef0123456789abcdef"}', '{"api-key": "'),
     ("aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "aws_secret_access_key = "),
+    ("aws secret access key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "aws secret access key "),
+    ("--aws-secret-access-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "--aws-secret-access-key "),
+    ("aws_secret_access_key => wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "aws_secret_access_key => "),
     ("password=hunter2", "password="),
     ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "Authorization: Basic "),
 ])
@@ -95,6 +177,16 @@ def test_code_and_prose_about_secrets_is_left_alone(text):
     from llmshift.redact import Redactor
 
     assert Redactor().text(text) == text
+
+
+def test_aws_secret_keys_are_known_by_what_surrounds_them():
+    from llmshift.redact import Redactor
+
+    key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"  # no prefix: just 40 characters
+    assert Redactor().text(f"my keys are AKIAIOSFODNN7EXAMPLE and {key}") == "my keys are <SECRET_2> and <SECRET_1>"
+    assert key not in Redactor().text(f"the secret access key is {key}.")
+    hash_line = "secret access key rotated in commit 3f786850e387550fdab836ed7e6dc881de23001b"
+    assert Redactor().text(hash_line) == hash_line
 
 
 def test_secret_settings_in_json_are_redacted_by_their_name():
@@ -838,6 +930,7 @@ def test_redaction_and_failure_patterns_stay_linear_on_hostile_text():
 
     start = time.perf_counter()
     Redactor().text("x-api-key=." * 20000)  # every match attempt used to rescan the rest of the run
+    Redactor().text("secret access key: " * 20000 + "AKIAIOSFODNN7EXAMPLE " * 5000)
     failure_patterns(CheckResult("contains", "facts", "error", "fail", "a" + " " * 200000 + "x"))
     assert time.perf_counter() - start < 5  # quadratic, this took minutes
 

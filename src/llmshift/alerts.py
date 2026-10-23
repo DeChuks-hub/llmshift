@@ -104,15 +104,22 @@ def _slack_escape(text: str) -> str:
 
 
 def _send_slack(dest: dict, msg: AlertMessage) -> None:
-    _post(_url(dest), {"text": _slack_escape(msg.text(markdown=True))})
+    # No previews: a URL in a model's answer must not load an image into the channel.
+    _post(_url(dest), {"text": _slack_escape(msg.text(markdown=True)), "unfurl_links": False, "unfurl_media": False})
 
 
 def _send_discord(dest: dict, msg: AlertMessage) -> None:
-    text = msg.text(markdown=False)
-    _post(_url(dest), {"content": text[:1990], "allowed_mentions": {"parse": []}})  # never @everyone
+    from .textutil import md_inert
+
+    # Discord renders [text](url) links: the lines (answers, patterns) are shown as written.
+    text = "\n".join([md_inert(msg.title)] + [f"• {md_inert(line)}" for line in msg.lines] + ([f"Details: {msg.run_url}"] if msg.run_url else []))
+    # never @everyone; flags 4 = no embeds, so no link previews or images
+    _post(_url(dest), {"content": text[:1990], "allowed_mentions": {"parse": []}, "flags": 4})
 
 
 def _send_teams(dest: dict, msg: AlertMessage) -> None:
+    from .textutil import md_inert
+
     card = {
         "type": "message",
         "attachments": [
@@ -123,8 +130,8 @@ def _send_teams(dest: dict, msg: AlertMessage) -> None:
                     "type": "AdaptiveCard",
                     "version": "1.4",
                     "body": [
-                        {"type": "TextBlock", "text": msg.title, "weight": "Bolder", "size": "Medium", "wrap": True},
-                        {"type": "TextBlock", "text": "\n\n".join("- " + line for line in msg.lines), "wrap": True},
+                        {"type": "TextBlock", "text": md_inert(msg.title), "weight": "Bolder", "size": "Medium", "wrap": True},
+                        {"type": "TextBlock", "text": "\n\n".join("- " + md_inert(line) for line in msg.lines), "wrap": True},
                     ]
                     + ([{"type": "TextBlock", "text": f"[Details]({msg.run_url})", "wrap": True}] if msg.run_url else []),
                 },
@@ -152,8 +159,10 @@ def _send_github(dest: dict, msg: AlertMessage) -> None:
     token, repo, api = _github_target(dest)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     label = str(dest.get("label", "llmshift"))
+    from .report import _md  # the lines quote answers and patterns: no links, images or @mentions
+
     title = msg.issue_title or f"[llmshift] {msg.model}: behaviour drift detected"
-    body = "\n".join([f"**{msg.title}**", ""] + [f"- {line}" for line in msg.lines] + (["", f"Run: {msg.run_url}"] if msg.run_url else []))
+    body = "\n".join([f"**{_md(msg.title)}**", ""] + [f"- {_md(line)}" for line in msg.lines] + (["", f"Run: {msg.run_url}"] if msg.run_url else []))
     existing = None
     for page in range(1, 11):  # every open issue with the label, not just the first page
         issues = http.get_json(

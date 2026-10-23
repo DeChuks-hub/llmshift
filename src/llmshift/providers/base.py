@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import time
@@ -137,6 +138,9 @@ class Response:
     error_code: str | None = None
     cached: bool = False
     steps: list[dict] = field(default_factory=list)  # agent replays: one entry per model call
+    # What of the request the model refused ("temperature", "assistant prefill", ...): it was
+    # left out to get this answer, so the request as sent would have failed.
+    rejected: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Whatever a provider, a cache file or a custom function hands over, the fields get
@@ -152,6 +156,7 @@ class Response:
         lat = self.latency_ms
         self.latency_ms = float(lat) if isinstance(lat, (int, float)) and not isinstance(lat, bool) and math.isfinite(lat) and lat >= 0 else None
         self.steps = [s for s in self.steps if isinstance(s, dict)] if isinstance(self.steps, list) else []
+        self.rejected = [r for r in self.rejected if isinstance(r, str) and r] if isinstance(self.rejected, list) else []
         self.cached = self.cached is True
 
     @property
@@ -218,6 +223,11 @@ class Provider:
 
 def params_of(request: dict) -> dict:
     return dict(request.get("params") or {})
+
+
+def value_key(value: Any) -> str:
+    """A value as a set member: a model that rejects temperature 0 may accept temperature 1."""
+    return json.dumps(value, sort_keys=True, default=str)
 
 
 def clean_usage(raw: Any) -> dict:

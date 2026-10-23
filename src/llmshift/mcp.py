@@ -36,7 +36,7 @@ from typing import Any, BinaryIO, Callable
 from . import __version__
 from . import console as con
 from .errors import EXIT_INTERRUPTED, EXIT_OK, UsageError
-from .textutil import json_loads
+from .textutil import json_loads, report_json
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -515,7 +515,7 @@ def _registry(cfg: Any) -> Any:
 def _load_cases(cfg: Any, args: dict) -> tuple[list, str]:
     from . import cli
 
-    ns = SimpleNamespace(tests=args.get("tests"), group=args.get("groups"), tag=args.get("tags"), case=args.get("case_ids"), limit=args.get("limit"))
+    ns = SimpleNamespace(tests=args.get("tests"), group=args.get("groups"), tag=args.get("tags"), case=args.get("case_ids"), limit=args.get("limit"), drop_param=args.get("drop_params"))
     return cli._load_cases(cfg, ns)
 
 
@@ -766,6 +766,7 @@ def _case_summary(c: Any) -> dict:
             "max_cases_shown": {"type": "integer", "minimum": 0, "maximum": 200, "description": "Changed cases included in the result (default 10)."},
             "repeat": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Run each case N times to find flaky cases and narrow the pass-rate range (default 1)."},
             "no_cache": {"type": "boolean", "description": "Call the model even for requests answered before."},
+            "drop_params": {**STRINGS, "description": "Leave these settings out of every test request (e.g. temperature, once the code no longer sends a setting the model rejects)."},
         }
     ),
     title="Compare a model on the test set",
@@ -831,7 +832,13 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
         "cases_not_shown": len(changed) - len(shown),
         "reports": [cli._rel(p) for p in reports],
     }
-    if s.get("failed") or s.get("warned"):
+    refused, other = cli.rejected_and_other(result)
+    if refused:
+        out["next"] = (
+            f"{result.candidate} rejects {', '.join(refused)} as the requests send them, so those calls fail: remove them from the code "
+            "(llmshift_upgrade lists where), then run llmshift_compare again with drop_params"
+        )
+    elif other:
         out["next"] = f"llmshift_fix with to={result.candidate} suggests prompt changes for the changed cases"
     return out
 
@@ -891,11 +898,12 @@ def _fix_tool(args: dict, cfg: Any) -> dict:
     md_path = reports_dir / f"fix-{cli._timestamp()}.md"
     cli._write(md_path, fix_markdown(result))
     json_path = md_path.with_suffix(".json")
-    cli._write(json_path, json.dumps(result.to_dict(), indent=2, ensure_ascii=False) + "\n")
+    cli._write(json_path, report_json(result.to_dict()) + "\n")
     out: dict = {
         "candidate": result.candidate,
         "tests": cli._rel(path),
         "nothing_to_fix": not result.groups,
+        "notes": result.notes,  # what no prompt can fix, such as settings the model rejects
         "before": result.before,
         "after": result.after,
         "groups": [

@@ -216,7 +216,36 @@ def md_fence(body: str, lang: str = "") -> str:
     with its own ``` would otherwise end the block and turn the rest into live Markdown)."""
     longest = max((len(run) for run in re.findall(r"`{3,}", body)), default=0)
     fence = "`" * max(3, longest + 1)
-    return f"{fence}{lang}\n{body}\n{fence}"
+    return f"{fence}{lang}\n{show_bidi(body)}\n{fence}"
+
+
+# Bidi embedding, override and isolate controls: "Trojan Source" text that displays in
+# another order than it reads. Directional marks, which reorder nothing, are not among them.
+_BIDI_RE = re.compile("[" + "".join(map(chr, (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))) + "]")
+
+
+def show_bidi(text: str) -> str:
+    """The bidi controls in `text` shown as backslash-u escapes, as the terminal shows them.
+    Inside JSON strings the escape is JSON's own, so the data reads back unchanged."""
+    return _BIDI_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
+
+
+def report_json(data: Any) -> str:
+    """A report as JSON: indented, readable characters kept, bidi controls escaped."""
+    return show_bidi(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+ZWSP = chr(0x200B)  # zero-width space: breaks a link or mention without showing
+_LINK_SYNTAX_RE = re.compile(r"[\\\[\]()!]")
+_AUTOLINK_RE = re.compile(r"(?i)\b(?:https?|ftp)(?=://)|\bwww(?=\.)")
+
+
+def md_inert(text: str) -> str:
+    """Model or user text that Markdown shows as written: [text](url) is no link, ![](url)
+    no image (a tracking pixel in a PR comment) and a bare URL no autolink. Backslashes are
+    escaped first, so the text cannot undo an escape. Newlines are kept."""
+    text = _LINK_SYNTAX_RE.sub(lambda m: "\\" + m.group(), str(text))
+    return _AUTOLINK_RE.sub(lambda m: m.group() + ZWSP, text)
 
 
 def ngrams(tokens: list[str], n: int) -> list[tuple[str, ...]]:

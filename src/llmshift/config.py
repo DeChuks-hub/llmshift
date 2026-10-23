@@ -259,7 +259,7 @@ _RULES: dict[tuple, tuple] = {
 _SECTIONS = ("scan", "snapshot", "fix", "watch", "providers", "severity", "pricing", "pick", "digest")
 # Every setting llmshift reads; anything else in the file is a typo or a leftover, which
 # is reported (and otherwise ignored) instead of silently changing nothing.
-_TOP_KEYS = set(DEFAULTS) | set(_SECTIONS) | {"repeat", "judge_mode"}
+_TOP_KEYS = set(DEFAULTS) | set(_SECTIONS) | {"repeat", "judge_mode", "drop_params"}
 _SECTION_KEYS = {
     "scan": {"paths", "exclude", "warn_days", "fail_on", "include_docs", "registry"},
     "snapshot": {"max_cases", "per_group", "max_records", "seed", "redact_secrets", "redact_pii"},
@@ -377,6 +377,9 @@ def _validate(user: dict, source: Path | None) -> None:
     for key in ("tests", "baseline", "candidate", "judge", "embedder", "cache_dir", "reports_dir"):
         if user.get(key) is not None and not isinstance(user[key], (str, int, float)):
             raise ConfigError(f"{where}{key} must be text, got {type(user[key]).__name__}")
+    drop = user.get("drop_params")
+    if drop is not None and not (isinstance(drop, list) and all(isinstance(v, str) and v.strip() for v in drop)):
+        raise ConfigError(f"{where}drop_params must be a list of setting names, e.g. [temperature, top_p]")
 
 
 def load_config(path: str | os.PathLike | None = None) -> Config:

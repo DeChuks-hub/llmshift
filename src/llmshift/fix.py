@@ -28,7 +28,7 @@ from .providers import resolve
 from .providers.base import ProviderError
 from .stats import stored_rate
 from .testset import TestCase, group_key, groups_of, unique_ids
-from .textutil import language_name, md_fence, normalize, shorten, unified_diff, word_count
+from .textutil import language_name, md_fence, normalize, shorten, show_bidi, unified_diff, word_count
 
 HEADER = "Output requirements:"
 
@@ -86,6 +86,7 @@ class FixResult:
     after: dict | None = None
     created_at: str = ""
     excluded_examples: int = 0
+    notes: list[str] = field(default_factory=list)  # what no prompt can fix (settings the model rejects)
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +96,7 @@ class FixResult:
             "before": self.before,
             "after": self.after,
             "excluded_example_cases": self.excluded_examples,
+            "notes": self.notes,
             "groups": [g.to_dict() for g in self.groups],
         }
 
@@ -391,8 +393,12 @@ def run_fix(
     cand = resolve(candidate, config) if isinstance(candidate, str) else candidate
     opt = resolve(optimizer, config) if isinstance(optimizer, str) else optimizer
     opt_error: str | None = None  # once the optimizer fails, the other groups do without it
+    # A setting the model rejects fails a case whatever the prompt says: prompts are judged on
+    # the answers, and the rejected settings are reported apart.
+    severity = {**(severity or {}), "request": "info"}
     common = dict(judge=judge, config=config, concurrency=concurrency, cache=cache, allow_python=allow_python, severity=severity, show_progress=show_progress)
     initial = previous if previous is not None else run_compare(cases, cand, **common)
+    refused = sorted({item.split("=", 1)[0] for c in initial.cases for r in c.checks if r.type == "request" for item in (r.details or {}).get("rejected") or []})
     by_result = {c.id: c for c in initial.cases}
     by_case = {c.id: c for c in cases}
     fixes: list[GroupFix] = []
@@ -497,6 +503,12 @@ def run_fix(
     before_cases = [c for c in initial.cases if c.id not in examples]
     result = FixResult(candidate=cand.spec, groups=fixes, before=_stats(before_cases), created_at=_dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"))
     result.excluded_examples = len(examples)
+    if refused:
+        flags = " ".join(f"--drop-param {n}" for n in refused if n != "assistant prefill")
+        result.notes.append(
+            f"{cand.spec} rejects {', '.join(refused)} as the requests send them, so those calls fail with a 400 error whatever the "
+            "prompt says. Remove them from the code (`llmshift upgrade` lists where)" + (f", then test with {flags}." if flags else ".")
+        )
     if validate and best_patches:
         final = run_compare(cases, cand, patches=best_patches, **common)
         result.after = _stats([c for c in final.cases if c.id not in examples])
@@ -521,6 +533,8 @@ def patched_cases(cases: list[TestCase], fix: FixResult) -> list[TestCase]:
 
 
 def fix_markdown(fix: FixResult) -> str:
+    from .report import _md  # optimizer output and answers: no live links, images or mentions
+
     lines = [f"# LLMShift prompt fixes for {fix.candidate}", ""]
     b, a = fix.before, fix.after
     if a:
@@ -528,8 +542,10 @@ def fix_markdown(fix: FixResult) -> str:
     else:
         lines.append(f"Overall pass rate before changes: **{b['pass_rate']:.0%}**.")
     lines.append("")
+    for note in fix.notes:
+        lines += [f"> **Note:** {_md(note)}", ""]
     for g in fix.groups:
-        lines.append(f"## {g.group}")
+        lines.append(f"## {_md(g.group)}")
         lines.append("")
         if g.locations:
             lines.append("Prompt found at: " + ", ".join(f"`{loc}`" for loc in g.locations))
@@ -544,13 +560,13 @@ def fix_markdown(fix: FixResult) -> str:
         if g.added:
             lines.append("")
             lines.append("Instructions added:")
-            lines += [f"- {x}" for x in g.added]
+            lines += [f"- {_md(x)}" for x in g.added]
         if g.suggested_prompt:
             lines += ["", "<details><summary>Diff</summary>", "", md_fence(g.diff.rstrip(), "diff"), "", "</details>", ""]
             lines += ["Suggested system prompt:", "", md_fence(g.suggested_prompt, "text")]
         if g.remaining:
-            lines += ["", "Still different after the fix:"] + [f"- {x}" for x in g.remaining[:8]]
+            lines += ["", "Still different after the fix:"] + [f"- {_md(x)}" for x in g.remaining[:8]]
         for note in g.notes:
-            lines.append(f"> {note}")
+            lines.append(f"> {_md(note)}")
         lines.append("")
-    return "\n".join(lines) + "\n"
+    return show_bidi("\n".join(lines) + "\n")

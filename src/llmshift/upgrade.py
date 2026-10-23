@@ -22,8 +22,9 @@ from typing import Any
 from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
+from .providers.anthropic import default_sampling_only
 from .providers.base import ProviderError
-from .textutil import md_fence, parse_python, plural
+from .textutil import md_fence, parse_python, plural, show_bidi
 
 PROTECTED_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", "vendors", "third_party", "third-party", "site-packages", ".venv", "venv", "dist", "build", ".llmshift"}
 CONFIG_NAMES = {"llmshift.yaml", "llmshift.yml", ".llmshift.yaml", ".llmshift.yml"}
@@ -380,6 +381,16 @@ def plan_upgrade(
                 f"max_tokens is still set at {shown}: {', '.join(sorted({s.new for s in needing}))} rejects it (it takes max_completion_tokens). "
                 "llmshift renames it only in calls that name the model; check these calls by hand"
             )
+    strict = sorted({s.new for s in plan.swaps if default_sampling_only(s.new)})
+    if strict:
+        left = _sampling_left(list(paths or ["."]), plan)
+        if left:
+            shown = ", ".join(left[:8]) + (f" and {len(left) - 8} more" if len(left) > 8 else "")
+            plan.notes.append(
+                f"temperature, top_p or top_k is set at {shown}: {', '.join(strict)} {'rejects' if len(strict) == 1 else 'reject'} a temperature "
+                "other than 1 and any top_p or top_k with a 400 error (Claude 4.7 and later; on API version 2026-10-21 every Claude model "
+                "rejects all three). Remove them from these calls; `llmshift compare` fails the test cases that still send them"
+            )
     _finish(plan)
     if not plan.swaps and not plan.notes:
         plan.notes.append("no retiring models with a known replacement were found")
@@ -435,6 +446,39 @@ def _max_tokens_left(paths: list[str], plan: UpgradePlan) -> list[str]:
             continue  # Anthropic and others require max_tokens
         for n, line in enumerate(_lines(decoded[0]), 1):
             if re.search(r"(?<![\w$])max_tokens\b", line) and (rel, n) not in renamed:
+                out.append(f"{rel}:{n}")
+    return out
+
+
+_SAMPLING_SETTING_RE = re.compile(r"""(?<![\w$])["']?(?:temperature|top_p|top_k|topP|topK)["']?\s*(?::|=(?!=))""")
+
+
+def _sampling_left(paths: list[str], plan: UpgradePlan) -> list[str]:
+    """file:line of every temperature, top_p and top_k set in code or settings that talk to
+    Claude: from Claude 4.7 on, a call that sends them fails."""
+    from .scanner import iter_source_files
+
+    try:
+        files = [f for _root, f in iter_source_files(paths)]
+    except FileNotFoundError:
+        return []
+    out = []
+    for path in files:
+        suffix = path.suffix.lower()
+        if suffix not in (".py", ".pyi", ".yaml", ".yml", ".json", ".toml") and suffix not in JS_SUFFIXES:
+            continue
+        try:
+            rel = path.resolve().relative_to(plan.root).as_posix()
+        except ValueError:
+            continue
+        data = _read(path)
+        if _protected(rel) or data is None or not re.search(rb"anthropic|claude", data, re.I):
+            continue
+        decoded = _decode_exact(data)
+        if decoded is None:
+            continue
+        for n, line in enumerate(_lines(decoded[0]), 1):
+            if _SAMPLING_SETTING_RE.search(line) and not line.lstrip().startswith(("#", "//", "*")):
                 out.append(f"{rel}:{n}")
     return out
 
@@ -751,6 +795,8 @@ def _swap_line(s: Swap) -> str:
 
 
 def plan_markdown(plan: UpgradePlan, min_pass_rate: float | None = None) -> str:
+    from .report import _md  # optimizer output and answer patterns: no live links, images or mentions
+
     lines = ["## LLMShift: move off retiring models", ""]
     if plan.swaps:
         lines += ["| Model | Status | Retires | Replacement | Where |", "|---|---|---|---|---|"]
@@ -771,19 +817,19 @@ def plan_markdown(plan: UpgradePlan, min_pass_rate: float | None = None) -> str:
         for cat, info in (s.get("by_category") or {}).items():
             pats = "; ".join(f"{p} ({n})" for p, n in list((info.get("patterns") or {}).items())[:3])
             if pats:
-                lines.append(f"- {cat}: {pats}")
+                lines.append(f"- {cat}: {_md(pats)}")
         lines.append("")
     if plan.prompt_fixes:
         lines.append("### Prompt changes suggested by `llmshift fix`")
         for fx in plan.prompt_fixes:
-            where = ", ".join(f"`{p}`" for p in fx["applied"]) if fx["applied"] else f"not applied ({fx.get('why', '')})"
+            where = ", ".join(f"`{p}`" for p in fx["applied"]) if fx["applied"] else f"not applied ({_md(fx.get('why', ''))})"
             lines.append(f"- `{fx['group']}`: {where}")
             for added in fx["added"][:6]:
-                lines.append(f"  - {added}")
+                lines.append(f"  - {_md(added)}")
         lines.append("")
     if plan.notes:
         lines.append("### Notes")
-        lines.extend(f"- {n}" for n in plan.notes)
+        lines.extend(f"- {_md(n)}" for n in plan.notes)
         lines.append("")
     diff = plan.diff
     if diff:
@@ -793,7 +839,7 @@ def plan_markdown(plan: UpgradePlan, min_pass_rate: float | None = None) -> str:
         lines.append("</details>")
         lines.append("")
     lines.append("_Opened by `llmshift upgrade`. Review the diff and the test results before merging._")
-    return "\n".join(lines) + "\n"
+    return show_bidi("\n".join(lines) + "\n")
 
 
 def _branch_name(plan: UpgradePlan, requested: str | None) -> str:

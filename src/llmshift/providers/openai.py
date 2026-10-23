@@ -22,7 +22,7 @@ from typing import Any
 from .. import messages as msgs
 from ..textutil import json_loads, stable_hash
 from . import http
-from .base import Provider, ProviderError, Response, base_url_from, clean_key, option_mapping, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, option_mapping, params_of, value_key
 
 DROPPABLE = {
     "temperature",
@@ -107,7 +107,8 @@ class OpenAIProvider(Provider):
             if project:
                 self.extra_headers.setdefault("OpenAI-Project", project)
         self._lock = threading.Lock()
-        self._learned: dict[str, Any] = {"drop": set(), "max_tokens_field": None, "api": None, "developer_role": None}
+        # refused: setting -> values the model rejected (reasoning models take temperature 1, not 0)
+        self._learned: dict[str, Any] = {"drop": set(), "refused": {}, "max_tokens_field": None, "api": None, "developer_role": None}
         self.adaptations: list[str] = []
 
     # ------------------------------------------------------------- plumbing
@@ -139,6 +140,8 @@ class OpenAIProvider(Provider):
             for key, value in updates.items():
                 if key == "drop":
                     self._learned["drop"].add(value)
+                elif key == "refuse":  # (setting, value)
+                    self._learned["refused"].setdefault(value[0], set()).add(value_key(value[1]))
                 else:
                     self._learned[key] = value
             if note not in self.adaptations:
@@ -174,7 +177,20 @@ class OpenAIProvider(Provider):
             out.append(msg)
         return out
 
-    def _chat_body(self, request: dict) -> dict:
+    def _drop_learned(self, body: dict) -> None:
+        """Leave out what this model rejected before: whole settings, or rejected values."""
+        with self._lock:
+            drop = set(self._learned["drop"])
+            refused = {k: set(v) for k, v in self._learned["refused"].items()}
+        for key in drop:
+            body.pop(key, None)
+            if key == "reasoning_effort":
+                body.pop("reasoning", None)
+        for key, values in refused.items():
+            if key in body and value_key(body[key]) in values:
+                body.pop(key)
+
+    def _chat_body(self, request: dict, *, drops: bool = True) -> dict:
         params = params_of(request)
         body: dict = {"model": self.model, "messages": self._chat_messages(request.get("messages") or [])}
         for key in msgs.PARAM_KEYS:
@@ -183,10 +199,9 @@ class OpenAIProvider(Provider):
         if self.official and "max_tokens" in body and "max_completion_tokens" not in body:
             body["max_completion_tokens"] = body.pop("max_tokens")
         with self._lock:
-            drop = set(self._learned["drop"])
             mt_field = self._learned["max_tokens_field"]
-        for key in drop:
-            body.pop(key, None)
+        if drops:
+            self._drop_learned(body)
         if mt_field == "max_tokens" and "max_completion_tokens" in body:
             body["max_tokens"] = body.pop("max_completion_tokens")
         elif mt_field == "max_completion_tokens" and "max_tokens" in body:
@@ -197,7 +212,7 @@ class OpenAIProvider(Provider):
         body.update(copy.deepcopy(self.extra_body))
         return body
 
-    def _responses_body(self, request: dict) -> dict:
+    def _responses_body(self, request: dict, *, drops: bool = True) -> dict:
         params = params_of(request)
         items: list[dict] = []
         for m in msgs.link_tool_calls(request.get("messages") or []):
@@ -263,14 +278,21 @@ class OpenAIProvider(Provider):
                 body["tool_choice"] = {"type": "function", "name": tc["function"].get("name")}
             elif isinstance(tc, str):
                 body["tool_choice"] = tc
-        with self._lock:
-            drop = set(self._learned["drop"])
-        for key in drop:
-            body.pop(key, None)
-            if key == "reasoning_effort":
-                body.pop("reasoning", None)
+        if drops:
+            self._drop_learned(body)
         body.update(copy.deepcopy(self.extra_body))
         return body
+
+    def _rejected_in(self, request: dict, api: str, sent: dict) -> list[str]:
+        """The request settings this model refused, so the answer came from a changed request."""
+        full = self._responses_body(request, drops=False) if api == "responses" else self._chat_body(request, drops=False)
+        out = [key for key in sorted(DROPPABLE) if key in full and key not in sent]
+        if api == "responses":
+            if "reasoning" in full and "reasoning" not in sent:
+                out.append("reasoning_effort")
+            if (full.get("text") or {}).get("verbosity") and not (sent.get("text") or {}).get("verbosity"):
+                out.append("verbosity")
+        return out
 
     # -------------------------------------------------------------- parsing
 
@@ -415,8 +437,11 @@ class OpenAIProvider(Provider):
         candidates += [q for q in quoted if q not in candidates]
         for name in candidates:
             if name in DROPPABLE and name in body:
-                body.pop(name, None)
-                self._learn(f"dropped unsupported parameter '{name}' for {self.model}", drop=name)
+                value = body.pop(name, None)
+                if name in ("temperature", "top_p"):  # often only the default is taken: learn the value
+                    self._learn(f"dropped unsupported parameter '{name}' for {self.model}", refuse=(name, value))
+                else:
+                    self._learn(f"dropped unsupported parameter '{name}' for {self.model}", drop=name)
                 return "retry"
             if name == "reasoning_effort" and "reasoning" in body:
                 body.pop("reasoning", None)
@@ -445,8 +470,11 @@ class OpenAIProvider(Provider):
             while True:
                 try:
                     if api == "responses":
-                        return self.parse_responses(self._post("/responses", body))
-                    return self.parse_chat(self._post("/chat/completions", body))
+                        response = self.parse_responses(self._post("/responses", body))
+                    else:
+                        response = self.parse_chat(self._post("/chat/completions", body))
+                    response.rejected = self._rejected_in(request, api, body)
+                    return response
                 except ProviderError as err:
                     if adaptations >= MAX_ADAPTATIONS:
                         raise
@@ -519,8 +547,8 @@ class AzureOpenAIProvider(OpenAIProvider):
             return f"{self.base_url}{path}"
         return f"{self.base_url}{path}?api-version={self.api_version}"
 
-    def _chat_body(self, request: dict) -> dict:
-        body = super()._chat_body(request)
+    def _chat_body(self, request: dict, *, drops: bool = True) -> dict:
+        body = super()._chat_body(request, drops=drops)
         if self.api_version != "v1":
             body.pop("model", None)
         return body

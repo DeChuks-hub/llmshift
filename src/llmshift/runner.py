@@ -29,6 +29,12 @@ class RunAborted(RuntimeError):
 _REPEATING = ("connection_error", "redirect")
 
 
+def _repeats(exc: ProviderError) -> bool:
+    """Also a timeout that was retried already: the server answers no request in time
+    (one call that runs long, such as an agent's step, is not that)."""
+    return exc.code in _REPEATING or (exc.code == "timeout" and exc.retryable)
+
+
 def interruptible_map(fn: Callable[[Any], Any], items: Any, concurrency: int = 4) -> list:
     """`pool.map` that Ctrl+C stops at once: it waits in short slices (an untimed wait
     blocks Ctrl+C on Windows) and, when interrupted, drops queued work, tells requests
@@ -138,7 +144,7 @@ def run_cases(
                 resp = provider.complete(request)
         except ProviderError as exc:
             resp = Response.failure(exc)
-            if exc.fatal or exc.code in _REPEATING:
+            if exc.fatal or _repeats(exc):
                 with lock:
                     state["fatal"] += 1
                     state["first_fatal"] = state["first_fatal"] or exc

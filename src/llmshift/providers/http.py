@@ -23,7 +23,7 @@ import urllib.request
 import zlib
 from typing import Any, Callable
 
-from ..textutil import clean_surrogates, has_surrogate_escape, json_loads
+from ..textutil import clean_surrogates, has_surrogate_escape, json_loads, plural
 from .base import ProviderError
 
 RETRY_STATUSES = (408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529)
@@ -181,32 +181,55 @@ def _parse_error(status: int | None, raw: bytes, url: str, headers: Any = None) 
     wait = _header_delay(headers) if told_to_wait else None  # unreadable: the caller backs off per attempt
     if wait is None and secondary:
         wait = MAX_DELAY
+    asked = _asked_wait(headers) if told_to_wait else None
+    if retryable and asked is not None and asked > MAX_DELAY:
+        # "Retry after 1 day": waiting the maximum and asking again only wastes the run.
+        retryable = False
+        message += f"; the server asks to wait {_human_wait(asked)} before trying again, longer than llmshift waits ({MAX_DELAY:.0f} s): try again later"
     host = _host(url)
     return ProviderError(f"{message} ({host})", status=status, code=str(code) if code is not None else None, param=param, retryable=retryable, body=body, retry_after=wait)
 
 
-def _header_delay(headers: Any) -> float | None:
-    """The wait the server asks for (Retry-After in seconds or as a date, retry-after-ms);
-    None when it says nothing readable."""
+def _asked_wait(headers: Any) -> float | None:
+    """The wait the server asks for in seconds (Retry-After in seconds or as a date,
+    retry-after-ms), however long; None when it says nothing readable."""
     if headers is None:
         return None
     ms = headers.get("retry-after-ms")
     if ms:
         try:
-            return min(MAX_DELAY, max(0.0, float(ms) / 1000.0))
+            value = float(ms) / 1000.0
+            if math.isfinite(value):
+                return max(0.0, value)
         except ValueError:
             pass
     ra = headers.get("retry-after")
     if ra:
         try:
-            return min(MAX_DELAY, max(0.0, float(ra)))
+            value = float(ra)
+            if math.isfinite(value):
+                return max(0.0, value)
         except ValueError:
             try:
                 parsed = email.utils.parsedate_to_datetime(ra)
-                return min(MAX_DELAY, max(0.0, parsed.timestamp() - time.time()))
+                return max(0.0, parsed.timestamp() - time.time())
             except (TypeError, ValueError, IndexError, OverflowError):
                 pass  # unusual value such as "30s"
     return None
+
+
+def _header_delay(headers: Any) -> float | None:
+    """The wait the server asks for, at most MAX_DELAY; None when it says nothing readable."""
+    asked = _asked_wait(headers)
+    return None if asked is None else min(MAX_DELAY, asked)
+
+
+def _human_wait(seconds: float) -> str:
+    for unit, size, least in (("day", 86400, 86400), ("h", 3600, 3600), ("min", 60, 600)):
+        if seconds >= least:
+            n = round(seconds / size)
+            return f"{n} {unit}" + ("s" if unit == "day" and n != 1 else "")
+    return f"{seconds:.0f} s"
 
 
 def _retry_delay(headers: Any, attempt: int) -> float:
@@ -350,6 +373,12 @@ def request(
                 _sleep(_retry_delay(None, attempt), sleep)
                 attempt += 1
                 continue
+            if sent:  # connected and asked, but no answer in time: slow, not unreachable
+                raise ProviderError(
+                    f"no answer from {_host(url)}{_via_proxy(url)} within {timeout:g}s ({plural(attempt + 1, 'try', 'tries')}): "
+                    "the server was reached but is slow or overloaded; try again later or raise timeout: in llmshift.yaml",
+                    code="timeout", retryable=True,
+                ) from None
             raise ProviderError(f"cannot reach {_host(url)}{_via_proxy(url)}: {reason}", code="connection_error", retryable=True) from None
         except ValueError:  # http.client refused the request; its message would quote the headers
             raise ProviderError(f"the request to {_host(url)} could not be sent: a header or the URL has a character HTTP does not allow", code="invalid_header") from None

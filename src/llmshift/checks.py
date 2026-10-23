@@ -106,9 +106,11 @@ CATEGORY = {
     "python": "custom",
     "multi": "custom",
     "refusal": "safety",
+    "request": "request",  # added by compare: the new model rejects a setting the request sends
 }
 
 CATEGORY_TITLES = {
+    "request": "Rejected request settings",
     "format": "Broken format",
     "facts": "Wrong or missing facts",
     "tone": "Different tone / style",

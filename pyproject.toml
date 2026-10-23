@@ -49,8 +49,11 @@ llmshift = "llmshift.cli:entry"
 [tool.hatch.build.targets.wheel]
 packages = ["src/llmshift"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY_NOTICES" = "llmshift/THIRD_PARTY_NOTICES"  # the licenses of the price list and the vendored PyYAML
+
 [tool.hatch.build.targets.sdist]
-include = ["src/llmshift", "tests", "examples", "scripts", "README.md", "CHANGELOG.md", "LICENSE", "action.yml", "pyproject.toml"]
+include = ["src/llmshift", "tests", "examples", "scripts", "README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES", "action.yml", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

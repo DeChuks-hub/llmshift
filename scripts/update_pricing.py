@@ -37,7 +37,7 @@ def main() -> None:
         raise SystemExit(f"only {len(prices)} priced models found; the source format may have changed")
     data = {
         "about": "Model prices for llmshift pick and cost estimates, in USD per 1M tokens [input, output]. "
-        "Converted from LiteLLM's model_prices_and_context_window.json (MIT License, Copyright (c) 2023 Berri AI).",
+        "Converted from LiteLLM's model_prices_and_context_window.json (MIT License, Copyright (c) 2023 Berri AI; full text in THIRD_PARTY_NOTICES).",
         "source": SOURCE,
         "fetched": _dt.date.today().isoformat(),
         "unit": "USD per 1M tokens",

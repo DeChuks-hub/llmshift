@@ -338,8 +338,27 @@ class Client:
         self.raw: list[bytes] = []
         self.replies: queue.Queue = queue.Queue()
         self.stderr: list[bytes] = []
-        threading.Thread(target=self._read, daemon=True).start()
-        threading.Thread(target=lambda: self.stderr.extend(iter(self.proc.stderr.readline, b"")), daemon=True).start()
+        self.readers = [
+            threading.Thread(target=self._read, daemon=True),
+            threading.Thread(target=lambda: self.stderr.extend(iter(self.proc.stderr.readline, b"")), daemon=True),
+        ]
+        for reader in self.readers:
+            reader.start()
+
+    def close(self) -> int:
+        """End the server and close all three pipes (left open, they warn when collected)."""
+        if not self.proc.stdin.closed:
+            self.proc.stdin.close()
+        try:
+            code = self.proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            code = self.proc.wait(timeout=60)
+        for reader in self.readers:
+            reader.join(timeout=10)  # they stop at the end of the output
+        self.proc.stdout.close()
+        self.proc.stderr.close()
+        return code
 
     def _read(self):
         for line in iter(self.proc.stdout.readline, b""):
@@ -385,12 +404,9 @@ def test_stdio_server_end_to_end(project):
         bad = client.request("tools/call", {"name": "llmshift_compare", "arguments": {"to": 5}}, rid=8)
         assert bad["error"]["code"] == mcp.INVALID_PARAMS
         assert client.request("ping", rid=9)["result"] == {}
-        client.proc.stdin.close()
-        assert client.proc.wait(timeout=60) == 0
+        assert client.close() == 0
     finally:
-        if client.proc.poll() is None:
-            client.proc.kill()
-    time.sleep(0.2)
+        client.close()
     assert client.raw and all(line.endswith(b"\n") for line in client.raw)
     for line in client.raw:
         message = json.loads(line)
@@ -415,11 +431,9 @@ def test_tools_that_run_git_answer_promptly_over_stdio(project):
         assert time.monotonic() - start < 20
         assert scan["models"] and "result" in check
         assert client.request("ping", rid=4)["result"] == {}  # the protocol stream is intact
-        client.proc.stdin.close()
-        assert client.proc.wait(timeout=60) == 0
+        assert client.close() == 0
     finally:
-        if client.proc.poll() is None:
-            client.proc.kill()
+        client.close()
 
 
 CHILD_IN_SERVER = """

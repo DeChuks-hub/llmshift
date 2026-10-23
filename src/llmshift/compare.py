@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import datetime as _dt
+import json
 import re
 import statistics
 import threading
@@ -164,6 +165,41 @@ class CompareResult:
         return s.get("pass_rate", 0.0) + 1e-9 >= threshold
 
 
+def request_rejections(model: str, params: dict, resp: Response) -> list[str]:
+    """What `model` rejects of a request as it is sent (temperature=0, assistant prefill, ...).
+    Each was left out to test the answer, so the real call fails with a 400 error."""
+    from .providers.anthropic import rejected_sampling
+
+    found = rejected_sampling(model, params)
+    names = {item.split("=", 1)[0] for item in found}
+    for name in resp.rejected:
+        if name not in names:
+            names.add(name)
+            found.append(f"{name}={json.dumps(params[name], default=str)}" if name in params else name)
+    return found
+
+
+def _said_by(note: str, rejected: list[str]) -> bool:
+    """Whether an adaptation note only repeats a rejected setting the cases already report."""
+    m = re.search(r"dropped (?:unsupported parameter )?'([\w.]+)'", note)
+    if m:
+        return {"stop_sequences": "stop"}.get(m.group(1), m.group(1)) in rejected
+    return ("prefill" in note and "assistant prefill" in rejected) or ("forced tool choice" in note and "tool_choice" in rejected)
+
+
+def rejection_check(model: str, rejected: list[str], ctx: CheckContext) -> CheckResult:
+    from .checks import severity_of
+
+    them = "it" if len(rejected) == 1 else "them"
+    message = (
+        f"{model} rejects {', '.join(rejected)} as this request sends {them}: the real call fails with a 400 error "
+        f"(llmshift left {them} out to test the answer). Remove {them} from your code"
+    )
+    flags = " ".join(f"--drop-param {item.split('=', 1)[0]}" for item in rejected if "=" in item)
+    message += f", then test with {flags}." if flags else "."
+    return CheckResult("request", "request", severity_of({"type": "request"}, ctx), "fail", message, name="request settings", details={"rejected": rejected})
+
+
 def case_status(results: list[CheckResult], error: str | None) -> str:
     """fail: an error-level check failed, or could not be evaluated (unverified is not a pass);
     warn: a warning-level check failed; pass otherwise. Info-level checks never count."""
@@ -205,6 +241,8 @@ def failure_patterns(result: CheckResult) -> list[str]:
         return out or ["facts differ"]
     if result.type == "json_schema" and d.get("errors"):
         return [re.sub(r"^\$[^:]*:\s*", "", e) for e in d["errors"][:3]]
+    if result.type == "request" and d.get("rejected"):
+        return [f"{item.split('=', 1)[0]} rejected" for item in d["rejected"]]
     if result.type in ("equals", "one_of"):
         return ["label/answer changed" if result.type == "equals" else "answer outside the label set"]
     if result.type == "similarity":
@@ -505,6 +543,10 @@ def run_compare(
             result.status = "error"
             return result
         checks = run_checks(eval_case, Sample.from_response(resp), ctx)
+        sent = {**case.params, **{k: v for k, v in (overrides or {}).items() if v is not None}}
+        rejected = request_rejections(cand.model, sent, resp)
+        if rejected:
+            checks.append(rejection_check(cand.spec, rejected, ctx))
         result.raw_status = case_status(checks, None)
         if live is not None and live.ok:
             base_checks = run_checks(eval_case, Sample.from_response(live), ctx)
@@ -544,7 +586,16 @@ def run_compare(
         min_pass_rate=min_pass_rate,
         label=label,
     )
-    res.insights = build_insights(summary, results, adapt)
+    refused = [r for c in results for r in c.checks if r.type == "request" and r.status == "fail" and r.severity != "info"]
+    names = sorted({item.split("=", 1)[0] for r in refused for item in (r.details or {}).get("rejected") or []})
+    res.insights = build_insights(summary, results, [note for note in adapt if not _said_by(note, names)])
+    if refused:
+        flags = " ".join(f"--drop-param {n}" for n in names if n != "assistant prefill")
+        res.insights.insert(0, (
+            f"{plural(len(refused), 'request')} send settings {cand.spec} rejects ({', '.join(names)}): in production those calls fail "
+            "with a 400 error, so the cases fail. Remove the settings from your code (`llmshift upgrade` lists where)"
+            + (f", then test with {flags}." if flags else ".")
+        ))
     if ctx.judge_failed:  # a dead judge is said first, not hidden behind "0 judge calls"
         res.insights.insert(0, f"The judge failed on {ctx.judge_failed} of {ctx.judge_calls + ctx.judge_failed} call(s), so those checks could not be decided: {ctx.judge_error}")
     if ctx.judge_calls or ctx.judge_skipped:

@@ -6,6 +6,7 @@ import argparse
 import datetime as _dt
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -15,7 +16,7 @@ from . import __version__
 from . import console as con
 from .config import SAMPLE_CONFIG, ConfigError, load_config
 from .errors import EXIT_FAIL, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE, UsageError
-from .textutil import json_loads, plural, read_text
+from .textutil import json_loads, plural, read_text, report_json
 
 # Commands in their own modules; each provides register(subparsers).
 EXTENSIONS: tuple[str, ...] = ("calibrate", "pick", "safety", "shadow", "mcp", "prcheck", "upgrade", "embedmig", "feed")
@@ -111,7 +112,27 @@ def _load_cases(cfg: dict, args: argparse.Namespace) -> tuple[list, str]:
         cases = cases[: int(limit)]
     if not cases:
         raise UsageError(f"no test cases selected from {path}")
+    # Settings the code no longer sends (temperature for a model that rejects it) leave the tests too.
+    drop = list(getattr(args, "drop_param", None) or []) + [str(n).strip() for n in cfg.get("drop_params") or []]
+    for case in cases if drop else ():
+        params = case.input.get("params")
+        if isinstance(params, dict):
+            for name in drop:
+                params.pop(name, None)
     return cases, path
+
+
+def rejected_and_other(result: Any) -> tuple[list[str], int]:
+    """(settings the model rejects as the requests send them, cases that changed for other
+    reasons): the first need a code change, only the second a prompt change."""
+    refused: set[str] = set()
+    other = 0
+    for c in result.cases:
+        failing = [r for r in c.checks if r.status in ("fail", "error") and r.severity != "info"]
+        refused.update(item.split("=", 1)[0] for r in failing if r.type == "request" for item in (r.details or {}).get("rejected") or [])
+        if c.status in ("fail", "warn") and any(r.type != "request" for r in failing):
+            other += 1
+    return sorted(refused), other
 
 
 def _overrides(args: argparse.Namespace) -> dict:
@@ -199,6 +220,14 @@ def model_arg(text: str) -> str:
     value = text.strip()
     if not value:
         raise argparse.ArgumentTypeError("is empty (an unset variable?); leave the option out to use the model in llmshift.yaml")
+    return value
+
+
+def param_arg(text: str) -> str:
+    """A request setting's name, as test files store it (temperature, top_p, tool_choice)."""
+    value = text.strip()
+    if not re.fullmatch(r"[A-Za-z_][\w.-]*", value):
+        raise argparse.ArgumentTypeError(f"expected a setting name such as temperature, got {text!r}")
     return value
 
 
@@ -416,7 +445,7 @@ def cmd_scan(args: argparse.Namespace, cfg: dict) -> int:
     )
     fmt = args.format
     if fmt == "json":
-        text = json.dumps(result.to_dict(), indent=2, ensure_ascii=False)
+        text = report_json(result.to_dict())
     elif fmt == "markdown":
         text = report.scan_markdown(result)
     elif fmt == "sarif":
@@ -574,7 +603,7 @@ def _write_reports(result: Any, args: argparse.Namespace, cfg: dict, prefix: str
     stamp = _timestamp()
     render = {
         "html": lambda: report.compare_html(result),
-        "json": lambda: json.dumps(result.to_dict(), indent=2, ensure_ascii=False) + "\n",
+        "json": lambda: report_json(result.to_dict()) + "\n",
         "markdown": lambda: report.compare_markdown(result),
         "junit": lambda: report.compare_junit(result),
     }
@@ -630,8 +659,12 @@ def cmd_compare(args: argparse.Namespace, cfg: dict) -> int:
     _step_summary(report.compare_markdown(result))
     _github_output("pass_rate", result.summary.get("pass_rate"))
     s = result.summary
-    if s.get("failed") or s.get("warned"):
-        con.out(con.style(f"Next: llmshift fix --to {candidate}  (suggests prompt changes for the {s.get('failed', 0) + s.get('warned', 0)} changed case(s))", "grey"))
+    refused, other = rejected_and_other(result)
+    if refused:
+        flags = " ".join(f"--drop-param {n}" for n in refused if n != "assistant prefill")
+        con.out(con.style(f"Next: remove {', '.join(refused)} from the calls (llmshift upgrade lists where), then re-run" + (f" with {flags}" if flags else ""), "grey"))
+    if other:
+        con.out(con.style(f"Next: llmshift fix --to {candidate}  (suggests prompt changes for the {other} changed case(s))", "grey"))
     if s.get("evaluated", 0) == 0:
         return EXIT_FAIL
     if result.min_pass_rate is not None and not result.passed:
@@ -674,6 +707,8 @@ def cmd_fix(args: argparse.Namespace, cfg: dict) -> int:
         validate=not args.no_validate,
     )
     con.out(con.style("LLMShift fix", "bold") + f"  {candidate}")
+    for note in result.notes:
+        con.out(con.style(f"  {con.sym('warn')} {note}", "yellow"))
     if not result.groups:
         con.out(f"  {con.style(con.sym('pass'), 'green')} nothing to fix: every case already matches the baseline.")
         return EXIT_OK
@@ -717,7 +752,7 @@ def cmd_fix(args: argparse.Namespace, cfg: dict) -> int:
     md_path = Path(args.out) if args.out else reports_dir / f"fix-{_timestamp()}.md"
     _write(md_path, fix_markdown(result))
     json_path = md_path.with_suffix(".json")
-    _write(json_path, json.dumps(result.to_dict(), indent=2, ensure_ascii=False) + "\n")
+    _write(json_path, report_json(result.to_dict()) + "\n")
     con.out(f"Full prompts and diffs: {_rel(md_path)} (and {_rel(json_path)})")
     if args.write_tests:
         save_tests(patched_cases(cases, result), args.write_tests)
@@ -810,6 +845,8 @@ def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
         for d in outcome.drifts:
             st = {"critical": ("red", "bold"), "warning": ("yellow",), "info": ("cyan",)}[d.severity]
             con.out(con.style(f"  {d.severity.upper():<8} {d.title}", *st) + (f"\n           {d.detail}" if d.detail else ""))
+        for note in outcome.notes:
+            con.out(con.style(f"  note: {note}", "yellow"))
         for name, err in outcome.deliveries:
             if err:
                 con.warn(f"alert via {name} failed: {err}")
@@ -1070,6 +1107,7 @@ def _add_run_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--group", action="append", help="only cases from this prompt template (repeatable)")
     p.add_argument("--tag", action="append", help="only cases with this tag (repeatable)")
     p.add_argument("--case", action="append", help="only this case id (repeatable)")
+    p.add_argument("--drop-param", action="append", metavar="NAME", type=param_arg, help="leave this setting out of every test request, e.g. temperature once your code no longer sends it (repeatable; also drop_params: in llmshift.yaml)")
     p.add_argument("--judge", metavar="MODEL", type=model_arg, help="model for LLM-judged checks and imported model graders, e.g. openai:gpt-5.6-terra")
     p.add_argument("--judge-mode", choices=["auto", "always"], help="auto (default): ask the judge only when the rule-based checks cannot decide")
     p.add_argument("--allow-python", action="store_true", help="run imported python graders (executes their code locally)")

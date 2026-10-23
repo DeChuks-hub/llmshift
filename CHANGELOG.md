@@ -17,9 +17,13 @@
 - Alerts: SMTP logs in only over TLS; Slack and Discord messages cannot ping `@channel`/`@everyone`. MCP tools read and write only inside the project.
 - GitHub: a comment by another user is never edited, a POST that may have arrived is never sent again, and a value can no longer inject extra step outputs. The action's `args` are split like shell words (quote an argument with spaces) and never expanded. The workflows (and those `init --github` writes) ask for the least permissions and keep values out of `run:` scripts.
 - `upgrade --apply` first saves a file git cannot give back as it is now (no repository, untracked, uncommitted changes) as `NAME.bak` (`--no-backup` skips that), and stops before writing anything if a file was edited after the diff was made.
+- Text from models and users cannot show images (tracking pixels) or disguised links in PR comments, job summaries, reports or GitHub, Discord and Teams alerts: `[ ] ( ) !` are escaped and bare URLs are not linked. Slack and Discord alerts show no link previews.
+- Bidi override characters ("Trojan Source") are shown as escapes in every report (HTML, Markdown, JSON, JUnit), as they already were on the terminal.
+- AWS secret access keys, which have no prefix, are redacted by what surrounds them: any spelling of "secret access key" before them, or the access key id next to them.
 
 **Correct results**
 
+- A setting the new model rejects fails the case instead of being left out silently, because the real call gets a 400 error. This covers a temperature other than 1 and any `top_p` or `top_k` on Claude 4.7 and later, a temperature an OpenAI reasoning model refuses, an assistant prefill and a forced tool choice. `--drop-param temperature` (or `drop_params:`) tests without a setting once the code no longer sends it. `upgrade` lists every `temperature`, `top_p` and `top_k` a move to Claude 4.7 or later must remove, and `top_k` from Anthropic and Gemini logs is now kept and sent. `fix` judges prompts on the answers and names rejected settings separately, and `watch` says when they are why the pass rate fell. Answers cached by earlier versions are not reused, because they cannot say what the model refused.
 - Pass-rate gates use the exact rate: 18,999 of 20,000 no longer passes a 95% gate. Case ids stay unique and stable however cases are selected, and `--limit 5` stops reading a huge test file after five cases.
 - Inferred checks pass on the baseline they came from (JSON keys with odd characters, names like "Domino's Pizza", answers with no words). JSON checks reject `NaN` and `Infinity`, which most parsers refuse (a test whose own baseline has them keeps passing, and `NaN` now equals `NaN` in `json_match`).
 - Log sampling keeps a fair share of every prompt template, however late it first appears. Timestamps read the same on Python 3.9 to 3.15 (offsets in hours, decimal commas, basic format, week dates, HTTP dates).
@@ -40,6 +44,9 @@
 - The action, the example workflows and those `init --github` writes use the Node 24 releases of GitHub's own actions, so runs no longer warn that Node.js 20 is deprecated.
 - An empty model (`--to "$CANDIDATE"` with the variable unset) is refused by every command and MCP tool instead of quietly testing the configured model. `--temperature` must be 0 to 2 and `--max-tokens` at least 1, checked before any request; `embeddings` checks the corpus before it starts.
 - `scan` is faster on large repositories: lines that cannot name a model are passed over quickly.
+- A server that asks to wait longer than llmshift's 60-second maximum ("Retry-After: 1 day") fails at once and says so, instead of being asked again every minute. A server that was reached but did not answer in time is reported as slow, not as unreachable.
+- The GitHub Action can be used as `@v0`: each release moves that tag once PyPI has the release, and never to a pre-release. Pin an exact version or a commit SHA for builds that must not change.
+- `THIRD_PARTY_NOTICES` carries the full licenses of LiteLLM's price list and the vendored PyYAML, in the source archive and the wheel.
 - Corrupted watch history, calibration and cache files are survived. `watch` writes the action's `pass-rate` output.
 - `import openai-evals` imports odd or hostile exports and registries or says what is wrong, instead of crashing; registry samples outside the registry are not read.
 - `shadow report` works from a subfolder, and `snapshot` turns shadow logs into test cases.

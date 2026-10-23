@@ -15,6 +15,8 @@ cache_dir: .llmshift/cache
 reports_dir: .llmshift/reports
 min_pass_rate: 0.95                      # compare exits 1 below this (watch too, unless watch.min_pass_rate is set)
 repeat: 1                                # run each case N times (compare): finds flaky cases, narrows the range
+drop_params: []                          # settings left out of every test request, e.g. [temperature, top_p] once
+                                         # your code no longer sends what the new model rejects (--drop-param)
 allow_python_checks: false               # run imported OpenAI Evals python graders
 
 severity:                                # per check type: error (fails the case) | warn (flags a change) | info

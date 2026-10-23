@@ -396,7 +396,7 @@ def anthropic_request(req: dict) -> tuple[list[dict], dict]:
     for m in req.get("messages") or []:
         messages.extend(_anthropic_content_to_canonical(m.get("role", "user"), m.get("content")))
     params: dict = {}
-    for k in ("temperature", "top_p", "max_tokens"):
+    for k in ("temperature", "top_p", "top_k", "max_tokens"):
         if req.get(k) is not None:
             params[k] = req[k]
     if req.get("stop_sequences"):
@@ -518,7 +518,7 @@ def gemini_request(req: dict) -> tuple[list[dict], dict]:
             messages.append(msg)
     params: dict = {}
     gen = req.get("generationConfig") or req.get("generation_config") or {}
-    mapping = {"temperature": "temperature", "topP": "top_p", "maxOutputTokens": "max_tokens", "stopSequences": "stop", "seed": "seed"}
+    mapping = {"temperature": "temperature", "topP": "top_p", "topK": "top_k", "maxOutputTokens": "max_tokens", "stopSequences": "stop", "seed": "seed"}
     for src, dst in mapping.items():
         if gen.get(src) is not None:
             params[dst] = gen[src]

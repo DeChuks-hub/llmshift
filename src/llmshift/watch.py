@@ -55,6 +55,7 @@ class WatchOutcome:
     deliveries: list[tuple[str, str | None]] = field(default_factory=list)
     compare: CompareResult | None = None
     history_file: str = ""
+    notes: list[str] = field(default_factory=list)  # causes worth saying with the drift (rejected settings)
 
     @property
     def worst(self) -> str:
@@ -362,6 +363,16 @@ def run_watch(
         compare=res,
         history_file=str(hist_file),
     )
+    refused = sorted({
+        item.split("=", 1)[0]
+        for c in res.cases for r in c.checks if r.type == "request" and r.status == "fail" and r.severity != "info"
+        for item in (r.details or {}).get("rejected") or []
+    })
+    if refused:  # a pass rate that falls for this reason is no drift in the answers: say why
+        outcome.notes.append(
+            f"{provider.spec} rejects {', '.join(refused)} as the test requests send them, so those cases fail (the real calls get a 400 "
+            "error). Remove them from the code, then test with " + " ".join(f"--drop-param {n}" for n in refused if n != "assistant prefill")
+        )
     if not dry_run:
         runs_dir.mkdir(parents=True, exist_ok=True)
         (runs_dir / f"{run_id}.json").write_bytes(json.dumps(per_case, ensure_ascii=False).encode("utf-8", "replace"))
@@ -385,7 +396,7 @@ def run_watch(
     actionable = [d for d in drifts if SEVERITY_RANK.get(d.severity, 0) >= SEVERITY_RANK.get(alert_on, 1)]
     if alerts and actionable:
         worst = max(actionable, key=lambda d: SEVERITY_RANK[d.severity]).severity
-        lines = [f"{d.title}" + (f" - {d.detail}" if d.detail else "") for d in actionable]
+        lines = outcome.notes + [f"{d.title}" + (f" - {d.detail}" if d.detail else "") for d in actionable]
         lines.append(f"Pass rate {summary['pass_rate']:.0%} ({summary['passed'] + summary['warned']}/{summary['evaluated']}), errors {summary['errors']}")
         msg = AlertMessage(
             title=f"LLMShift: {provider.spec} behaviour drift ({worst})",

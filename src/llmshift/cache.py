@@ -24,8 +24,12 @@ class ResponseCache:
         self.misses = 0
         self._lock = threading.Lock()
 
+    # Version 2: responses record what of the request the model refused (Response.rejected);
+    # an older answer cannot say, so it is not reused.
+    VERSION = 2
+
     def key(self, identity: dict, request: dict, salt: str = "") -> str:
-        return stable_hash({"identity": identity, "request": request, "salt": salt}, 40)
+        return stable_hash({"identity": identity, "request": request, "salt": salt, "v": self.VERSION}, 40)
 
     def _path(self, key: str) -> Path:
         return self.dir / key[:2] / f"{key}.json"

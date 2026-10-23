@@ -13,10 +13,43 @@ from .. import messages as msgs
 from ..pricing import CACHE_FIELDS
 from ..textutil import json_loads, stable_hash
 from . import http
-from .base import Provider, ProviderError, Response, base_url_from, clean_key, option_mapping, option_number, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, option_mapping, option_number, params_of, value_key
 
 API_VERSION = "2023-06-01"
 _DATA_URL_RE = re.compile(r"^data:([\w.+/-]+);base64,(.*)$", re.S)
+
+# Claude 4.7 and later models (Fable and Mythos too) accept only the default sampling: a
+# temperature other than 1, or any top_p or top_k, is a 400 error. (API version 2026-10-21
+# rejects the three on every model, even at their defaults.)
+_CLAUDE_VERSION_RE = re.compile(
+    r"claude-(?:(?:opus|sonnet|haiku)-(?P<major>\d+)(?:[-.](?P<minor>\d{1,2})(?!\d))?"
+    r"|(?P<major2>\d+)(?:[-.](?P<minor2>\d{1,2})(?!\d))?-(?:opus|sonnet|haiku))"
+)
+_SAMPLING = (("temperature", "temperature"), ("top_p", "top_p"), ("top_k", "top_k"), ("stop", "stop_sequences"))  # request name, API name
+
+
+def default_sampling_only(model: str) -> bool:
+    """Whether a Claude model rejects a non-default temperature, top_p or top_k."""
+    model = str(model or "").lower()
+    if re.search(r"claude-(?:fable|mythos)\b", model):
+        return True
+    m = _CLAUDE_VERSION_RE.search(model)
+    if not m:
+        return False
+    major = int(m.group("major") or m.group("major2"))
+    return (major, int(m.group("minor") or m.group("minor2") or 0)) >= (4, 7)
+
+
+def rejected_sampling(model: str, params: dict) -> list[str]:
+    """The sampling settings in `params` that `model` rejects, as name=value."""
+    if not default_sampling_only(model):
+        return []
+    out = []
+    temperature = params.get("temperature")
+    if temperature is not None and not (isinstance(temperature, (int, float)) and not isinstance(temperature, bool) and temperature == 1):
+        out.append(f"temperature={json.dumps(temperature, default=str)}")
+    out += [f"{key}={json.dumps(params[key], default=str)}" for key in ("top_p", "top_k") if params.get(key) is not None]
+    return out
 
 
 def json_instruction(response_format: Any) -> str | None:
@@ -162,7 +195,8 @@ class AnthropicProvider(Provider):
         self.beta = o.get("beta")
         self.extra_headers = option_mapping(o, "headers", self.spec, text_values=True)
         self._lock = threading.Lock()
-        self._drop: set[str] = set()
+        self._drop: set[str] = set()  # fields this model rejects whatever their value
+        self._refused: dict[str, set[str]] = {}  # sampling field -> values it rejected (it may take others)
         self.adaptations: list[str] = []
 
     def identity(self) -> dict:
@@ -180,7 +214,8 @@ class AnthropicProvider(Provider):
         headers.update(self.extra_headers)
         return headers
 
-    def build_body(self, request: dict) -> dict:
+    def build_body(self, request: dict, *, drops: bool = True) -> dict:
+        """The Messages API body; `drops`: leave out what this model has rejected before."""
         params = params_of(request)
         system, messages = to_anthropic_messages(request.get("messages") or [])
         instruction = json_instruction(params.get("response_format"))
@@ -194,6 +229,8 @@ class AnthropicProvider(Provider):
             body["temperature"] = max(0.0, min(1.0, float(params["temperature"])))
         if params.get("top_p") is not None:
             body["top_p"] = params["top_p"]
+        if params.get("top_k") is not None:
+            body["top_k"] = params["top_k"]
         stop = params.get("stop")
         if stop:
             seqs = [stop] if isinstance(stop, str) else list(stop)
@@ -213,10 +250,24 @@ class AnthropicProvider(Provider):
             schema = (rf.get("json_schema") or {}).get("schema")
             if schema:
                 body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
-        with self._lock:
-            for key in self._drop:
-                body.pop(key, None)
+        if drops:
+            with self._lock:
+                for key in self._drop:
+                    body.pop(key, None)
+                for key, values in self._refused.items():
+                    if key in body and value_key(body[key]) in values:
+                        body.pop(key)
         return body
+
+    def _rejected_in(self, request: dict, sent: dict) -> list[str]:
+        """What of `request` this model refused, so the answer came from a changed request."""
+        full = self.build_body(request, drops=False)
+        out = [name for name, key in _SAMPLING if key in full and key not in sent]
+        if full["messages"] and full["messages"][-1].get("role") == "assistant" and (not sent["messages"] or sent["messages"][-1].get("role") != "assistant"):
+            out.append("assistant prefill")
+        if (full.get("tool_choice") or {}).get("type") in ("any", "tool") and (sent.get("tool_choice") or {}).get("type") not in ("any", "tool"):
+            out.append("tool_choice")
+        return out
 
     @staticmethod
     def parse(data: Any) -> Response:
@@ -240,9 +291,11 @@ class AnthropicProvider(Provider):
             refusal="refusal" if stop == "refusal" else None,
         )
 
-    def _note(self, note: str, drop: str | None = None) -> None:
+    def _note(self, note: str, drop: str | None = None, value: Any = None) -> None:
         with self._lock:
-            if drop:
+            if drop in dict(_SAMPLING).values():  # learnt per value: temperature 0 refused, 1 accepted
+                self._refused.setdefault(drop, set()).add(value_key(value))
+            elif drop:
                 self._drop.add(drop)
             if note not in self.adaptations:
                 self.adaptations.append(note)
@@ -271,8 +324,8 @@ class AnthropicProvider(Provider):
         for key in ("top_p", "temperature", "top_k", "stop_sequences"):
             if key in body and key in lower:
                 drop = "top_p" if ("top_p" in lower and "temperature" in lower and "top_p" in body) else key
-                body.pop(drop, None)
-                self._note(f"dropped '{drop}' for {self.model} ({err.message[:80]})", drop=drop)
+                value = body.pop(drop, None)
+                self._note(f"dropped '{drop}' for {self.model} ({err.message[:80]})", drop=drop, value=value)
                 return True
         return False
 
@@ -282,7 +335,9 @@ class AnthropicProvider(Provider):
         while True:
             try:
                 data = http.post_json(f"{self.base_url}/v1/messages", body, headers=self._headers(), timeout=self.timeout, max_retries=self.max_retries)
-                return self.parse(data)
+                response = self.parse(data)
+                response.rejected = self._rejected_in(request, body)
+                return response
             except ProviderError as err:
                 if adaptations >= 6 or not self._adapt(body, err):
                     raise

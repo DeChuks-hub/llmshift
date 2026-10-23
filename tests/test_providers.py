@@ -227,6 +227,12 @@ def test_python_and_command_providers(tmp_path, monkeypatch):
     script.write_text("import json, sys\nreq = json.load(sys.stdin)\nprint(json.dumps({'text': req['model'] + ':' + req['messages'][-1]['content']}))\n", encoding="utf-8")
     cfg = {"providers": {"app": {"type": "command", "command": [sys.executable, str(script)]}}}
     assert resolve("app:v1", cfg).complete(req("hey")).text == "v1:hey"
+    crash = tmp_path / "crash.py"
+    crash.write_text("def run():\n    open('no-such-file.txt')\n\nrun()\n", encoding="utf-8")
+    cfg = {"providers": {"app": {"type": "command", "command": [sys.executable, str(crash)]}}}
+    with pytest.raises(ProviderError) as info:
+        resolve("app:v1", cfg).complete(req("hey"))
+    assert "FileNotFoundError" in str(info.value) and "no-such-file.txt" in str(info.value)  # not just "Traceback (most recent call last):"
 
 
 def test_mock_provider_unknown():

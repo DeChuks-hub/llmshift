@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from . import facts as factlib
 from . import tone as tonelib
+from . import userregex
 from .formats import (
     STRUCTURE_NAMES,
     analyze_json,
@@ -381,9 +382,11 @@ def c_regex(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> O
     for ch in str(check.get("flags", "")):
         flags |= {"i": re.I, "m": re.M, "s": re.S, "x": re.X}.get(ch, 0)
     try:
-        ok = re.search(pattern, _target(check, sample, case), flags) is not None
+        ok = userregex.search(pattern, _target(check, sample, case), flags)
     except re.error as exc:
         return Outcome("error", f"invalid regex {pattern!r}: {exc}")
+    except userregex.RegexStopped as exc:
+        return Outcome("error", userregex.stopped_message(pattern, exc))
     if check.get("negate"):
         return FAIL(f"output matches forbidden pattern /{pattern}/") if ok else PASS()
     return PASS() if ok else FAIL(f"output does not match /{shorten(pattern, 60)}/")

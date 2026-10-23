@@ -8,6 +8,8 @@ import math
 import re
 from typing import Any
 
+from . import userregex
+
 MAX_ERRORS = 20
 
 
@@ -202,10 +204,12 @@ def validate(value: Any, schema: dict | bool, *, root: dict | None = None, path:
             errors.append(f"{path}: string longer than {schema['maxLength']} characters")
         if isinstance(schema.get("pattern"), str):
             try:
-                if not re.search(schema["pattern"], value):
+                if not userregex.search(schema["pattern"], value):
                     errors.append(f"{path}: {_fmt(value)} does not match pattern {schema['pattern']!r}")
             except re.error:
                 pass
+            except userregex.RegexStopped as exc:
+                errors.append(f"{path}: {userregex.stopped_message(schema['pattern'], exc)}")
     elif vt == "array":
         low, high = _bound(schema, "minItems"), _bound(schema, "maxItems")
         if low is not None and len(value) < low:
@@ -255,11 +259,14 @@ def validate(value: Any, schema: dict | bool, *, root: dict | None = None, path:
                 validate(sub_value, props[key], root=root, path=sub_path, errors=errors, depth=depth + 1)
             for pattern, sub in pattern_props.items():
                 try:
-                    if re.search(pattern, key):
+                    if userregex.search(pattern, str(key)):
                         matched = True
                         validate(sub_value, sub, root=root, path=sub_path, errors=errors, depth=depth + 1)
                 except re.error:
                     continue
+                except userregex.RegexStopped as exc:
+                    matched = True  # not known: not "unexpected" either
+                    errors.append(f"{sub_path}: {userregex.stopped_message(pattern, exc)}")
             if not matched:
                 if additional is False:
                     errors.append(f"{path}: unexpected key {key!r}")

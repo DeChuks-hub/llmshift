@@ -29,11 +29,13 @@ import contextlib
 import contextvars
 import copy
 import datetime as _dt
+import functools
 import inspect
 import json
 import os
 import random
 import reprlib
+import sys
 import threading
 import time
 import uuid
@@ -751,6 +753,60 @@ class _HelperStream:
 
 
 _PROXY_FIELDS = ("_target", "_recorder", "_provider", "_parts", "_shadow")
+# Set while a recording call runs the SDK's, so that a recording call inside it passes the
+# call on. A tracer that patched create after wrap() (LangSmith) calls the recording create,
+# and the proxy wrapped the tracer's create again: every call was recorded and shadowed twice.
+_IN_CALL: contextvars.ContextVar = contextvars.ContextVar("llmshift_in_call", default=False)
+
+
+def _trail(fn: Any) -> list:
+    """fn and the functions it wraps, as functools.wraps leaves them in __wrapped__."""
+    out = []
+    try:
+        while fn is not None and len(out) < 32:
+            out.append(fn)
+            fn = getattr(fn, "__wrapped__", None)
+    except Exception:  # an odd object's __wrapped__ never breaks the app
+        pass
+    return out
+
+
+def _records(fn: Any, kind: str) -> bool:
+    """Whether fn is a recording call of this kind ("call" or "stream") or wraps one: a
+    tracer's create around wrap()'s. That one records, after the tracer took out its own
+    arguments (langsmith_extra)."""
+    for f in _trail(fn):
+        try:
+            if getattr(f, "_llmshift_records", None) == kind:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _like(fn: Any, wrapper: Any, kind: str | None = None) -> Any:
+    """`wrapper` with the name, signature and __wrapped__ of the SDK method fn, as
+    instructor and tracers read them."""
+    try:
+        functools.update_wrapper(wrapper, fn)
+        if sys.version_info < (3, 10) and inspect.ismethod(fn):
+            # 3.9's inspect.signature follows __wrapped__ past the method to its function,
+            # and showed `self` as the first parameter.
+            wrapper.__signature__ = inspect.signature(fn)
+    except Exception:  # a callable update_wrapper cannot read: the wrapper works all the same
+        pass
+    wrapper.__dict__.pop("_llmshift_records", None)  # copied from a tracer's create around a recording one
+    if kind:
+        wrapper._llmshift_records = kind
+    return wrapper
+
+
+def _for_raw_response(kwargs: dict) -> bool:
+    """Whether an SDK's with_raw_response or with_streaming_response made this call. Built on
+    a create a tracer patched over wrap()'s, it calls the recording create for the HTTP
+    response; the recording call around it records the answer, once parsed."""
+    headers = kwargs.get("extra_headers")
+    return isinstance(headers, dict) and "X-Stainless-Raw-Response" in headers
 
 
 class _Proxy:
@@ -783,10 +839,10 @@ class _Proxy:
         key = tuple(p for p in parts if p not in _RESPONSE_WRAPPERS)
         api = _ENDPOINTS.get(key[-3:]) or _ENDPOINTS.get(key[-2:])
         if api and callable(attr):
-            return self._wrap_call(attr, api, raw=raw)
+            return attr if not raw and _records(attr, "call") else self._wrap_call(attr, api, raw=raw)
         helper = None if raw else (_STREAM_HELPERS.get(parts[-3:]) or _STREAM_HELPERS.get(parts[-2:]))
         if helper and callable(attr):
-            return self._wrap_helper(attr, helper)
+            return attr if _records(attr, "stream") else self._wrap_helper(attr, helper)
         if not self._parts and name in _CLIENT_FACTORIES and callable(attr):
             return self._wrap_factory(attr)
         if key in _ROUTES or (raw and not key):
@@ -816,17 +872,23 @@ class _Proxy:
         def call(*args: Any, **kwargs: Any) -> Any:
             return _Proxy(fn(*args, **kwargs), recorder, provider, shadow=shadow)
 
-        return call
+        return _like(fn, call)
 
     def _wrap_helper(self, fn: Any, api: str) -> Any:
         recorder, provider, shadow = self._recorder, self._provider, self._shadow
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            logging = recorder is not None and recorder.sampled()
-            if not logging and shadow is None:
+            if _IN_CALL.get():  # a recording call runs this one: that one records it
                 return fn(*args, **kwargs)
-            request = _request_copy(api, kwargs)
-            manager = fn(*args, **kwargs)
+            logging = recorder is not None and recorder.sampled()
+            token = _IN_CALL.set(True)
+            try:
+                if not logging and shadow is None:
+                    return fn(*args, **kwargs)
+                request = _request_copy(api, kwargs)
+                manager = fn(*args, **kwargs)
+            finally:
+                _IN_CALL.reset(token)
 
             def done(snapshot: Any, error: str | None, latency_ms: float) -> None:
                 if snapshot is None and error is None:
@@ -841,7 +903,7 @@ class _Proxy:
 
             return _HelperStream(manager, done)
 
-        return call
+        return _like(fn, call, "stream")
 
     def _wrap_call(self, fn: Any, api: str, raw: bool = False) -> Any:
         recorder, provider, shadow = self._recorder, self._provider, self._shadow
@@ -881,44 +943,64 @@ class _Proxy:
             observe(kwargs, result)
             return result
 
-        async def finish_async(awaitable: Any, kwargs: dict, start: float, logging: bool) -> Any:
+        async def finish_async(awaitable: Any, kwargs: dict, start: float, logging: bool, recording: bool) -> Any:
+            token = _IN_CALL.set(True)
             try:
                 result = await awaitable
             except Exception as exc:
                 failed(kwargs, start, exc, logging)
                 raise
-            return finished(kwargs, start, result, logging)
+            finally:
+                _IN_CALL.reset(token)
+            return finished(kwargs, start, result, logging) if recording else result
 
-        def sampled() -> bool:
-            return recorder is not None and recorder.sampled()
+        def begin(kwargs: dict) -> tuple:
+            """Whether the call is logged, whether it is recorded at all (logged or
+            shadowed), and the request as sent."""
+            logging = recorder is not None and recorder.sampled()
+            recording = logging or shadow is not None
+            return logging, recording, _request_copy(api, kwargs) if recording else {}
 
-        if inspect.iscoroutinefunction(fn):
+        # An async client's create is often a plain function (the SDK's argument check) around
+        # a coroutine function. Its wrapper is a coroutine function, as instructor and tracers
+        # check; with_streaming_response's create is not one: it returns a context manager.
+        if inspect.iscoroutinefunction(fn) or (not raw and any(inspect.iscoroutinefunction(f) for f in _trail(fn))):
 
             async def async_call(*args: Any, **kwargs: Any) -> Any:
-                logging = sampled()
-                if not logging and shadow is None:
+                if _IN_CALL.get() or (not raw and _for_raw_response(kwargs)):  # recorded around this call
                     return await fn(*args, **kwargs)
-                return await finish_async(fn(*args, **kwargs), _request_copy(api, kwargs), time.perf_counter(), logging)
+                logging, recording, request = begin(kwargs)
+                start = time.perf_counter()
+                token = _IN_CALL.set(True)
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as exc:
+                    failed(request, start, exc, logging)
+                    raise
+                finally:
+                    _IN_CALL.reset(token)
+                return finished(request, start, result, logging) if recording else result
 
-            return async_call
+            return _like(fn, async_call, None if raw else "call")
 
         def call(*args: Any, **kwargs: Any) -> Any:
-            logging = sampled()
-            if not logging and shadow is None:
+            if _IN_CALL.get() or (not raw and _for_raw_response(kwargs)):  # recorded around this call
                 return fn(*args, **kwargs)
-            request = _request_copy(api, kwargs)
+            logging, recording, request = begin(kwargs)
             start = time.perf_counter()
+            token = _IN_CALL.set(True)
             try:
                 result = fn(*args, **kwargs)
             except Exception as exc:
                 failed(request, start, exc, logging)
                 raise
-            if inspect.isawaitable(result):
-                # Async SDK methods are often plain functions that return a coroutine.
-                return finish_async(result, request, start, logging)
-            return finished(request, start, result, logging)
+            finally:
+                _IN_CALL.reset(token)
+            if inspect.isawaitable(result):  # an async method that did not look like one
+                return finish_async(result, request, start, logging, recording)
+            return finished(request, start, result, logging) if recording else result
 
-        return call
+        return _like(fn, call, None if raw else "call")
 
     def __repr__(self) -> str:
         return f"<llmshift recording proxy for {self._target!r}>"

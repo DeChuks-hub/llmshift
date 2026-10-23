@@ -7,16 +7,42 @@ baseline output.
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import threading
 from typing import Any
 
-# A setting that holds a credential, and a value that looks like one (letters and digits).
-_SECRET_NAME = r"[\w.-]{0,40}(?:password|passwd|pwd|secret|api[-_]?key|apikey|access[-_]?key|secret[-_]?key|token|credential)"
-# The look-aheads stop where a value may end (256 characters): unbounded, every
-# "api-key=" in a long run of value characters would rescan the rest of it.
-_SECRET_VALUE = r"(?=[\w+/=.~!@#$%^*-]{0,255}\d)(?=[\w+/=.~!@#$%^*-]{0,255}[A-Za-z])[\w+/=.~!@#$%^*-]{6,256}"
+# Between a setting's name and its value: the name's closing quote (escaped in a JSON
+# string), then =, : or =>.
+_SEPARATOR = r"\\?[\"']?[ \t]*(?:=>|[:=])[ \t]*"
+# The word in a setting's name that says it holds a credential. A rule starts at the word
+# itself: a name before it ("[\w.-]{0,40}password") made every position of a text try 40
+# starts, and missed the password of a longer name. Only the value is replaced. A pwd
+# before a path is the working directory (PWD=/home/bob).
+_SECRET_WORD = (
+    r"(?:passw(?:or)?d|pwd(?!" + _SEPARATOR + r"[\"']?[/~])|secret(?:[-_]?key)?|api[-_]?key|access[-_]?key|token|credential)"
+)
+# A value looks like a credential when its first 64 characters hold a digit and a letter.
+# Looking no further keeps a text of many names quick (pwd=pwd=pwd=...), and a value may be
+# long (an OAuth token). A quoted value is taken whole, symbols and all (xK9#mP2&vL5?qR8(wN3),
+# but not a placeholder: ${DB_PASSWORD_1}, {{ ... }}, <SECRET_1>.
+_QUOTED_CHAR = r"(?:\\\\|(?!\\?(?P=q))[^\s\\])"
+_QUOTED_VALUE = (
+    r"\\?(?P<q>[\"'])(?!\$\{|\{\{|<)(?P<v>(?=" + _QUOTED_CHAR + r"{0,63}?\d)(?=" + _QUOTED_CHAR + r"{0,63}?[A-Za-z])"
+    + _QUOTED_CHAR + r"{6,4096})\\?(?P=q)"
+)
+# An unquoted value runs to a space, or to the & ; or , before the next name= or name:, and
+# leaves out a sentence's last . , ; : or closing bracket. Code is not a value: tokens[0],
+# hashlib.sha256(pw), ${DB_PASSWORD_1}.
+_BARE_CHAR = r"(?:[^\s\"'`<>\\&;,]|[&;,](?![\w.-]{1,64}[ \t]*[:=]))"
+_BARE_VALUE = (
+    r"(?![A-Za-z_][\w.]{0,64}[(\[]|\$\{)(?P<v>(?=" + _BARE_CHAR + r"{0,63}?\d)(?=" + _BARE_CHAR + r"{0,63}?[A-Za-z])"
+    + _BARE_CHAR + r"{6,4096}(?<![.,;:)\]}]))"
+)
+# An AWS secret access key: 40 characters, with upper and lower case letters and digits (a
+# SHA-1 is 40 lower-case hex digits).
+_AWS_SECRET = r"(?=[A-Za-z0-9/+]{0,39}[A-Z])(?=[A-Za-z0-9/+]{0,39}[a-z])(?=[A-Za-z0-9/+]{0,39}\d)[A-Za-z0-9/+]{40}"
 
 # (pattern, what it must contain): a substring test is far cheaper than a regex that tries
 # every position of a long text (a document or an image in a request).
@@ -32,13 +58,17 @@ _SECRETS = [
     ),
     (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b[^\n]{0,80}?(?<![A-Za-z0-9/+])(?P<v>[A-Za-z0-9/+]{40})(?![A-Za-z0-9/+=])", ("AKIA", "ASIA")),
     (r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", ("AKIA", "ASIA")),  # AWS access key ids, long-lived and temporary
+    # ... or plainly key=<the 40 characters>. Case matters in the value, so only "key" ignores it.
+    (r"(?i:key)" + _SEPARATOR + r"\\?[\"']?(?P<v>" + _AWS_SECRET + r")(?![A-Za-z0-9/+=])", ("key", "Key", "KEY")),
     (r"\bgh[pousr]_[A-Za-z0-9]{30,}\b", ("ghp_", "gho_", "ghu_", "ghs_", "ghr_")),
     (r"\bgithub_pat_[A-Za-z0-9_]{40,}\b", ("github_pat_",)),
     (r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b", ("xox",)),  # Slack
     (r"\bAIza[0-9A-Za-z_\-]{35}(?![0-9A-Za-z_\-])", ("AIza",)),  # Google (a key may end in "-")
     (r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b", ("eyJ",)),  # JWTs
     (r"(?i)\b(?:bearer)\s+[A-Za-z0-9_\-.=]{20,}", ()),
-    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----", ("PRIVATE KEY",)),
+    # Each BEGIN looks no further than the next one: a text of BEGINs with no END made every
+    # BEGIN rescan the rest (quadratic: a 224 KB message held the GIL for 15 s).
+    (r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S])+?-----END [A-Z ]{0,40}PRIVATE KEY-----", ("PRIVATE KEY",)),
     (r"\bxai-[A-Za-z0-9]{20,}", ("xai-",)),  # xAI
     (r"\bgsk_[A-Za-z0-9]{20,}", ("gsk_",)),  # Groq
     (r"\bpplx-[A-Za-z0-9]{20,}", ("pplx-",)),  # Perplexity
@@ -53,16 +83,57 @@ _SECRETS = [
     (r"\b[A-Za-z][A-Za-z0-9+.-]{1,20}://[^\s:/@\"'<>{}$%()]{0,128}:(?P<v>[^\s@/\"'<>{}$%()]{1,256})@", ("://",)),
     (r"(?i)\bauthorization[\"']?[ \t]*[:=][ \t]*[\"']?basic[ \t]+(?P<v>[A-Za-z0-9+/=]{8,})", ("authorization",)),
     # The value of a password, secret or key setting (password=..., "api-key": "...", an Azure
-    # key or AWS secret key in a config dump), when it looks like one: letters and digits.
+    # key in a config dump, a tool's JSON arguments), when it looks like one.
+    (r"(?i)" + _SECRET_WORD + _SEPARATOR + _QUOTED_VALUE, ("pass", "pwd", "secret", "key", "token", "credential")),
+    (r"(?i)" + _SECRET_WORD + _SEPARATOR + _BARE_VALUE, ("pass", "pwd", "secret", "key", "token", "credential")),
+    # ... and in XML: <password>...</password> (a Maven settings.xml, a .NET config).
     (
-        r"(?i)\b" + _SECRET_NAME + r"[\"']?[ \t]*[:=][ \t]*[\"']?(?P<v>" + _SECRET_VALUE + ")",
+        r"(?i)" + _SECRET_WORD + r">(?P<v>(?=[^<\s]{0,63}?\d)(?=[^<\s]{0,63}?[A-Za-z])[^<\s]{6,4096})</",
         ("pass", "pwd", "secret", "key", "token", "credential"),
     ),
 ]
-_SECRET_NAME_RE = re.compile(_SECRET_NAME, re.I)
-_SECRET_VALUE_RE = re.compile(_SECRET_VALUE)
 SECRET_PATTERNS = [("SECRET", re.compile(p)) for p, _ in _SECRETS]
 _MARKERS = {p: markers for p, markers in _SECRETS if markers}
+
+# A JSON key that names a credential: a password or a secret (its value is one, whatever
+# it looks like), a token or an API key (its value is one when it looks like one).
+_STRONG_KEY_RE = re.compile(r"(?:passw(?:or)?d|pwd|secret|credential)s?$", re.I)
+_SECRET_KEY_RE = re.compile(_SECRET_WORD + "$", re.I)
+_AWS_SECRET_RE = re.compile(_AWS_SECRET)
+# Values that stand for a credential without being one.
+_PLACEHOLDER_RE = re.compile(
+    r"\$\{.*\}|\$[A-Z_][A-Z0-9_]*|\{\{.*\}\}|<[^<>]*>|%\(?\w*\)?s|[*xX#.\-_]+"
+    r"|(?i:none|null|true|false|redacted|" + _SECRET_WORD + ")"
+)
+_PATH_RE = re.compile(r"[/~]|[A-Za-z]:[\\/]")
+
+
+@functools.lru_cache(maxsize=1024)
+def _key_kind(key: str) -> int:
+    """3 for a password or secret key, 2 for a token or API key, 1 for one that ends in
+    "key" (an AWS secret access key may be under it), 0 for any other."""
+    if _STRONG_KEY_RE.search(key):
+        return 3
+    if _SECRET_KEY_RE.search(key):
+        return 2
+    return 1 if key.lower().endswith("key") else 0
+
+
+def _secret_value(key: str, value: str, item: dict) -> bool:
+    """Whether the string `value` under `key` of the JSON object `item` is a credential."""
+    kind = _key_kind(key)
+    if not kind or len(value) > 4096:
+        return False
+    v = value.strip()
+    if len(v) < 4 or "\n" in v or _PLACEHOLDER_RE.fullmatch(v):
+        return False
+    if kind == 3:  # a "pwd" may be the working directory: {"pwd": "/workspace/app"}
+        return not (key.lower().endswith("pwd") and _PATH_RE.match(v))
+    if kind == 2:  # not the text of a logprobs entry: {"token": "Hello", "logprob": -0.1}
+        if any(isinstance(k, str) and "logprob" in k.lower().replace("_", "") for k in item):
+            return False
+        return len(v) >= 8 and " " not in v and any(c.isalpha() for c in v) and not v.isalpha()
+    return _AWS_SECRET_RE.fullmatch(v) is not None
 
 PII_PATTERNS = [
     ("EMAIL", re.compile(r"\b[\w.+-]{1,64}@[\w-]+(?:\.[\w-]+)+\b")),
@@ -220,7 +291,7 @@ class Redactor:
                 for k, v in item.items():
                     if k in _PLAIN_KEYS and isinstance(v, str) and len(v) < 64:
                         out[k] = v
-                    elif self.secrets and isinstance(v, str) and isinstance(k, str) and _SECRET_NAME_RE.fullmatch(k) and _SECRET_VALUE_RE.fullmatch(v.strip()):
+                    elif self.secrets and isinstance(v, str) and isinstance(k, str) and _secret_value(k, v, item):
                         out[k] = self._placeholder("SECRET", v.strip())  # {"api_key": "..."}
                     else:
                         out[k] = None  # keeps the key order; filled in below

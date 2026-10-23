@@ -78,9 +78,11 @@ _NUM = r"(-?\d+(?:\.\d+)?)"
 def score_from_text(reply: str, lo: float, hi: float) -> float:
     """A score from a free-text reply: "score: 3", "3/10", "3 out of 10", else the
     last in-range number; 0 when there is none (OpenAI's rule for non-numeric output)."""
+    # Bounded spaces, and a number from the start of its digits: with \s* and a number from
+    # any digit, a reply of "score" and 40,000 spaces (or 40,000 digits) took 20 to 40 s.
     for pattern in (
-        rf"(?i)\b(?:score|result|rating|grade)\b\s*(?:is|of|:|=)?\s*{_NUM}",
-        rf"{_NUM}\s*(?:/|out of)\s*\d+(?:\.\d+)?",
+        rf"(?i)\b(?:score|result|rating|grade)\b\s{{0,10}}(?:(?:is|of|:|=)\s{{0,10}})?{_NUM}",
+        rf"(?<![\d.]){_NUM}\s{{0,10}}(?:/|out of)\s{{0,10}}\d+(?:\.\d+)?",
     ):
         m = re.search(pattern, reply)
         if m:
@@ -128,6 +130,14 @@ DEFAULT_CRITERIA = (
     "Wording, length and formatting may differ unless the criteria below say otherwise. "
     "FAIL if a fact, number, name, decision or recommendation differs, is missing, or if the new answer refuses."
 )
+# A verdict word in a reply in prose, and what negates it: "not", "n't", "never", "cannot" or
+# "unable to" up to three words before (not across "and" or "but"), or "no" right before.
+# "does not pass" is a fail and "doesn't fail" a pass; "not only passes" is not negated.
+_PROSE_VERDICT_RE = re.compile(
+    r"(\bno\s+|(?:\b(?:not|never|cannot|unable\s+to)|n[’']t)\s+(?!only\b)(?:(?!(?:and|but|or|so|yet)\b)\w+\s+){0,3}?)?"
+    r"\b(pass|fail)(?:ed|es|s|ing)?\b",
+    re.I,
+)
 
 
 def c_llm_judge(check: dict, sample: Any, case: Any, ctx: Any) -> Any:
@@ -157,10 +167,17 @@ def c_llm_judge(check: dict, sample: Any, case: Any, ctx: Any) -> Any:
         diffs = [str(d) for d in (data.get("differences") or []) if d][:6]
     if verdict not in ("pass", "fail"):
         explicit = re.search(r"(?i)\bverdict\W{0,5}(pass|fail)", reply)
-        found = re.findall(r"\b(pass|fail)(?:ed|es|ing)?\b", reply.lower())
+        prose = _PROSE_VERDICT_RE.search(reply)
         # An explicit "Verdict: FAIL" wins; otherwise the first verdict word, since later
         # mentions tend to be hypothetical ("it would pass only if ...").
-        verdict = explicit.group(1).lower() if explicit else (found[0] if found else None)
+        if explicit:
+            verdict = explicit.group(1).lower()
+        elif prose:
+            verdict = prose.group(2).lower()
+            if prose.group(1):  # "does not pass", "doesn't fail"
+                verdict = "fail" if verdict == "pass" else "pass"
+        else:
+            verdict = None
     if verdict is None:
         return Outcome("error", f"judge reply not understood: {shorten(reply, 120)}")
     details = {"judge": judge.spec, "reason": reason, "differences": diffs}

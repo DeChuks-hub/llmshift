@@ -265,3 +265,54 @@ def test_run_checks_order(make_case):
     case = make_case("hello", checks=[{"type": "not_empty"}, {"type": "equals", "value": "hello"}])
     results = run_checks(case, Sample.from_response(Response(text="hello")), CheckContext())
     assert [r.type for r in results] == ["not_empty", "equals"] and all(r.status == "pass" for r in results)
+
+
+def test_a_regex_that_backtracks_without_end_is_stopped(make_case, monkeypatch):
+    """^(\\w+\\s?)*$ took more than a minute on a 141-character answer it does not match."""
+    import time
+
+    from llmshift import userregex
+
+    monkeypatch.setattr(userregex, "TIMEOUT", 0.5)
+    case = make_case("x")
+    start = time.perf_counter()
+    r = ev({"type": "regex", "pattern": r"^(\w+\s?)*$"}, "a" * 141 + "!", case)
+    assert r.status == "error" and "backtracks" in r.message and r"\w+(?:\s\w+)*" in r.message
+    assert ev({"type": "regex", "pattern": r"^\w+(?:\s\w+)*$"}, "a" * 141 + "!", case).status == "fail"  # the rewrite it suggests
+    assert ev({"type": "regex", "pattern": r"\d+ items"}, "1" * 40000 + " items", case).status == "pass"
+    schema = {"type": "object", "properties": {"name": {"type": "string", "pattern": r"^(\w+\s?)*$"}}, "patternProperties": {r"^(\w+\s?)*$": {"type": "string"}}}
+    r = ev({"type": "json_schema", "schema": schema}, json.dumps({"name": "a" * 141 + "!", "b" * 60 + "!": "x"}), case)
+    assert r.status == "fail" and "backtracks" in r.message
+    assert time.perf_counter() - start < 30
+    start = time.perf_counter()
+    for i in range(300):  # the worker stays up between searches
+        assert ev({"type": "regex", "pattern": r"order #\d+"}, f"your order #{i} ships", case).status == "pass"
+    assert time.perf_counter() - start < 10
+
+
+@pytest.mark.parametrize("reply, status", [
+    ("The new answer does not pass: the window changed.", "fail"),
+    ("It doesn't fail; the facts are the same.", "pass"),
+    ("I do not think it will pass.", "fail"),
+    ("This fails.", "fail"),
+    ("There are no differences and it passes.", "pass"),
+    ("Not only does it pass, it is clearer.", "pass"),
+    ('{"verdict": "maybe"} No idea.', "error"),
+])
+def test_a_judge_answering_in_prose_is_read_with_its_negations(make_case, reply, status):
+    case = make_case("The refund window is 30 days.", user="How long is the refund window?")
+    ctx = CheckContext(judge=scripted_judge([reply]))
+    assert ev({"type": "llm_judge"}, "You have 30 days.", case, ctx).status == status
+
+
+def test_judge_replies_are_read_in_linear_time(make_case):
+    import time
+
+    from llmshift.graders import score_from_text
+
+    start = time.perf_counter()
+    for reply in ("score" + " " * 40000, "1" * 40000, "not " * 20000 + "fail"):  # 20 to 40 s each before
+        score_from_text(reply, 0, 10)
+    ctx = CheckContext(judge=scripted_judge(["not " * 20000 + "a pass"]))
+    assert ev({"type": "llm_judge"}, "x", make_case("y"), ctx).status == "fail"
+    assert time.perf_counter() - start < 5

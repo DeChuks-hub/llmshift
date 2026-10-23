@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
 import warnings
+
+import pytest
 
 from llmshift.config import expand_env, load_config
 from llmshift.record import Recorder, log, wrap
@@ -422,3 +426,176 @@ def test_raw_and_streaming_response_calls_are_recorded(tmp_path):
     assert [rec["response"]["choices"][0]["message"]["content"] if rec.get("response") else rec["error"] for rec in lines] == [
         "raw a", "streamed b", "RuntimeError: 400 bad request",
     ]  # parsed three times, recorded once
+
+
+def _sdk_checked(fn):
+    """What the OpenAI and Anthropic SDKs put around an async client's create (required_args):
+    a plain function that returns its coroutine, made with functools.wraps."""
+
+    @functools.wraps(fn)
+    def checked(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return checked
+
+
+class FakeAsyncResponseManager:
+    """What an async client's with_streaming_response.create(...) returns: the request is
+    made on entering."""
+
+    def __init__(self, request):
+        self._request = request
+
+    async def __aenter__(self):
+        return await self._request
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class SdkAsyncCompletions:
+    """Shaped like openai's AsyncCompletions: create as above, and with_raw_response and
+    with_streaming_response built from whatever create is when first asked for (a tracer's,
+    if one patched it), asking it for the HTTP response."""
+
+    @_sdk_checked
+    async def create(self, *, model: str, messages: list, stream: bool = False, extra_headers: dict | None = None):
+        answer = completion("async " + messages[-1]["content"])
+        return FakeRawResponse(answer) if "X-Stainless-Raw-Response" in (extra_headers or {}) else answer
+
+    @functools.cached_property
+    def with_raw_response(self):
+        create = self.create
+
+        @functools.wraps(create)
+        async def raw_create(**kwargs):
+            return await create(**kwargs, extra_headers={"X-Stainless-Raw-Response": "raw"})
+
+        return Obj(create=raw_create)
+
+    @functools.cached_property
+    def with_streaming_response(self):
+        create = self.create
+
+        @functools.wraps(create)
+        def streaming_create(**kwargs):
+            return FakeAsyncResponseManager(create(**kwargs, extra_headers={"X-Stainless-Raw-Response": "stream"}))
+
+        return Obj(create=streaming_create)
+
+
+def _instructor_is_async(func):
+    """instructor.utils.is_async: instructor patches an async client's create when it is true."""
+    is_coroutine = inspect.iscoroutinefunction(func)
+    while hasattr(func, "__wrapped__"):
+        func = func.__wrapped__
+        is_coroutine = is_coroutine or inspect.iscoroutinefunction(func)
+    return is_coroutine
+
+
+def test_wrapped_methods_look_like_the_sdk_methods(tmp_path):
+    path = tmp_path / "a.jsonl"
+    raw = FakeClient(SdkAsyncCompletions()).chat.completions.create
+    client = wrap(FakeClient(SdkAsyncCompletions()), path=path)
+    create = client.chat.completions.create
+    assert _instructor_is_async(create) and inspect.iscoroutinefunction(create)  # LangSmith checks the latter
+    assert create.__name__ == "create" and inspect.signature(create) == inspect.signature(raw)
+    assert asyncio.run(create(model="gpt-4o", messages=[{"role": "user", "content": "q"}])).choices[0].message.content == "async q"
+    streaming = client.chat.completions.with_streaming_response.create
+    assert not inspect.iscoroutinefunction(streaming)  # it returns a context manager at once, as the SDK's does
+
+    async def use():
+        async with streaming(model="gpt-4o", messages=[{"role": "user", "content": "b"}]) as resp:
+            return resp.parse()
+
+    assert asyncio.run(use()).choices[0].message.content == "async b"
+    assert [r["response"]["choices"][0]["message"]["content"] for r in _records(path)] == ["async q", "async b"]
+    stream = wrap(Obj(messages=FakeMessages()), path=tmp_path / "b.jsonl").messages.stream
+    assert stream.__name__ == "stream" and not inspect.iscoroutinefunction(stream)
+
+
+class Observed:
+    """A shadow that counts what it is shown."""
+
+    def __init__(self):
+        self.seen = []
+
+    def observe(self, api, request, response):
+        self.seen.append(api)
+
+
+def _trace(resource, seen, keep_trail=True):
+    """Patch resource.create as langsmith.wrappers.wrap_openai does: its own function around
+    the create it found (async for an async one), which takes out its own argument."""
+    original = resource.create
+
+    def create(*args, **kwargs):
+        seen.append(kwargs.pop("langsmith_extra", None))
+        return original(*args, **kwargs)
+
+    async def acreate(*args, **kwargs):
+        seen.append(kwargs.pop("langsmith_extra", None))
+        return await original(*args, **kwargs)
+
+    is_async = inspect.iscoroutinefunction(original) or inspect.iscoroutinefunction(getattr(original, "__wrapped__", None))
+    traced = acreate if is_async else create
+    resource.create = functools.wraps(original)(traced) if keep_trail else traced
+
+
+@pytest.mark.parametrize("keep_trail", [True, False])
+def test_a_tracer_that_patches_create_after_wrap_records_each_call_once(tmp_path, keep_trail):
+    """LangSmith's wrap_openai(client) sets client.chat.completions.create to a function around
+    wrap()'s, and every call was recorded and shadowed twice."""
+    path, shadow, seen = tmp_path / "sync.jsonl", Observed(), []
+    client = wrap(FakeClient(FakeCompletions()), path=path, shadow=shadow)
+    _trace(client.chat.completions, seen, keep_trail)
+    client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "hi"}], langsmith_extra={"run_id": "r1"})
+    list(client.chat.completions.create(model="gpt-4o", stream=True, messages=[{"role": "user", "content": "s"}]))
+    with pytest.raises(RuntimeError):
+        client.chat.completions.create(model="boom", messages=[{"role": "user", "content": "x"}])
+    recs = _records(path)
+    assert len(recs) == 3 and len(seen) == 3 and len(shadow.seen) == 2  # a failed call is not shadowed
+    if keep_trail:  # the recording create inside the tracer's records what was sent
+        assert "langsmith_extra" not in recs[0]["request"]
+
+    path, shadow, seen = tmp_path / "async.jsonl", Observed(), []
+    client = wrap(FakeClient(SdkAsyncCompletions()), path=path, shadow=shadow)
+    _trace(client.chat.completions, seen, keep_trail)
+
+    async def calls():
+        await asyncio.gather(*(client.chat.completions.create(model=f"gpt-4o-{i}", messages=[{"role": "user", "content": "q"}]) for i in range(3)))
+        raw = await client.chat.completions.with_raw_response.create(model="gpt-4o", messages=[{"role": "user", "content": "raw"}])
+        async with client.chat.completions.with_streaming_response.create(model="gpt-4o", messages=[{"role": "user", "content": "streamed"}]) as resp:
+            return raw.parse(), resp.parse()
+
+    parsed, streamed = asyncio.run(calls())
+    assert parsed.choices[0].message.content == "async raw" and streamed.choices[0].message.content == "async streamed"
+    recs = _records(path)
+    assert len(recs) == 5 and len(seen) == 5 and len(shadow.seen) == 5
+    assert sorted(r["request"]["model"] for r in recs) == ["gpt-4o", "gpt-4o", "gpt-4o-0", "gpt-4o-1", "gpt-4o-2"]
+    assert [r["response"]["choices"][0]["message"]["content"] for r in recs][3:] == ["async raw", "async streamed"]  # the answers, not HTTP responses
+
+
+def test_a_call_not_sampled_is_not_sampled_again_inside_a_tracer(tmp_path):
+    rec = Recorder(tmp_path / "s.jsonl")
+    answers = iter([False, True])
+    rec.sampled = lambda: next(answers)
+    client = wrap(FakeClient(FakeCompletions()), recorder=rec)
+    _trace(client.chat.completions, [], keep_trail=False)
+    client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "x"}])
+    assert not (tmp_path / "s.jsonl").exists() and next(answers) is True  # asked once
+
+
+def test_an_odd_callable_never_breaks_the_proxy(tmp_path):
+    class Odd:
+        def __call__(self, **kwargs):
+            return completion("odd")
+
+        @property
+        def __wrapped__(self):
+            raise RuntimeError("not today")
+
+    path = tmp_path / "o.jsonl"
+    client = wrap(FakeClient(Obj(create=Odd())), path=path)
+    assert client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": "x"}]).choices[0].message.content == "odd"
+    assert len(_records(path)) == 1

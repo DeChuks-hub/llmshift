@@ -20,6 +20,8 @@
 - Text from models and users cannot show images (tracking pixels) or disguised links in PR comments, job summaries, reports or GitHub, Discord and Teams alerts: `[ ] ( ) !` are escaped and bare URLs are not linked. Slack and Discord alerts show no link previews.
 - Bidi override characters ("Trojan Source") are shown as escapes in every report (HTML, Markdown, JSON, JUnit), as they already were on the terminal.
 - AWS secret access keys, which have no prefix, are redacted by what surrounds them: any spelling of "secret access key" before them, or the access key id next to them.
+- One chat message can no longer freeze an app that records with `wrap()`: redaction takes milliseconds on any text. A text of `-----BEGIN PRIVATE KEY-----` lines with no END held Python for 15 s per 224 KB, and many `password=` settings in a row slowed it too.
+- Redaction takes a password with symbols whole (only the start of `xK9#mP2&vL5?qR8(wN3)` was hidden) in `name=value`, JSON, YAML, XML, prose and a tool call's arguments, after a setting name of any length, to the end of a token longer than 256 characters, and an AWS secret key after a plain `key=`. A JSON value under a password or secret key is redacted whatever it holds, a passphrase with spaces too. Left alone: a logprobs entry's `token`, code (`tokens[0]`, `hashlib.sha256(pw)`), placeholders (`${DB_PASSWORD}`, an earlier `<SECRET_1>`) and the working directory (`PWD=/home/bob`).
 
 **Correct results**
 
@@ -32,6 +34,8 @@
 - A judge that cannot answer (a wrong key) is reported as such instead of "0 judge calls", and `judge calibrate` keeps the last good result instead of saving an empty one.
 - `fix` carries on with rule-based changes when the optimizer fails, stops when it repeats itself, and no longer lists logs or its own reports as places a prompt lives.
 - Recording: calls through `with_raw_response` and `with_streaming_response` are logged; wrapping a client per request shares one shadow worker set.
+- `wrap()` keeps each SDK method's name, signature and `__wrapped__`, and an async client's methods are coroutine functions, so instructor and LangSmith treat `wrap(AsyncOpenAI())` as async (instructor took it for a synchronous client). A tracer that patches `create` after `wrap()` (LangSmith's `wrap_openai`) no longer gets every call recorded and shadowed twice, and calls through the SDK's `with_raw_response` and `with_streaming_response` under it record the answer, not the HTTP response.
+- A judge that answers in prose instead of JSON is read with its negations: "does not pass" is a fail and "doesn't fail" a pass (both were read the other way round), and "fails" counts as a verdict.
 - Providers: `python:` functions honour `timeout` when one is set (and no more than four calls that ran past it keep running), and their cache key covers the project modules they import; `command` providers honour it on Windows and notice an edited script. Compressed and mislabelled responses are read, JSON cut off in transit is fetched again, an HTML error page is summed up in one line, `OLLAMA_HOST` is read the way Ollama reads it, and a mistyped provider gets a "did you mean".
 - Settings: values of the wrong type (`timeout: abc`, `headers` as a list, a `base_url` without `https://`) are reported where they are read; unknown or misspelt settings and severity levels are reported with a suggestion, and `severity: {tone: off}` works (YAML reads `off` as false).
 
@@ -44,6 +48,8 @@
 - The action, the example workflows and those `init --github` writes use the Node 24 releases of GitHub's own actions, so runs no longer warn that Node.js 20 is deprecated.
 - An empty model (`--to "$CANDIDATE"` with the variable unset) is refused by every command and MCP tool instead of quietly testing the configured model. `--temperature` must be 0 to 2 and `--max-tokens` at least 1, checked before any request; `embeddings` checks the corpus before it starts.
 - `scan` is faster on large repositories: lines that cannot name a model are passed over quickly.
+- A `command` provider whose script crashes is reported by its exception (`FileNotFoundError: ...`), not by the line `Traceback (most recent call last):` before it.
+- A `regex` check or a JSON schema `pattern` that backtracks without end no longer hangs `compare` (`^(\w+\s?)*$` took over a minute on a 141-character answer): the search is stopped after 2 seconds, and the check reports an error that says how to rewrite the pattern. Judge replies are read in linear time (one of 40,000 digits took 40 s).
 - A server that asks to wait longer than llmshift's 60-second maximum ("Retry-After: 1 day") fails at once and says so, instead of being asked again every minute. A server that was reached but did not answer in time is reported as slow, not as unreachable.
 - The GitHub Action can be used as `@v0`: each release moves that tag once PyPI has the release, and never to a pre-release. Pin an exact version or a commit SHA for builds that must not change.
 - `THIRD_PARTY_NOTICES` carries the full licenses of LiteLLM's price list and the vendored PyYAML, in the source archive and the wheel.

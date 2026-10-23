@@ -335,7 +335,11 @@ class CommandProvider(Provider):
             with _RUNNING_LOCK:
                 _RUNNING.discard(proc)
         if proc.returncode != 0:
-            raise ProviderError(f"command exited with {proc.returncode}: {(stderr or '').strip()[:300]}", code="command_error")
+            said = (stderr or "").strip()
+            lines = [line.strip() for line in said.splitlines() if line.strip()]
+            if lines and lines[0].startswith("Traceback (most recent call last)"):
+                said = lines[-1]  # a Python script's exception, not the "Traceback" line before its stack
+            raise ProviderError(f"command exited with {proc.returncode}: {said[:300]}", code="command_error")
         text = (stdout or "").lstrip("\ufeff")
         out = text.strip()
         try:

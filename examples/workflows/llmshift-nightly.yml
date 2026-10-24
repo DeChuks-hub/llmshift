@@ -24,7 +24,7 @@ jobs:
           key: llmshift-watch-${{ github.run_id }}
           restore-keys: llmshift-watch-
 
-      - uses: DeChuks-hub/llmshift@v0.1.1
+      - uses: DeChuks-hub/llmshift@v0
         with:
           command: watch
           args: --model openai:gpt-5.6-sol --alert github --alert slack

@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false  # nothing here pushes: the token is not left in .git/config
 
       - name: Retired / retiring models
-        uses: DeChuks-hub/llmshift@v0.1.1   # or: uses: ./  when this repository is LLMShift itself
+        uses: DeChuks-hub/llmshift@v0   # or: uses: ./  when this repository is LLMShift itself
         with:
           command: scan
           args: --fail-on retired
@@ -31,7 +31,7 @@ jobs:
 
       - name: Compare the candidate model
         if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_NO_SECRETS != 'true' }}
-        uses: DeChuks-hub/llmshift@v0.1.1
+        uses: DeChuks-hub/llmshift@v0
         with:
           command: compare
           args: --to openai:gpt-5.6-sol --min-pass-rate 0.95 --junit llmshift-junit.xml

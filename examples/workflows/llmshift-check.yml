@@ -26,7 +26,7 @@ jobs:
 
       - name: Test the edited prompts
         if: ${{ env.LLMSHIFT_NO_SECRETS != 'true' }}
-        uses: DeChuks-hub/llmshift@v0.1.1
+        uses: DeChuks-hub/llmshift@v0
         with:
           command: check
           args: --min-pass-rate 0.95

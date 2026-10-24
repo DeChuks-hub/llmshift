@@ -2,7 +2,7 @@
 
 **Switch AI models without breaking your product.**
 
-[![PyPI](https://img.shields.io/pypi/v/llmshift)](https://pypi.org/project/llmshift/) [![Python](https://img.shields.io/pypi/pyversions/llmshift)](https://pypi.org/project/llmshift/) [![CI](https://github.com/DeChuks-hub/llmshift/actions/workflows/ci.yml/badge.svg)](https://github.com/DeChuks-hub/llmshift/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/DeChuks-hub/llmshift/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/llmshift)](https://pypi.org/project/llmshift/) [![GitHub Marketplace](https://img.shields.io/badge/Marketplace-LLMShift-purple?logo=github)](https://github.com/marketplace/actions/llmshift) [![Python](https://img.shields.io/pypi/pyversions/llmshift)](https://pypi.org/project/llmshift/) [![CI](https://github.com/DeChuks-hub/llmshift/actions/workflows/ci.yml/badge.svg)](https://github.com/DeChuks-hub/llmshift/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/DeChuks-hub/llmshift/blob/main/LICENSE)
 
 GPT-4o, GPT-4o mini and GPT-4.1 retire on 14 January 2027, GPT-5 and o3 on 11 December, Claude Sonnet 4.5 on 30 November. Does your code call one of them? Find out in seconds, with nothing to install:
 

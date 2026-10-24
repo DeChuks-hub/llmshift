@@ -581,6 +581,20 @@ _PAGE_JS = """
 })();
 """
 
+# GoatCounter's script, pinned to one version: browsers refuse it if its content ever changes.
+_GOATCOUNTER_JS = "https://gc.zgo.at/count.v5.js"
+_GOATCOUNTER_SRI = "sha384-atnOLvQb9t+jTSipvd75X2yginT4PjVbqDdlJAmxMm+wYElFmeR6EmLP5bYeoRVQ"
+
+
+def goatcounter_url(value: str) -> str:
+    """Where the calendar page counts visits: a GoatCounter site code or its https://.../count URL."""
+    value = value.strip()
+    if re.fullmatch(r"https://[A-Za-z0-9.-]+(:[0-9]+)?/count", value):
+        return value
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,49}", value.lower()):
+        return f"https://{value.lower()}.goatcounter.com/count"
+    raise UsageError(f"--goatcounter takes a GoatCounter site code (CODE in https://CODE.goatcounter.com) or its https://.../count URL, not {value!r}")
+
 
 def _days_text(days: int) -> str:
     if days > 1:
@@ -612,9 +626,14 @@ def _rows(items: list, now: _dt.date, dated: bool) -> str:
     return "\n".join(out)
 
 
-def build_page(entries: dict[str, list], updated: str | None, *, title: str, days_back: int) -> str:
+def build_page(entries: dict[str, list], updated: str | None, *, title: str, days_back: int, count_url: str | None = None) -> str:
     esc = html.escape
     now = reglib.today()
+    foot = "Collected from the providers' official deprecation pages. Dates can move: check the source before you plan around one."
+    counter = ""
+    if count_url:
+        foot += ' Visits are counted with <a href="https://www.goatcounter.com" rel="noopener">GoatCounter</a>, which sets no cookies.'
+        counter = f'\n<script data-goatcounter="{esc(count_url)}" async src="{_GOATCOUNTER_JS}" crossorigin="anonymous" integrity="{_GOATCOUNTER_SRI}"></script>'
     providers = sorted({lk.provider for group in entries.values() for lk in group})
     options = "".join(f'<option value="{esc(p)}">{esc(PROVIDER_NAMES.get(p, p))}</option>' for p in providers)
     head_dated = "<tr><th>Date</th><th>Model</th><th>Provider</th><th>Replacement</th><th>Source</th></tr>"
@@ -650,18 +669,20 @@ def build_page(entries: dict[str, list], updated: str | None, *, title: str, day
 {section("upcoming", "Upcoming retirements", entries["upcoming"], True)}
 {section("recent", f"Retired in the last {days_back} days", entries["recent"], True)}
 {section("undated", "Deprecated, no shutdown date yet", entries["undated"], False)}
-<p class="foot">Collected from the providers' official deprecation pages. Dates can move: check the source before you plan around one.</p>
+<p class="foot">{foot}</p>
 </main>
-<script>{_PAGE_JS}</script>
+<script>{_PAGE_JS}</script>{counter}
 </body>
 </html>
 """
 
 
-def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int = 90, title: str = "AI model retirement calendar") -> dict:
+def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int = 90, title: str = "AI model retirement calendar",
+                   goatcounter: str | None = None) -> dict:
     """Write index.html, retirements.ics and retirements.json; return what was written."""
     if days_back < 0:
         raise UsageError("--days-back must be zero or more")
+    count_url = goatcounter_url(goatcounter) if goatcounter else None
     reg = registry or reglib.Registry.load()
     entries = calendar_entries(reg, days_back)
     out = Path(out_dir)
@@ -676,7 +697,8 @@ def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int 
         "recent": [lk.to_dict() for lk in entries["recent"]],
         "deprecated_without_date": [lk.to_dict() for lk in entries["undated"]],
     }
-    (out / "index.html").write_bytes(build_page(entries, reg.updated, title=title, days_back=days_back).encode("utf-8", "replace"))
+    page = build_page(entries, reg.updated, title=title, days_back=days_back, count_url=count_url)
+    (out / "index.html").write_bytes(page.encode("utf-8", "replace"))
     (out / "retirements.ics").write_bytes(build_ics(entries, reg.updated))
     (out / "retirements.json").write_bytes((json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8", "replace"))
     return {"dir": str(out), "files": ["index.html", "retirements.ics", "retirements.json"], "counts": {k: len(v) for k, v in entries.items()}}
@@ -684,7 +706,7 @@ def build_calendar(out_dir: str | Path, *, registry: Any = None, days_back: int 
 
 def cmd_calendar(args: argparse.Namespace, cfg: dict) -> int:
     reg = reglib.Registry.load(args.registry or [])
-    written = build_calendar(args.out, registry=reg, days_back=args.days_back, title=args.title)
+    written = build_calendar(args.out, registry=reg, days_back=args.days_back, title=args.title, goatcounter=args.goatcounter)
     c = written["counts"]
     con.out(
         con.style(con.sym("pass"), "green")
@@ -737,4 +759,6 @@ def register(sub: Any) -> None:
     p.add_argument("--days-back", type=int, default=90, help="also list models retired in the last N days (default 90)")
     p.add_argument("--title", default="AI model retirement calendar")
     p.add_argument("--registry", action="append", help="extra lifecycle registry JSON (overrides bundled entries)")
+    p.add_argument("--goatcounter", metavar="CODE", help="count visits with GoatCounter, which sets no cookies: your site code "
+                   "(CODE.goatcounter.com) or its https://.../count URL")
     p.set_defaults(func=cmd_calendar)

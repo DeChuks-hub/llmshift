@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `llmshift calendar --goatcounter <code>` counts visits to the calendar site with GoatCounter, which sets no cookies, and says so in the page footer. GoatCounter's script is pinned to one version (`count.v5.js`) with its integrity hash, so browsers refuse it if it ever changes.
+
 ## 0.1.4 (2026-10-24)
 
 - LLMShift is in the official MCP Registry as `io.github.DeChuks-hub/llmshift`. Each release publishes `server.json` there after PyPI has it, so MCP clients can install the server as `uvx llmshift mcp`.

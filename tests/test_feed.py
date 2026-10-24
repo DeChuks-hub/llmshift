@@ -276,6 +276,23 @@ def test_calendar_rejects_a_file_as_output(home, tmp_path):
     assert cli.main(["calendar", "--out", str(tmp_path / "ok"), "--days-back", "-1"]) == 2
 
 
+def test_calendar_counts_visits_with_goatcounter_only_when_asked(home, tmp_path):
+    plain, counted, hosted = tmp_path / "plain", tmp_path / "counted", tmp_path / "hosted"
+    assert cli.main(["calendar", "--out", str(plain), "--goatcounter", ""]) == 0
+    assert "goatcounter" not in (plain / "index.html").read_text(encoding="utf-8").lower()
+    assert cli.main(["calendar", "--out", str(counted), "--goatcounter", " LLMShift "]) == 0
+    page = (counted / "index.html").read_text(encoding="utf-8")
+    script = re.search(r'<script data-goatcounter="([^"]*)" async src="([^"]*)" crossorigin="anonymous" '
+                       r'integrity="sha384-[A-Za-z0-9+/]{64}"></script>\n</body>', page)
+    assert script and script.groups() == ("https://llmshift.goatcounter.com/count", "https://gc.zgo.at/count.v5.js")
+    assert "which sets no cookies" in page
+    assert cli.main(["calendar", "--out", str(hosted), "--goatcounter", "https://stats.example.org/count"]) == 0
+    assert 'data-goatcounter="https://stats.example.org/count"' in (hosted / "index.html").read_text(encoding="utf-8")
+    for bad in ('x" onload="alert(1)', "http://stats.example.org/count", "https://stats.example.org/count?<b>", "a", "my_site"):
+        assert cli.main(["calendar", "--out", str(tmp_path / "bad"), "--goatcounter", bad]) == 2
+    assert not (tmp_path / "bad").exists()  # refused before anything was written
+
+
 def test_bundled_data_passes_the_update_validation():
     data = registry.bundled_registry()
     assert registry.registry_problems(data, min_models=len(data["models"])) == []

@@ -160,11 +160,12 @@ def test_pick_recommends_no_candidate_it_could_not_check(make_case, monkeypatch)
     from llmshift import userregex
     from llmshift.pick import _rate_cell, run_pick
 
-    monkeypatch.setattr(userregex, "TIMEOUT", 0.3)
+    monkeypatch.setattr(userregex, "TIMEOUT", 1.0)  # a fine search on a busy CI runner stays well inside it
     pattern = r"^(\w+\s?)*$"
     cases = [make_case("x", user=f"q{i}", id=f"ok{i}", checks=[{"type": "regex", "pattern": pattern}]) for i in range(3)]
     cases += [make_case("x", user="a" * 60 + f"!{i}", id=f"odd{i}", checks=[{"type": "regex", "pattern": pattern}]) for i in range(2)]
-    res = run_pick(cases, ["mock:echo"], min_pass_rate=0.95, concurrency=2)
+    # In order: the fine answers are checked before two runaway searches give the pattern up for the run.
+    res = run_pick(cases, ["mock:echo"], min_pass_rate=0.95, concurrency=1)
     cand = res.candidates[0]
     assert cand.error is None and cand.unchecked == 2 and cand.pass_rate == 1.0  # of the three it could check
     assert not cand.meets_bar and res.recommended is None and res.inconclusive
@@ -175,7 +176,7 @@ def test_pick_recommends_no_candidate_it_could_not_check(make_case, monkeypatch)
 def test_a_regex_breaker_lives_for_one_run_and_one_model(make_case, monkeypatch):
     from llmshift import userregex
 
-    monkeypatch.setattr(userregex, "TIMEOUT", 0.3)
+    monkeypatch.setattr(userregex, "TIMEOUT", 1.0)
     pattern = r"^(\w+\s?)*$"
     odd = [make_case("x", user="a" * 60 + f"!{i}", id=f"odd{i}", checks=[{"type": "regex", "pattern": pattern}]) for i in range(3)]
     fine = [make_case("x", user=f"fine {i}", id=f"fine{i}", checks=[{"type": "regex", "pattern": pattern}]) for i in range(3)]

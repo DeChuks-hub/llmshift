@@ -1,5 +1,5 @@
 name: "LLMShift"
-description: "Switch AI models without breaking your product: flag retiring models, compare a new model on real-usage tests, watch for drift."
+description: "Switch AI models without breaking your product: flag retiring models, test a new model on real traffic, watch for drift."
 author: "Chukwu Nzubechi"
 branding:
   icon: "shuffle"

@@ -190,6 +190,16 @@ def test_the_action_keeps_its_inputs_and_outputs_within_v0():
     assert all(not spec.get("required") or name in V0_INPUTS for name, spec in action["inputs"].items())  # no new required input
 
 
+def test_the_action_meets_the_marketplace_rules():
+    """GitHub Marketplace lists the action from action.yml at the release tag: it refuses a
+    description of 125 characters or more, and shows the name, icon and colour."""
+    from llmshift._vendor import yaml
+
+    action = yaml.safe_load((ROOT / "action.yml").read_text(encoding="utf-8"))
+    assert action["name"] and len(action["description"]) < 125
+    assert action["branding"]["icon"] and action["branding"]["color"]
+
+
 # The first major release of each of GitHub's own actions that runs on Node.js 24 (`runs.using`
 # in its action.yml). An older one makes every run warn that Node.js 20 is deprecated.
 NODE24 = {

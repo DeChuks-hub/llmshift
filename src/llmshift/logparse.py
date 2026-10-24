@@ -407,7 +407,7 @@ def anthropic_request(req: dict) -> tuple[list[dict], dict]:
         params["response_format"] = {"type": "json_schema", "json_schema": {"name": "output", "schema": fmt["schema"]}}
     # Extended thinking and its effort: a Claude app that thinks is tested thinking.
     thinking = req.get("thinking")
-    if isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive", "disabled"):
+    if isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive", "disabled", "between_tools"):  # between_tools: Sonnet 5.5's off
         params["thinking"] = {k: thinking[k] for k in ("type", "budget_tokens", "display") if thinking.get(k) is not None}
     effort = output_config.get("effort") if isinstance(output_config, dict) else None
     if isinstance(effort, str) and effort:

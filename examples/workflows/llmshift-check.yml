@@ -11,13 +11,21 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    env:
+      # Pull requests from forks get no secrets: the check is skipped there instead of failing.
+      LLMSHIFT_HAS_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # the base branch is needed to see what the change edits
           persist-credentials: false
 
+      - name: No provider key (a pull request from a fork)
+        if: ${{ env.LLMSHIFT_HAS_KEY != 'true' }}
+        run: echo "::notice::The prompt check is skipped - no OPENAI_API_KEY (pull requests from forks get no secrets)"
+
       - name: Test the edited prompts
+        if: ${{ env.LLMSHIFT_HAS_KEY == 'true' }}
         uses: DeChuks-hub/llmshift@v0.1.0
         with:
           command: check

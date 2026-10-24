@@ -110,6 +110,15 @@ def _project_digest(module: Any) -> str | None:
     return digest.hexdigest()[:16]
 
 
+_LOAD_LOCKS: dict[str, threading.RLock] = {}
+_LOAD_LOCKS_GUARD = threading.Lock()
+
+
+def _load_lock(module_name: str) -> threading.RLock:
+    with _LOAD_LOCKS_GUARD:
+        return _LOAD_LOCKS.setdefault(module_name, threading.RLock())
+
+
 class PythonProvider(Provider):
     kind = "python"
 
@@ -125,20 +134,24 @@ class PythonProvider(Provider):
                 if not path.is_file():
                     raise ProviderError(f"file not found: {path}", code="invalid_spec")
                 module_name = f"llmshift_user_{path.stem}_{stable_hash(str(path), 8)}"
-                module = sys.modules.get(module_name)
-                if module is None:
-                    spec = importlib.util.spec_from_file_location(module_name, path)
-                    if spec is None or spec.loader is None:
-                        raise ProviderError(f"cannot import {path}", code="invalid_spec")
-                    module = importlib.util.module_from_spec(spec)
-                    # Registered first, as a normal import would, so dataclasses, pickle and
-                    # typing.get_type_hints can find the module while it runs.
-                    sys.modules[module_name] = module
-                    try:
-                        spec.loader.exec_module(module)
-                    except BaseException:
-                        sys.modules.pop(module_name, None)
-                        raise
+                # One load at a time, as Python's own import lock does for `import`: two
+                # providers on one file (pick's candidates) saw the module before it had run,
+                # without the function it was about to define.
+                with _load_lock(module_name):
+                    module = sys.modules.get(module_name)
+                    if module is None:
+                        spec = importlib.util.spec_from_file_location(module_name, path)
+                        if spec is None or spec.loader is None:
+                            raise ProviderError(f"cannot import {path}", code="invalid_spec")
+                        module = importlib.util.module_from_spec(spec)
+                        # Registered first, as a normal import would, so dataclasses, pickle and
+                        # typing.get_type_hints can find the module while it runs.
+                        sys.modules[module_name] = module
+                        try:
+                            spec.loader.exec_module(module)
+                        except BaseException:
+                            sys.modules.pop(module_name, None)
+                            raise
             else:
                 cwd = os.getcwd()
                 if cwd not in sys.path:

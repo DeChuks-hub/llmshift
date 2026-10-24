@@ -24,6 +24,7 @@ from .checks import CheckContext, CheckResult, Sample, run_checks
 from .infer import wants_judge
 from .messages import request_preview
 from .providers import resolve
+from .providers.anthropic import plan_thinking
 from .providers.base import Provider, Response
 from .runner import adaptations, run_cases
 from .stats import cases_needed, mcnemar_p, pass_rate_interval, stored_rate
@@ -166,13 +167,14 @@ class CompareResult:
         return s.get("pass_rate", 0.0) + 1e-9 >= threshold
 
 
-def request_rejections(model: str, params: dict, resp: Response, kind: str | None = "anthropic") -> list[str]:
-    """What `model` rejects of a request as it is sent (temperature=0, assistant prefill, ...).
-    Each was left out to test the answer, so the real call fails with a 400 error. Claude's
-    thinking only goes out through the Anthropic API (`kind`), not through OpenAI-style proxies."""
-    from .providers.anthropic import rejected_sampling, rejected_thinking
+def request_rejections(model: str, params: dict, resp: Response) -> list[str]:
+    """What `model` rejects of a request as it is sent (temperature=0, assistant prefill, a
+    thinking budget on Claude 4.7 and later, ...). Each was left out or changed to test the
+    answer, so the real call fails with a 400 error. The provider reports what it changed
+    (resp.rejected): Claude's thinking and effort only go out through the Anthropic API."""
+    from .providers.anthropic import rejected_sampling
 
-    found = rejected_sampling(model, params) + (rejected_thinking(model, params) if kind == "anthropic" else [])
+    found = rejected_sampling(model, params)
     names = {item.split("=", 1)[0] for item in found}
     for name in resp.rejected:
         if name not in names:
@@ -189,11 +191,13 @@ def _said_by(note: str, rejected: list[str]) -> bool:
     return ("prefill" in note and "assistant prefill" in rejected) or ("forced tool choice" in note and "tool_choice" in rejected)
 
 
-def rejection_check(model: str, rejected: list[str], ctx: CheckContext) -> CheckResult:
+def rejection_check(model: str, rejected: list[str], ctx: CheckContext, advice: list[str] | None = None) -> CheckResult:
+    """The case fails on what the model rejects; `advice` says what to send instead (thinking
+    and effort are sent in a form the model takes, not left out)."""
     from .checks import severity_of
 
     them = "it" if len(rejected) == 1 else "them"
-    plain = [item for item in rejected if not item.startswith("thinking=")]
+    plain = [item for item in rejected if item.split("=", 1)[0] not in ("thinking", "reasoning_effort")]
     message = f"{model} rejects {', '.join(rejected)} as this request sends {them}: the real call fails with a 400 error "
     if plain:
         those = "it" if len(plain) == 1 else "them"
@@ -201,9 +205,9 @@ def rejection_check(model: str, rejected: list[str], ctx: CheckContext) -> Check
         flags = " ".join(f"--drop-param {item.split('=', 1)[0]}" for item in plain if "=" in item)
         message += f", then test with {flags}." if flags else "."
     else:
-        message += "(llmshift used adaptive thinking to test the answer)."
-    if len(plain) < len(rejected):  # a thinking budget on 4.7 and later, or disabled thinking on 5.5
-        message += ' Send thinking as {"type": "adaptive"}; output_config.effort sets how much it thinks.'
+        message += "(llmshift sent what the model takes instead to test the answer)."
+    for line in dict.fromkeys(advice or []):
+        message += " " + line
     return CheckResult("request", "request", severity_of({"type": "request"}, ctx), "fail", message, name="request settings", details={"rejected": rejected})
 
 
@@ -577,9 +581,10 @@ def run_compare(
             return result
         checks = run_checks(eval_case, Sample.from_response(resp), ctx)
         sent = {**case.params, **{k: v for k, v in (overrides or {}).items() if v is not None}}
-        rejected = request_rejections(cand.model, sent, resp, getattr(cand, "kind", None))
+        rejected = request_rejections(cand.model, sent, resp)
         if rejected:
-            checks.append(rejection_check(cand.spec, rejected, ctx))
+            advice = plan_thinking(cand.model, sent)["advice"] if getattr(cand, "kind", None) == "anthropic" else []
+            checks.append(rejection_check(cand.spec, rejected, ctx, advice))
         result.raw_status = case_status(checks, None)
         if live is not None and live.ok:
             base_checks = run_checks(eval_case, Sample.from_response(live), ctx)

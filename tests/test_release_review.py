@@ -105,7 +105,7 @@ def test_the_price_list_carries_cache_prices():
         "plain": {"mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6},
     }
     converted = pricing.convert_litellm(table)
-    assert converted == {"c": [3.0, 15.0, 0.3, 3.75], "m": [2.0, 8.0, 0.5, None], "plain": [1.0, 2.0]}  # readers before 0.1.1 use the first two
+    assert converted == {"c": [3.0, 15.0, 0.3, 3.75], "m": [2.0, 8.0, 0.5], "plain": [1.0, 2.0]}  # readers before 0.1.1 use the first two
     assert pricing.prices_problems({"fetched": "2026-10-20", "prices": converted}) == []
     gpt = pricing.price_for("openai:gpt-4o")  # the bundled list
     assert gpt.cache_read is not None and gpt.cache_read < gpt.input
@@ -205,7 +205,6 @@ def test_a_runaway_pattern_is_given_up_after_two_tries(make_case, monkeypatch):
     from llmshift import userregex
 
     monkeypatch.setattr(userregex, "TIMEOUT", 0.5)
-    monkeypatch.setattr(userregex, "_timeouts", {})
     cases = [make_case(f"q{i}", user="a" * 60 + f"!{i}", id=f"c{i}", checks=[{"type": "regex", "pattern": r"^(\w+\s?)*$"}]) for i in range(10)]
     start = time.perf_counter()
     s = run_compare(cases, "mock:echo", show_progress=False, concurrency=1).summary
@@ -257,19 +256,16 @@ def test_claude_is_sent_the_thinking_the_app_asked_for(monkeypatch):
 
 
 def test_a_thinking_budget_on_claude_4_7_and_later_is_a_rejected_setting(make_case, monkeypatch):
-    from llmshift.compare import request_rejections
-    from llmshift.providers.base import Response
+    from llmshift.providers.anthropic import plan_thinking
 
     body = _claude_body("claude-opus-5-5", {"thinking": {"type": "enabled", "budget_tokens": 8000}}, monkeypatch)
     assert body["thinking"] == {"type": "adaptive"}  # how the answer is tested
-    rejected = request_rejections("claude-opus-5-5", {"thinking": {"type": "enabled", "budget_tokens": 8000}}, Response(text="x"))
-    assert rejected and rejected[0].startswith("thinking=")
-    assert not request_rejections("claude-sonnet-4-5", {"thinking": {"type": "enabled", "budget_tokens": 8000}}, Response(text="x"))
-    assert not request_rejections("anthropic/claude-opus-5-5", {"thinking": {"type": "enabled", "budget_tokens": 8000}}, Response(text="x"), "openai")  # OpenRouter never sends it
+    assert plan_thinking("claude-opus-5-5", {"thinking": {"type": "enabled", "budget_tokens": 8000}})["rejected"] == ["thinking"]
+    assert plan_thinking("claude-sonnet-4-5", {"thinking": {"type": "enabled", "budget_tokens": 8000}})["rejected"] == []
     assert "thinking" not in _claude_body("claude-opus-5-5", {"thinking": {"type": "disabled"}}, monkeypatch)  # disabled 400s on Opus 5.5
 
 
-def test_claude_gets_thinking_on_the_wire_and_an_old_model_is_retried_without_it(server, monkeypatch):
+def test_claude_gets_thinking_on_the_wire_and_a_refused_value_is_learnt_per_value(server, monkeypatch):
     from llmshift.providers import resolve
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
@@ -277,18 +273,25 @@ def test_claude_gets_thinking_on_the_wire_and_an_old_model_is_retried_without_it
 
     def reply(req):
         sent.append(req["json"])
-        if "thinking" in sent[-1] and sent[-1]["model"].startswith("claude-3-5"):
-            return 400, {"type": "error", "error": {"type": "invalid_request_error", "message": "thinking: Extra inputs are not permitted"}}, {}
+        if (sent[-1].get("thinking") or {}).get("type") == "adaptive" and sent[-1]["model"] == "my-claude":
+            return 400, {"type": "error", "error": {"type": "invalid_request_error", "message": "thinking.type.adaptive is not supported for this model"}}, {}
         return 200, {"id": "m", "type": "message", "role": "assistant", "model": sent[-1]["model"], "content": [{"type": "text", "text": "ok"}],
                      "stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 2}}, {}
 
     server.route("POST", "/v1/messages", reply)
-    request = {"messages": [{"role": "user", "content": "hi"}], "params": {"thinking": {"type": "adaptive"}, "reasoning_effort": "high", "max_tokens": 4000}}
-    new = resolve("anthropic:claude-opus-5-5", {"providers": {"anthropic": {"base_url": server.url}}}).complete(request)
+    cfg = {"providers": {"anthropic": {"base_url": server.url}}}
+    adaptive = {"messages": [{"role": "user", "content": "hi"}], "params": {"thinking": {"type": "adaptive"}, "reasoning_effort": "high", "max_tokens": 4000}}
+    budget = {"messages": [{"role": "user", "content": "hi"}], "params": {"thinking": {"type": "enabled", "budget_tokens": 2048}, "max_tokens": 4000}}
+    new = resolve("anthropic:claude-opus-5-5", cfg).complete(adaptive)
     assert sent[-1]["thinking"] == {"type": "adaptive"} and sent[-1]["output_config"] == {"effort": "high"} and new.rejected == []
-    old = resolve("anthropic:claude-3-5-haiku-20241022", {"providers": {"anthropic": {"base_url": server.url}}})
-    response = old.complete(request)
-    assert "thinking" not in sent[-1] and response.text == "ok" and response.rejected == ["thinking"] and old.adaptations
+    old = resolve("anthropic:claude-3-5-haiku-20241022", cfg).complete(adaptive)  # known to have no thinking: no 400 spent
+    assert "thinking" not in sent[-1] and old.text == "ok" and old.rejected == ["thinking"]
+    proxy = resolve("anthropic:my-claude", cfg)  # an id llmshift does not know: sent as recorded
+    first = proxy.complete(adaptive)
+    assert first.rejected == ["thinking"] and "thinking" not in sent[-1] and proxy.adaptations
+    calls = len(sent)
+    assert proxy.complete(budget).rejected == [] and sent[-1]["thinking"] == {"type": "enabled", "budget_tokens": 2048}  # another value still goes
+    assert proxy.complete(adaptive).rejected == ["thinking"] and len(sent) == calls + 2  # the refused one is not sent again
 
 
 def test_gemini_is_sent_thinking_and_a_model_without_it_is_retried(server, monkeypatch):

@@ -26,7 +26,6 @@ from . import messages as msgs
 from .checks import CATEGORY_TITLES
 from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .pricing import Price, money
-from .stats import pass_rate_interval
 from .testset import TestCase, unique_ids
 from .textutil import plural, report_json, show_bidi
 
@@ -41,6 +40,7 @@ class CandidateResult:
     warned: int = 0
     failed: int = 0
     errors: int = 0
+    unchecked: int = 0  # cases a check could not run on: no verdict, so no recommendation
     pass_rate: float | None = None
     low: float | None = None  # 95% range of the pass rate
     high: float | None = None
@@ -65,6 +65,7 @@ class CandidateResult:
             "warned": self.warned,
             "failed": self.failed,
             "errors": self.errors,
+            "unchecked": self.unchecked,
             "pass_rate": self.pass_rate,
             "pass_rate_range": [self.low, self.high] if self.low is not None else None,
             "meets_bar": self.meets_bar,
@@ -96,6 +97,7 @@ class PickResult:
     volume: int | None = None
     recommended: str | None = None
     recommendation: str = ""
+    inconclusive: bool = False  # the candidates that could pass had cases that could not be checked
     monthly_saving: float | None = None
     notes: list[str] = field(default_factory=list)
     tests_path: str | None = None
@@ -124,6 +126,7 @@ class PickResult:
             },
             "recommended": self.recommended,
             "recommendation": self.recommendation,
+            "inconclusive": self.inconclusive,
             "monthly_saving": _round(self.monthly_saving),
             "candidates": [c.to_dict() for c in self.candidates],
             "notes": self.notes,
@@ -220,9 +223,10 @@ def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, Tes
     cand.compare = result
     cand.total = s.get("total", 0)
     cand.passed, cand.warned, cand.failed, cand.errors = s.get("passed", 0), s.get("warned", 0), s.get("failed", 0), s.get("errors", 0)
+    cand.unchecked = s.get("unchecked", 0)
     cand.pass_rate = s.get("pass_rate", 0.0)
-    _, cand.low, cand.high = pass_rate_interval([1.0 if c.status in ("pass", "warn") else 0.0 for c in result.cases])
-    cand.meets_bar = cand.total > 0 and cand.pass_rate + 1e-9 >= threshold
+    cand.low, cand.high = s.get("pass_rate_range") or (None, None)  # over the same cases as the pass rate
+    cand.meets_bar = cand.total > 0 and not cand.unchecked and cand.pass_rate + 1e-9 >= threshold
     cand.latency_p50_ms = (s.get("latency_ms") or {}).get("p50")
     cats = sorted(
         ((k, v.get("fail", 0), v.get("warn", 0)) for k, v in (s.get("by_category") or {}).items() if v.get("fail") or v.get("warn")),
@@ -275,6 +279,19 @@ def _recommend(res: PickResult) -> None:
     passing = [c for c in tested if c.meets_bar]
     if not tested:
         res.recommendation = "None of the candidates could be tested: " + "; ".join(f"{c.spec}: {c.error}" for c in res.candidates)
+        return
+    # A candidate that passes the cases that could be checked, but not all could be: no verdict.
+    unsure = [c for c in tested if c.unchecked and c.total > c.unchecked and (c.pass_rate or 0.0) + 1e-9 >= threshold]
+    cheapest = min(passing, key=_rank) if passing else None
+    for c in unsure:
+        if cheapest is None or _rank(c) < _rank(cheapest):
+            res.notes.append(f"{c.spec} passes the cases that could be checked, but {c.unchecked} could not be (a check could not run): fix the check and run again.")
+    if not passing and unsure:
+        res.inconclusive = True
+        res.recommendation = (
+            f"No candidate can be recommended yet: {', '.join(c.spec for c in unsure)} "
+            f"{'passes' if len(unsure) == 1 else 'pass'} the cases that could be checked, but some could not be (a check could not run)."
+        )
         return
     if not passing:
         best = max(tested, key=lambda c: (c.pass_rate or 0.0, -(c.cost_per_1k or 0.0)))
@@ -384,7 +401,7 @@ def run_pick(
                 cases, candidate, judge=judge, embedder=embedder, config=config, concurrency=concurrency, cache=cache,
                 allow_python=allow_python, severity=severity, min_pass_rate=threshold, show_progress=False, label="pick",
             )
-            if result.summary.get("evaluated", 0) == 0:
+            if result.summary.get("evaluated", 0) == 0 and not result.summary.get("unchecked"):
                 first = next((c.error for c in result.cases if c.error), "every request failed")
                 cand.error = first
             else:
@@ -468,7 +485,9 @@ def _vs_today(c: CandidateResult) -> str:
 
 
 def _rate_cell(c: CandidateResult) -> str:
-    return f"{c.pass_rate:.0%} ({c.passed + c.warned}/{c.total})"
+    checked = c.total - c.unchecked
+    cell = f"{c.pass_rate:.0%} ({c.passed + c.warned}/{checked})"
+    return cell + f", {c.unchecked} not checked" if c.unchecked else cell
 
 
 def _range_cell(c: CandidateResult) -> str:
@@ -503,7 +522,7 @@ def pick_terminal(res: PickResult) -> str:
         if c.error is not None:
             rows.append([con.style(con.sym("error"), "red"), c.spec, con.style("error", "red"), "", "", "", ""])
             continue
-        icon = con.style(con.sym("pass"), "green") if c.meets_bar else con.style(con.sym("fail"), "red")
+        icon = con.style(con.sym("pass"), "green") if c.meets_bar else con.style(con.sym("warn"), "yellow") if c.unchecked else con.style(con.sym("fail"), "red")
         name = con.style(c.spec, "bold") if c.spec == res.recommended else c.spec
         rows.append([icon, name, _rate_cell(c), _range_cell(c), _cost_cell(c.cost_per_1k, c.estimated), _vs_today(c), _latency_cell(c)])
     lines.append(con.table(rows, ["", "Model", "Pass rate", "95% range", "Cost / 1k req", "vs today", "p50 latency"], max_widths=[3, 44, 16, 10, 13, 9, 12]))
@@ -514,7 +533,7 @@ def pick_terminal(res: PickResult) -> str:
     if res.recommended:
         lines.append(con.style(res.recommendation, "green", "bold"))
     else:
-        lines.append(con.style(res.recommendation, "red", "bold"))
+        lines.append(con.style(res.recommendation, "yellow" if res.inconclusive else "red", "bold"))
     price_line = _price_line(res)
     if price_line or res.notes:
         lines.append("")
@@ -552,7 +571,7 @@ def pick_markdown(res: PickResult) -> str:
         if c.error is not None:
             lines.append(f"| ✗ | `{_code(c.spec)}` | error: {_md(con.truncate(c.error, 120))} | | | | |")
             continue
-        icon = "✅" if c.meets_bar else "❌"
+        icon = "✅" if c.meets_bar else "⚠️" if c.unchecked else "❌"
         lines.append(f"| {icon} | `{_code(c.spec)}` | {_rate_cell(c)} | {_range_cell(c)} | {_cost_cell(c.cost_per_1k, c.estimated)} | {_vs_today(c)} | {_latency_cell(c)} |")
     price_line = _price_line(res)
     if price_line or res.notes:
@@ -655,4 +674,6 @@ def cmd_pick(args: argparse.Namespace, cfg: dict) -> int:
         cli._github_output("recommended", res.recommended)
     if not any(c.error is None for c in res.candidates):
         return EXIT_USAGE
-    return EXIT_OK if res.recommended else EXIT_FAIL
+    if res.recommended:
+        return EXIT_OK
+    return EXIT_USAGE if res.inconclusive else EXIT_FAIL

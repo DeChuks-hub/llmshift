@@ -9,6 +9,8 @@ process that is killed after TIMEOUT seconds.
 from __future__ import annotations
 
 import atexit
+import contextlib
+import contextvars
 import json
 import re
 import subprocess
@@ -37,7 +39,7 @@ for line in sys.stdin:
 _MAY_BACKTRACK_RE = re.compile(r"[*+?{|]")
 
 
-GIVE_UP = 2  # timeouts after which a pattern is not tried again (10 cases cost 21 s, 1,000 would 33 minutes)
+GIVE_UP = 2  # timeouts after which a breaker gives a pattern up (10 cases cost 21 s, 1,000 would 33 minutes)
 
 
 class RegexStopped(Exception):
@@ -52,7 +54,20 @@ class RegexStopped(Exception):
 _lock = threading.Lock()
 _worker: subprocess.Popen | None = None
 _no_worker = False  # this Python cannot start one: searches run here, as before
-_timeouts: dict[tuple, int] = {}  # (pattern, flags) -> searches stopped after TIMEOUT
+# The breaker of the run in progress: (pattern, flags) -> searches stopped after TIMEOUT. A
+# compare run holds one per model whose answers it checks, so a pattern another model's odd
+# answers stopped is still tried on this one, and nothing outlives the run (an MCP server).
+_BREAKER: contextvars.ContextVar = contextvars.ContextVar("llmshift_regex_breaker", default=None)
+
+
+@contextlib.contextmanager
+def breaker(timeouts: dict):
+    """Searches in this block give a pattern up after GIVE_UP timeouts recorded in `timeouts`."""
+    token = _BREAKER.set(timeouts)
+    try:
+        yield timeouts
+    finally:
+        _BREAKER.reset(token)
 
 
 def _start() -> subprocess.Popen | None:
@@ -99,19 +114,24 @@ def _stop(proc: subprocess.Popen | None) -> None:
             pass
 
 
-def search(pattern: str, text: str, flags: int = 0) -> bool:
+def search(pattern: str, text: str, flags: int = 0, timeouts: dict | None = None) -> bool:
     """Whether re.search(pattern, text, flags) finds a match, searched in the worker.
-    Raises re.error for an invalid pattern and RegexStopped for a search that ran too long."""
+    Raises re.error for an invalid pattern and RegexStopped for a search that ran too long.
+    `timeouts` (else the block's breaker, else none) remembers patterns that ran too long."""
     global _worker, _no_worker
     compiled = re.compile(pattern, flags)  # an invalid pattern fails here, at once
     if not _MAY_BACKTRACK_RE.search(pattern):
         return compiled.search(text) is not None
     request = json.dumps([pattern, flags, text]) + "\n"
     key = (pattern, flags)
+    if timeouts is None:
+        timeouts = _BREAKER.get()
+    if timeouts is None:
+        timeouts = {}  # no breaker: every search is tried
     with _lock:
-        if _timeouts.get(key, 0) >= GIVE_UP:
+        if timeouts.get(key, 0) >= GIVE_UP:
             raise RegexStopped(f"stopped after {TIMEOUT:.3g} s on {GIVE_UP} earlier answers, so not tried again", timed_out=True)
-        for attempt in range(2):  # a worker that died between searches (Ctrl+C, an antivirus) is started again
+        for _ in range(2):  # a worker that died between searches (Ctrl+C, an antivirus) is started again
             if _worker is not None and _worker.poll() is not None:
                 _stop(_worker)
                 _worker = None
@@ -138,7 +158,7 @@ def search(pattern: str, text: str, flags: int = 0) -> bool:
             _worker = None
             _stop(proc)
             if time.monotonic() - start >= limit * 0.9:  # the timer stopped it
-                _timeouts[key] = _timeouts.get(key, 0) + 1
+                timeouts[key] = timeouts.get(key, 0) + 1
                 raise RegexStopped(f"stopped after {limit:.3g} s", timed_out=True)
         else:  # it died at once, twice: what the search does breaks it (memory?)
             raise RegexStopped("the search stopped its worker process twice")

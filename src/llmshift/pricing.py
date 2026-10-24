@@ -56,10 +56,39 @@ class Price:
     source: str  # where the price came from, for reports
     key: str = ""
     cache_read: float | None = None  # input read from the provider's prompt cache, where the list says
-    cache_write: float | None = None  # input written to it (Anthropic)
+    cache_write: float | None = None  # input written to it for 5 minutes (Anthropic)
+    cache_write_1h: float | None = None  # ... for an hour
+    # Long-context prices: (prompt tokens above which a request costs these, the prices), lowest first.
+    tiers: tuple = ()
 
     def cost(self, input_tokens: float, output_tokens: float) -> float:
         return (max(0.0, input_tokens) * self.input + max(0.0, output_tokens) * self.output) / 1_000_000
+
+    def for_prompt(self, prompt_tokens: float) -> "Price":
+        """The prices a request with this many prompt tokens pays: Claude Haiku 5.5 costs five
+        times as much above 100K, Gemini 2.5 Pro twice as much above 200K."""
+        chosen = self
+        for threshold, tier in self.tiers:
+            if prompt_tokens > threshold:
+                chosen = tier
+        return chosen
+
+
+def _entry_price(entry: list, source: str, key: str) -> Price:
+    """A price-list entry as a Price; a tier's missing prices are the base ones."""
+    def opt(values: list, i: int) -> float | None:
+        return float(values[i]) if len(values) > i and _valid_price(values[i]) else None
+
+    tiers = []
+    for t in entry[5] if len(entry) > 5 and isinstance(entry[5], list) else []:
+        out = opt(t, 2)
+        tiers.append((int(t[0]), Price(
+            float(t[1]), out if out is not None else float(entry[1]), source, key,
+            opt(t, 3) if opt(t, 3) is not None else opt(entry, 2),
+            opt(t, 4) if opt(t, 4) is not None else opt(entry, 3),
+            opt(t, 5) if opt(t, 5) is not None else opt(entry, 4),
+        )))
+    return Price(float(entry[0]), float(entry[1]), source, key, opt(entry, 2), opt(entry, 3), opt(entry, 4), tuple(sorted(tiers, key=lambda x: x[0])))
 
 
 _MODES = {"chat", "completion", "responses", "embedding"}
@@ -72,25 +101,74 @@ def _per_million(value: Any) -> float | None:
     return float(f"{per_million:.6g}") if math.isfinite(per_million) else None  # one absurd entry is skipped, not the table
 
 
+_ABOVE_RE = re.compile(r"input_cost_per_token_above_(\d+)k_tokens")
+
+
+def _prices_of(entry: dict, suffix: str = "") -> list:
+    """[input, output, cache read, cache write (5 minutes), cache write (1 hour)] per 1M tokens."""
+    return [
+        _per_million(entry.get(f"input_cost_per_token{suffix}")),
+        _per_million(entry.get(f"output_cost_per_token{suffix}")),
+        _per_million(entry.get(f"cache_read_input_token_cost{suffix}")),
+        _per_million(entry.get(f"cache_creation_input_token_cost{suffix}")),
+        _per_million(entry.get(f"cache_creation_input_token_cost_above_1hr{suffix}")),
+    ]
+
+
+def _trimmed(values: list) -> list:
+    while values and values[-1] is None:
+        values = values[:-1]
+    return values
+
+
 def convert_litellm(table: Any) -> dict[str, list]:
     """LiteLLM's model_prices_and_context_window.json -> {model: [input, output]} per 1M
-    tokens, or [input, output, cache read, cache write] (null where unknown) for a model
-    with prompt-cache prices. Readers before 0.1.1 use the first two."""
+    tokens, followed where the list has them by the cache read, cache write and 1-hour cache
+    write prices and the long-context tiers: [[prompt tokens above which they apply, input,
+    output, cache read, cache write, 1-hour cache write], ...]. Null where unknown; readers
+    before 0.1.1 use the first two."""
     prices = {}
     for key, entry in (table.items() if isinstance(table, dict) else ()):
         if key == "sample_spec" or not isinstance(entry, dict) or entry.get("mode") not in _MODES:
             continue
         inp = _per_million(entry.get("input_cost_per_token"))
         out = _per_million(entry.get("output_cost_per_token", 0.0))
-        if inp is not None and out is not None:
-            read = _per_million(entry.get("cache_read_input_token_cost"))
-            write = _per_million(entry.get("cache_creation_input_token_cost"))
-            prices[str(key)] = [inp, out] if read is None and write is None else [inp, out, read, write]
+        if inp is None or out is None:
+            continue
+        tiers = []
+        for name in entry:
+            m = _ABOVE_RE.fullmatch(name)
+            above = _prices_of(entry, f"_above_{m.group(1)}k_tokens") if m else None
+            if above and above[0] is not None:
+                tiers.append([int(m.group(1)) * 1000, *above])
+        for tier in entry.get("tiered_pricing") or []:  # ranges of prompt tokens, from 0
+            span = tier.get("range") if isinstance(tier, dict) else None
+            above = _prices_of(tier) if isinstance(tier, dict) else None
+            if isinstance(span, list) and span and isinstance(span[0], (int, float)) and span[0] > 0 and above and above[0] is not None:
+                tiers.append([int(span[0]), *above])
+        row = _trimmed([inp, out, *_prices_of(entry)[2:]])
+        if tiers:
+            row = row + [None] * (5 - len(row)) + [[_trimmed(t) for t in sorted(tiers)]]
+        prices[str(key)] = row
     return dict(sorted(prices.items()))
 
 
 def _valid_price(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0
+
+
+def _valid_entry(v: Any) -> bool:
+    """[input, output, cache read?, cache write?, 1-hour cache write?, tiers?] (see convert_litellm)."""
+    if not isinstance(v, (list, tuple)) or len(v) < 2 or not all(_valid_price(x) for x in v[:2]):
+        return False
+    if not all(x is None or _valid_price(x) for x in v[2:5]):
+        return False
+    tiers = v[5] if len(v) > 5 else None
+    return tiers is None or (isinstance(tiers, list) and all(
+        isinstance(t, list) and len(t) >= 2 and isinstance(t[0], int) and not isinstance(t[0], bool) and t[0] > 0
+        and _valid_price(t[1]) and all(x is None or _valid_price(x) for x in t[2:6])
+        for t in tiers
+    ))
 
 
 def prices_problems(data: Any, *, min_prices: int = 1) -> list[str]:
@@ -110,11 +188,7 @@ def prices_problems(data: Any, *, min_prices: int = 1) -> list[str]:
         return problems + ["'prices' must be an object"]
     if len(prices) < min_prices:
         problems.append(f"only {len(prices)} prices (expected at least {min_prices})")
-    bad = [
-        k for k, v in prices.items()
-        if not isinstance(v, (list, tuple)) or len(v) < 2
-        or not all(_valid_price(x) for x in v[:2]) or not all(x is None or _valid_price(x) for x in v[2:4])
-    ]
+    bad = [k for k, v in prices.items() if not _valid_entry(v)]
     if bad:
         problems.append(f"{len(bad)} invalid price entries, e.g. {bad[0]!r}")
     return problems
@@ -243,8 +317,7 @@ def price_for(spec: str, overrides: dict[str, Price] | None = None) -> Price | N
         if entry:
             if not float(entry[0]) and not float(entry[1]):
                 continue  # 0 / 0 in the price list means unknown there, not free: try the other names
-            read, write = (float(x) if _valid_price(x) else None for x in (list(entry[2:4]) + [None, None])[:2])
-            return Price(float(entry[0]), float(entry[1]), f"LiteLLM price list, {fetched}", key, read, write)
+            return _entry_price(list(entry), f"LiteLLM price list, {fetched}", key)
     return None
 
 
@@ -264,11 +337,13 @@ def estimate_tokens(text: Any) -> int:
 
 # Prompt-cache tokens. Anthropic reports them beside input_tokens and, where the price list
 # has no cache prices, bills them against the input price: writing the cache at 1.25 times it
-# (5-minute cache), reading at 0.1 times. OpenAI and Gemini count cached tokens inside their
-# input tokens; their parsers keep that share as cached_input_tokens.
+# (5-minute cache) or 2 times (1-hour cache, the cache_creation_1h_input_tokens share of the
+# writes), reading at 0.1 times. OpenAI and Gemini count cached tokens inside their input
+# tokens; their parsers keep that share as cached_input_tokens.
 CACHE_RATES = {"cache_creation_input_tokens": 1.25, "cache_read_input_tokens": 0.1}
 CACHE_FIELDS = tuple(CACHE_RATES)
-USAGE_FIELDS = ("input_tokens", "output_tokens", "cached_input_tokens", *CACHE_FIELDS)
+CACHE_WRITE_1H_RATE = 2.0
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cached_input_tokens", *CACHE_FIELDS, "cache_creation_1h_input_tokens")
 
 
 def _count(value: Any) -> float | None:
@@ -279,26 +354,30 @@ def _count(value: Any) -> float | None:
 
 def usage_cost(price: Price, usage: dict | None, prompt: Any = None, output: Any = None) -> tuple[float, bool]:
     """What one answer cost in USD, and whether its token counts were estimated (no usage
-    reported). Cached input costs the model's cache price; without one in the list, an
-    OpenAI or Gemini cached share costs the full input price."""
+    reported). A long prompt pays its long-context prices (Price.for_prompt), cached input the
+    model's cache price; without one in the list, an OpenAI or Gemini cached share costs the
+    full input price."""
     usage = usage or {}
     inp, out = _count(usage.get("input_tokens")), _count(usage.get("output_tokens"))
     estimated = False
-    cached = read = write = 0.0
+    cached = read = write = write_1h = 0.0
     if inp is None:
         inp, estimated = float(estimate_tokens(prompt)), True
     else:
         cached = min(_count(usage.get("cached_input_tokens")) or 0.0, inp)
         read = _count(usage.get("cache_read_input_tokens")) or 0.0
         write = _count(usage.get("cache_creation_input_tokens")) or 0.0
+        write_1h = min(_count(usage.get("cache_creation_1h_input_tokens")) or 0.0, write)
     if out is None:
         out, estimated = float(estimate_tokens(output)), True
+    price = price.for_prompt(inp + read + write)  # the whole prompt, cached parts included
     read_price = price.cache_read
     usd = (
         (inp - cached) * price.input
         + cached * (read_price if read_price is not None else price.input)
         + read * (read_price if read_price is not None else price.input * CACHE_RATES["cache_read_input_tokens"])
-        + write * (price.cache_write if price.cache_write is not None else price.input * CACHE_RATES["cache_creation_input_tokens"])
+        + (write - write_1h) * (price.cache_write if price.cache_write is not None else price.input * CACHE_RATES["cache_creation_input_tokens"])
+        + write_1h * (price.cache_write_1h if price.cache_write_1h is not None else price.input * CACHE_WRITE_1H_RATE)
         + out * price.output
     ) / 1_000_000
     return usd, estimated

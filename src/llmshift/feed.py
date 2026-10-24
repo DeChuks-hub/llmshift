@@ -181,8 +181,8 @@ def update_prices(url: str | None = None, *, check: bool = False) -> UpdateResul
         data = dict(table)
     else:
         data = {
-            "about": "Model prices in USD per 1M tokens [input, output], or [input, output, cache read, cache write] "
-            "with prompt-cache prices, converted from LiteLLM's model_prices_and_context_window.json "
+            "about": "Model prices in USD per 1M tokens [input, output], followed where the list has them by cache "
+            "prices and long-context tiers (see pricing.convert_litellm), converted from LiteLLM's model_prices_and_context_window.json "
             "(MIT License, Copyright (c) 2023 Berri AI).",
             "source": url,
             "fetched": reglib.today().isoformat(),

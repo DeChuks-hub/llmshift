@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import urllib.parse
 from typing import Any
 
@@ -12,7 +13,7 @@ from .. import messages as msgs
 from ..textutil import json_loads, stable_hash
 from . import http
 from .anthropic import json_instruction
-from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of
+from .base import Provider, ProviderError, Response, base_url_from, clean_key, params_of, value_key
 
 _DATA_URL_RE = re.compile(r"^data:([\w.+/-]+);base64,(.*)$", re.S)
 _SCHEMA_KEYS = {
@@ -71,7 +72,7 @@ def _thinking_config(model: str, params: dict) -> dict | None:
     budget = thinking.get("budget_tokens")
     if thinking.get("type") == "adaptive":
         return {"thinkingBudget": -1}
-    if thinking.get("type") == "disabled":
+    if thinking.get("type") in ("disabled", "between_tools"):  # between_tools is Claude Sonnet 5.5's off
         return {"thinkingBudget": 0}
     if thinking.get("type") == "enabled" and isinstance(budget, int) and not isinstance(budget, bool):
         return {"thinkingBudget": budget}
@@ -134,6 +135,8 @@ class GeminiProvider(Provider):
             clean_key(o.get("api_key")) or (clean_key(os.environ.get(self.key_env)) if self.key_env else None) or clean_key(os.environ.get("GOOGLE_API_KEY"))
         )
         self.adaptations: list[str] = []  # what was changed in requests this model rejected
+        self._refused: set[str] = set()  # thinkingConfig values this model refused
+        self._lock = threading.Lock()
 
     def identity(self) -> dict:
         shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env", "timeout_set")}
@@ -291,23 +294,30 @@ class GeminiProvider(Provider):
             raise ProviderError(f"no API key for {self.spec}: set GEMINI_API_KEY (or GOOGLE_API_KEY)", code="missing_api_key")
         url = f"{self.base_url}/models/{urllib.parse.quote(self.model, safe='-._')}:generateContent"
         body = self.build_body(request)
-        try:
-            data = http.post_json(url, body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
-        except ProviderError as err:
-            gen = body.get("generationConfig") or {}
-            if err.status != 400 or "thinkingConfig" not in gen or "think" not in (err.message or "").lower():
-                raise
-            # A model with no thinking, or that cannot turn it off (budget 0): the answer is
-            # tested without the setting, and the setting is reported as rejected.
-            dropped = gen.pop("thinkingConfig")
-            note = f"dropped thinkingConfig {json.dumps(dropped)} for {self.model} ({err.message[:80]})"
-            if note not in self.adaptations:
-                self.adaptations.append(note)
-            data = http.post_json(url, body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
-            response = self.parse(data)
-            response.rejected = ["reasoning_effort" if "thinkingLevel" in dropped else "thinking"]
-            return response
-        return self.parse(data)
+        gen = body.get("generationConfig") or {}
+        config = gen.get("thinkingConfig")
+        if config is not None and value_key(config) in self._refused:  # refused before: not sent again
+            gen.pop("thinkingConfig")
+        else:
+            try:
+                data = http.post_json(url, body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
+                return self.parse(data)
+            except ProviderError as err:
+                if err.status != 400 or config is None or "think" not in (err.message or "").lower():
+                    raise
+                # A model with no thinking, or that cannot turn it off (budget 0): the answer is
+                # tested without the setting, the setting is reported as rejected, and this
+                # value is not sent again (each case cost two calls).
+                gen.pop("thinkingConfig")
+                with self._lock:
+                    self._refused.add(value_key(config))
+                    note = f"dropped thinkingConfig {json.dumps(config)} for {self.model} ({err.message[:80]})"
+                    if note not in self.adaptations:
+                        self.adaptations.append(note)
+        data = http.post_json(url, body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
+        response = self.parse(data)
+        response.rejected = ["reasoning_effort" if "thinkingLevel" in config else "thinking"]
+        return response
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.api_key:

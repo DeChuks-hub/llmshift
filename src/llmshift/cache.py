@@ -25,8 +25,9 @@ class ResponseCache:
         self._lock = threading.Lock()
 
     # Version 2: responses record what of the request the model refused (Response.rejected);
-    # an older answer cannot say, so it is not reused.
-    VERSION = 2
+    # an older answer cannot say, so it is not reused. Version 3: thinking and effort go out in
+    # the form each model takes; an answer given while one bad case dropped them is not reused.
+    VERSION = 3
 
     def key(self, identity: dict, request: dict, salt: str = "") -> str:
         return stable_hash({"identity": identity, "request": request, "salt": salt, "v": self.VERSION}, 40)

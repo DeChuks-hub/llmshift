@@ -71,39 +71,145 @@ def takes_effort(model: str) -> bool:
     return v is not None and (v[0] == "fable" or (v[0] in ("opus", "sonnet") and v[1:] >= (4, 6)) or (v[0] == "haiku" and v[1] >= 5))
 
 
-def rejected_thinking(model: str, params: dict) -> list[str]:
-    """The thinking setting in `params` that `model` rejects with a 400 error: a token budget
-    on 4.7 and later (adaptive thinking only), disabled thinking on Opus and Sonnet 5.5."""
-    thinking = params.get("thinking")
-    if not isinstance(thinking, dict):
-        return []
+THINKING_TYPES = ("enabled", "adaptive", "disabled", "between_tools")
+_ON, _OFF = ("enabled", "adaptive"), ("disabled", "between_tools")
+_BUDGET_FOR_ADAPTIVE = 4096  # stands in for adaptive thinking on a model that takes only budgets
+
+
+def thinking_types(model: str, effort: str | None = None) -> set[str] | None:
+    """The thinking types a Claude model takes at this effort (None: an id llmshift does not
+    know, sent as recorded). Budgets until 4.6, adaptive from 4.6; on 4.7 and later adaptive
+    only, and off as disabled, or as between_tools on Sonnet 5.5; Opus 5.5, Fable and Mythos
+    always think; Opus 5, Haiku 5.5 and Sonnet 5.5 turn it off only at effort high or below."""
     v = _claude_version(model)
-    kind = thinking.get("type")
-    if kind == "enabled" and default_sampling_only(model):
-        return [f"thinking={json.dumps(thinking, sort_keys=True)}"]
-    if kind == "disabled" and v is not None and v[0] in ("opus", "sonnet") and v[1:] >= (5, 5):
-        return [f"thinking={json.dumps(thinking, sort_keys=True)}"]
-    return []
-
-
-def _thinking_body(model: str, thinking: Any) -> dict | None:
-    """The thinking object to send: as recorded, or what this model takes instead (adaptive
-    for a budget on 4.7 and later; nothing, which is adaptive there, for disabled on 5.5)."""
-    if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "adaptive", "disabled"):
+    if v is None:
         return None
-    if rejected_thinking(model, {"thinking": thinking}):
-        if thinking["type"] == "disabled":
-            return None
-        thinking = {"type": "adaptive", **({"display": thinking["display"]} if thinking.get("display") else {})}
-    body = {"type": thinking["type"]}
-    budget = thinking.get("budget_tokens")
-    if body["type"] == "enabled":
-        if not isinstance(budget, int) or isinstance(budget, bool):
-            return {"type": "adaptive"} if takes_effort(model) else None
-        body["budget_tokens"] = max(1024, budget)  # the API's minimum (a Gemini budget may be smaller)
-    if isinstance(thinking.get("display"), str):
-        body["display"] = thinking["display"]
-    return body
+    family, ver = v[0], v[1:]
+    if family == "fable":
+        return {"adaptive"}
+    if ver < (3, 7) or (family != "sonnet" and ver < (4, 0)):
+        return set()  # before extended thinking (Claude 3.7 Sonnet had it first)
+    if ver < (4, 6) or (family == "haiku" and ver < (5, 0)):
+        return {"enabled", "disabled"}
+    if ver < (4, 7):
+        return {"enabled", "adaptive", "disabled"}  # 4.6: budgets deprecated, still taken
+    low = effort not in ("xhigh", "max")
+    if family == "sonnet" and ver >= (5, 5):
+        return {"adaptive", "between_tools"} if low else {"adaptive"}
+    if family == "opus" and ver >= (5, 5):
+        return {"adaptive"}
+    if (family == "opus" and ver >= (5, 0)) or family == "haiku":
+        return {"adaptive", "disabled"} if low else {"adaptive"}
+    return {"adaptive", "disabled"}  # Opus 4.7 and 4.8, Sonnet 5
+
+
+def _effort_for(model: str, effort: Any) -> tuple[str | None, bool]:
+    """(the effort level to send, whether the model rejects the level asked for)."""
+    if not isinstance(effort, str) or not effort.strip() or not takes_effort(model):
+        return None, False
+    level = effort.strip().lower()
+    level = {"none": "low", "minimal": "low"}.get(level, level)  # OpenAI's levels below low
+    v = _claude_version(model)
+    if level == "xhigh" and v is not None and v[0] in ("opus", "sonnet") and v[1:] == (4, 6):
+        return "high", True  # xhigh came with Opus 4.7
+    return level, False
+
+
+def plan_thinking(model: str, params: dict) -> dict:
+    """How a request's thinking, effort and sampling go to `model`: the thinking object and the
+    effort to send, the sampling settings to leave out, and what the model rejects as the
+    request sends it (each a 400 on the real call), with what to send instead."""
+    plan: dict = {"thinking": None, "effort": None, "drop": [], "rejected": [], "advice": []}
+    effort, refused = _effort_for(model, params.get("reasoning_effort"))
+    if refused:
+        plan["rejected"].append("reasoning_effort")
+        plan["advice"].append(f"{model} has no xhigh effort: use high or max.")
+    thinking = params.get("thinking") if isinstance(params.get("thinking"), dict) else {}
+    kind = thinking.get("type")
+    if kind in THINKING_TYPES:
+        display = {"display": thinking["display"]} if isinstance(thinking.get("display"), str) else {}
+        budget = thinking.get("budget_tokens")
+        budget = max(1024, budget) if isinstance(budget, int) and not isinstance(budget, bool) else None  # the API's minimum
+        types = thinking_types(model, effort)
+        if types is None or kind in types:
+            sent: dict | None = {"type": kind, **({"budget_tokens": budget or _BUDGET_FOR_ADAPTIVE} if kind == "enabled" else {})}
+            if kind in _ON:
+                sent.update(display)
+        else:
+            plan["rejected"].append("thinking")
+            if kind in _ON and "adaptive" in types:
+                sent = {"type": "adaptive", **display}
+                plan["advice"].append('Send thinking as {"type": "adaptive"}; output_config.effort sets how much it thinks.')
+            elif kind in _ON and "enabled" in types:  # no display: models before 4.6 have none
+                sent = {"type": "enabled", "budget_tokens": budget or _BUDGET_FOR_ADAPTIVE}
+                plan["advice"].append(f'{model} has no adaptive thinking: send {{"type": "enabled", "budget_tokens": N}}.')
+            elif kind in _ON:
+                sent = None
+                plan["advice"].append(f"{model} has no extended thinking: leave thinking out.")
+            elif "between_tools" in types:
+                sent = {"type": "between_tools"}
+                plan["advice"].append(f'Turn thinking off on {model} with {{"type": "between_tools"}}.')
+            elif "disabled" in types:
+                sent = {"type": "disabled"}
+                plan["advice"].append('between_tools is for Claude Sonnet 5.5 only: send {"type": "disabled"}.')
+            elif effort in ("xhigh", "max") and (thinking_types(model, "high") or set()) & set(_OFF):
+                off = sorted((thinking_types(model, "high") or set()) & set(_OFF))[0]
+                sent, effort = {"type": off}, "high"
+                plan["advice"].append(f"With thinking off, {model} takes effort high or below.")
+            else:
+                sent = None
+                plan["advice"].append(f"{model} always thinks: leave thinking out, and lower output_config.effort to think less.")
+        plan["thinking"] = sent
+    if (plan["thinking"] or {}).get("type") in _ON:  # thinking on: temperature 1, top_p 0.95 or more, no top_k
+        t, p = params.get("temperature"), params.get("top_p")
+        number = (int, float)
+        conflicts = [
+            name for name, bad in (
+                ("temperature", t is not None and not (isinstance(t, number) and not isinstance(t, bool) and t == 1)),
+                ("top_k", params.get("top_k") is not None),
+                ("top_p", p is not None and not (isinstance(p, number) and not isinstance(p, bool) and p >= 0.95)),
+            ) if bad
+        ]
+        if conflicts:
+            plan["drop"] = conflicts
+            plan["rejected"] += [c for c in conflicts if c not in plan["rejected"]]
+            plan["advice"].append("With thinking on, temperature must be 1, top_p 0.95 or more, and top_k unset.")
+    plan["effort"] = effort
+    return plan
+
+
+def _usage(usage: dict) -> dict:
+    """Tokens as reported, and the share of cache writes kept for an hour (cache_creation:
+    {ephemeral_1h_input_tokens}), which costs twice the input price where 5 minutes cost 1.25."""
+    if not usage:
+        return {}
+    out = {k: usage.get(k) for k in ("input_tokens", "output_tokens", *CACHE_FIELDS)}
+    hour = (usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") if isinstance(usage.get("cache_creation"), dict) else None
+    if isinstance(hour, int) and not isinstance(hour, bool) and hour > 0:
+        out["cache_creation_1h_input_tokens"] = hour
+    return out
+
+
+def _set_output_config(body: dict, key: str, value: Any) -> None:
+    config = dict(body.get("output_config") or {})
+    if value is not None:
+        config[key] = value
+    else:
+        config.pop(key, None)
+    if config:
+        body["output_config"] = config
+    else:
+        body.pop("output_config", None)
+
+
+def _set_effort(body: dict, level: str | None) -> None:
+    """Send `level` as output_config.effort, or no effort at all."""
+    _set_output_config(body, "effort", level)
+
+
+def _set_format(body: dict, fmt: dict | None) -> None:
+    """Send `fmt` as output_config.format (native structured output), or none."""
+    _set_output_config(body, "format", fmt)
 
 
 def json_instruction(response_format: Any) -> str | None:
@@ -304,40 +410,49 @@ class AnthropicProvider(Provider):
             schema = (rf.get("json_schema") or {}).get("schema")
             if schema:
                 body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
-        # Extended thinking as the app asked for it (a recorded thinking object, or a budget from
-        # Gemini's thinkingConfig), and how hard to think (reasoning_effort, Claude's effort).
-        thinking = _thinking_body(self.model, params.get("thinking"))
-        if thinking:
-            body["thinking"] = thinking
-            if thinking.get("budget_tokens") and body["max_tokens"] <= thinking["budget_tokens"]:
-                body["max_tokens"] = thinking["budget_tokens"] + body["max_tokens"]  # the budget must be below max_tokens
-        effort = params.get("reasoning_effort")
-        if isinstance(effort, str) and effort and takes_effort(self.model):
-            body["output_config"] = {**(body.get("output_config") or {}), "effort": {"none": "low", "minimal": "low"}.get(effort, effort)}
+        # Extended thinking as the app asked for it, in the form this model takes (a recorded
+        # thinking object, or a budget from Gemini's thinkingConfig), how hard to think
+        # (reasoning_effort, Claude's effort), and no sampling setting that thinking refuses.
+        plan = plan_thinking(self.model, params)
+        if plan["thinking"]:
+            body["thinking"] = plan["thinking"]
+            budget = plan["thinking"].get("budget_tokens")
+            if budget and body["max_tokens"] <= budget:
+                body["max_tokens"] = budget + body["max_tokens"]  # the budget must be below max_tokens
+        if plan["effort"]:
+            body["output_config"] = {**(body.get("output_config") or {}), "effort": plan["effort"]}
+        for key in plan["drop"]:
+            body.pop(key, None)
         if drops:
             with self._lock:
                 for key in self._drop:
-                    if key == "effort" and isinstance(body.get("output_config"), dict):
-                        body["output_config"].pop("effort", None)
-                        if not body["output_config"]:
-                            body.pop("output_config")
+                    if key == "output_config.format":
+                        _set_format(body, None)
                     body.pop(key, None)
-                for key, values in self._refused.items():
-                    if key in body and value_key(body[key]) in values:
+                for key, values in self._refused.items():  # values this model refused before
+                    if key == "effort":
+                        level = (body.get("output_config") or {}).get("effort")
+                        if level is not None and value_key(level) in values:
+                            _set_effort(body, "high" if level in ("xhigh", "max") and value_key("high") not in values else None)
+                    elif key in body and value_key(body[key]) in values:
                         body.pop(key)
         return body
 
     def _rejected_in(self, request: dict, sent: dict) -> list[str]:
-        """What of `request` this model refused, so the answer came from a changed request."""
+        """What of `request` this model refused, so the answer came from a changed request: what
+        it is known to reject (plan_thinking), and the values it refused when sent, now or
+        before. Never another request's refusal: one case's bad combination is not every case's."""
         full = self.build_body(request, drops=False)
-        out = [name for name, key in _SAMPLING if key in full and key not in sent]
+        out = list(plan_thinking(self.model, params_of(request))["rejected"])
+        out += [name for name, key in _SAMPLING if key in full and key not in sent and name not in out]
         if full["messages"] and full["messages"][-1].get("role") == "assistant" and (not sent["messages"] or sent["messages"][-1].get("role") != "assistant"):
             out.append("assistant prefill")
         if (full.get("tool_choice") or {}).get("type") in ("any", "tool") and (sent.get("tool_choice") or {}).get("type") not in ("any", "tool"):
             out.append("tool_choice")
-        if "thinking" in full and "thinking" not in sent:
+        if "thinking" in full and full.get("thinking") != sent.get("thinking") and "thinking" not in out:
             out.append("thinking")
-        if "effort" in (full.get("output_config") or {}) and "effort" not in (sent.get("output_config") or {}):
+        full_effort, sent_effort = (full.get("output_config") or {}).get("effort"), (sent.get("output_config") or {}).get("effort")
+        if full_effort is not None and full_effort != sent_effort and "reasoning_effort" not in out:
             out.append("reasoning_effort")
         return out
 
@@ -359,13 +474,14 @@ class AnthropicProvider(Provider):
             tool_calls=tool_calls,
             model=data.get("model"),
             finish_reason=finish,
-            usage={k: usage.get(k) for k in ("input_tokens", "output_tokens", *CACHE_FIELDS)} if usage else {},
+            usage=_usage(usage),
             refusal="refusal" if stop == "refusal" else None,
         )
 
     def _note(self, note: str, drop: str | None = None, value: Any = None) -> None:
         with self._lock:
-            if drop in dict(_SAMPLING).values():  # learnt per value: temperature 0 refused, 1 accepted
+            if drop in dict(_SAMPLING).values() or drop in ("thinking", "effort"):
+                # learnt per value: temperature 0 refused, 1 accepted; effort xhigh refused, low taken
                 self._refused.setdefault(drop, set()).add(value_key(value))
             elif drop:
                 self._drop.add(drop)
@@ -385,19 +501,30 @@ class AnthropicProvider(Provider):
             body["tool_choice"] = {"type": "auto"}
             self._note(f"{self.model} does not support forced tool choice; used tool_choice auto")
             return True
+        if "thinking" in lower and "thinking" in body:
+            # Thinking on beside sampling it refuses ("temperature may only be set to 1 when
+            # thinking is enabled", top_k): the sampling setting goes, not the thinking.
+            beside = [key for key in ("temperature", "top_k", "top_p") if key in lower and key in body]
+            if beside:
+                for key in beside:
+                    body.pop(key)
+                self._note(f"left out {', '.join(beside)} beside thinking for {self.model} ({err.message[:80]})")
+                return True
         if "effort" in lower and "effort" in (body.get("output_config") or {}):
-            body["output_config"].pop("effort")
-            if not body["output_config"]:
-                body.pop("output_config")
-            self._note(f"dropped reasoning effort for {self.model} ({err.message[:80]})", drop="effort")
+            # Refused beside this thinking setting ("effort 'xhigh' is not supported when thinking
+            # is disabled"): changed for this request only. Refused alone, the level is learnt.
+            level = body["output_config"]["effort"]
+            beside = "thinking" in lower and "thinking" in body
+            self._note(f"{self.model} refused effort {level!r} ({err.message[:80]})", drop=None if beside else "effort", value=level)
+            _set_effort(body, "high" if level in ("xhigh", "max") else None)
             return True
-        if "thinking" in lower and "thinking" in body:  # a model with no extended thinking, or not this kind
-            body.pop("thinking")
-            self._note(f"dropped extended thinking for {self.model} ({err.message[:80]})", drop="thinking")
+        if "thinking" in lower and "thinking" in body:  # this thinking setting, on a model llmshift does not know
+            refused = body.pop("thinking")
+            self._note(f"{self.model} refused thinking {json.dumps(refused, sort_keys=True)} ({err.message[:80]})", drop="thinking", value=refused)
             return True
-        if "output_config" in lower and "output_config" in body:
-            body.pop("output_config", None)
-            self._note("native structured output rejected; asked for JSON in the prompt instead", drop="output_config")
+        if "output_config" in lower and "format" in (body.get("output_config") or {}):
+            _set_format(body, None)  # the effort beside it stays
+            self._note("native structured output rejected; asked for JSON in the prompt instead", drop="output_config.format")
             return True
         # Only capability errors ("`temperature` is deprecated for this model", "temperature and
         # top_p cannot both be specified"); a bad value is reported as it is.

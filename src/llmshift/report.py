@@ -98,7 +98,10 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
     verdict = ""
     if threshold is not None:
         ok = result.passed
-        verdict = "  " + (style(f"{sym('pass')} meets the {threshold:.0%} threshold", "green") if ok else style(f"{sym('fail')} below the {threshold:.0%} threshold", "red", "bold"))
+        if ok and s.get("unchecked"):  # the exit code is 2: what could be checked passed, not everything could be
+            verdict = "  " + style(f"{sym('warn')} inconclusive: {s['unchecked']} not checked", "yellow", "bold")
+        else:
+            verdict = "  " + (style(f"{sym('pass')} meets the {threshold:.0%} threshold", "green") if ok else style(f"{sym('fail')} below the {threshold:.0%} threshold", "red", "bold"))
     lines.append(f"  pass rate {bar(rate)} {_pct(rate)}{verdict}")
     if range_text(s):
         lines.append(style(f"            {range_text(s)}", "grey"))
@@ -250,6 +253,8 @@ def compare_markdown(result: CompareResult, *, max_cases: int = 15, title: str =
     verdict = ""
     if result.min_pass_rate is not None:
         verdict = " ✅ meets threshold" if result.passed else f" ❌ below the {result.min_pass_rate:.0%} threshold"
+        if result.passed and s.get("unchecked"):
+            verdict = f" ⚠️ inconclusive: {s['unchecked']} not checked"
     lines.append("| Pass rate | Unchanged | Changed | Failed | Errors |")
     lines.append("|---|---|---|---|---|")
     not_checked = f" (+{s['unchecked']} not checked)" if s.get("unchecked") else ""
@@ -406,6 +411,8 @@ def compare_html(result: CompareResult) -> str:
     verdict = ""
     if result.min_pass_rate is not None:
         verdict = f"<div class=\"l\">{'meets' if result.passed else 'below'} the {result.min_pass_rate:.0%} threshold</div>"
+        if result.passed and s.get("unchecked"):
+            verdict = f"<div class=\"l\">inconclusive: {s['unchecked']} not checked</div>"
     parts.append('<div class="cards">')
     rng = f"<div class=\"l\">{e(range_text(s))}</div>" if range_text(s) else ""
     parts.append(f"<div class=\"card\"><div class=\"l\">Pass rate</div><div class=\"n\">{_pct(s.get('pass_rate'))}</div>{verdict}{rng}</div>")

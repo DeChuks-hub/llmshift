@@ -418,6 +418,12 @@ class Registry:
         stored = e.get("status", "active")
         listed = e.get("replacement")
         replacement = self.final_replacement(listed, platform) if listed else None
+        dead_end = None  # a replacement that is itself retired, with no successor listed
+        final = self._entry(replacement, platform) if replacement else None
+        if final is not None:
+            final_retires = _date(final.get("retires"))
+            if (final_retires and final_retires <= now) or final.get("status") == "retired":
+                dead_end, replacement = (replacement, final_retires), None
         days_left = (retires - now).days if retires else None
         if retires and retires <= now:
             status, severity = "retired", "critical"
@@ -443,7 +449,16 @@ class Registry:
         if replacement and status != "active":
             message += f"; replacement: {replacement}"
             if listed and str(listed).lower() != str(replacement).lower():
-                message += f" (the listed replacement, {listed}, is retiring too)"
+                gone = self._entry(listed, platform) or {}
+                gone_on = _date(gone.get("retires"))
+                done = (gone_on is not None and gone_on <= now) or gone.get("status") == "retired"
+                message += f" (the listed replacement, {listed}, {'retired' if done else 'is retiring'} too)"
+        elif dead_end and status != "active":
+            when = f" on {dead_end[1].isoformat()}" if dead_end[1] else ""
+            if str(listed).lower() == str(dead_end[0]).lower():
+                message += f"; its listed replacement, {dead_end[0]}, retired too{when}, and no successor is listed"
+            else:  # a chain of replacements that ends in a retired model
+                message += f"; its listed replacement, {listed}, leads to {dead_end[0]}, which retired too{when}, and no successor is listed"
         if fine_tune_of:
             message = f"fine-tune of {fine_tune_of}: {message}"
         if platform in ("bedrock", "azure") or (platform == "vertex" and e.get("provider") != "google-vertex"):

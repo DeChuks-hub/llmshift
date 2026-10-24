@@ -57,7 +57,8 @@ _UNITS = {
 _SPACED_UNITS = sorted((u for u in _UNITS if len(u) > 1 or u in ("g", "m", "l", "h", "s")), key=len, reverse=True)
 _NUM_RE = re.compile(
     r"(?<![A-Za-z0-9_./#:,])(?<![A-Za-z]-)"
-    r"(?:(?P<sign>[-−])(?=[$€£¥₹]?\d))?"
+    # -5, and "minus 5" or "negative 5" when no number comes just before ("20 minus 5" subtracts)
+    r"(?:(?P<sign>[-−]|(?<![\d,.]\s)(?i:minus|negative)\s+)(?=[$€£¥₹]?\d))?"
     r"(?P<cur>[$€£¥₹])?"
     r"(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)(?!\d)"
     r"(?:\s?(?P<scalew>(?i:thousand|million|billion|trillion|bn))(?![A-Za-z])|(?P<scalel>[kKMB])(?![A-Za-z]))?"
@@ -382,7 +383,10 @@ def extract(text: str, *, max_hard: int = MAX_HARD, max_entities: int = MAX_ENTI
         seen.add(key)
         hard.append(_strip(f))
     hard = hard[:max_hard]
-    entity_text = _blank(found["text"], [(m.start(), m.end()) for m in _CODE_RE.finditer(found["text"])])
+    # Words inside a time or a date are part of it, not names: "2:30 PM" has no entity "PM"
+    # for "14:30" to miss.
+    inside = [t["span"] for t in found["times"]] + [d["span"] for d in found["dates"]]
+    entity_text = _blank(found["text"], [(m.start(), m.end()) for m in _CODE_RE.finditer(found["text"])] + inside)
     hard_texts = {normalize(h["text"]) for h in hard}
     entities = [e for e in extract_entities(entity_text, limit=max_entities * 2) if normalize(e["text"]) not in hard_texts]
     return hard + entities[:max_entities]

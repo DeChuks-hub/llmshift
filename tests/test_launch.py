@@ -178,6 +178,26 @@ def test_the_action_keeps_its_inputs_and_outputs_within_v0():
     assert all(not spec.get("required") or name in V0_INPUTS for name, spec in action["inputs"].items())  # no new required input
 
 
+# The first major release of each of GitHub's own actions that runs on Node.js 24 (`runs.using`
+# in its action.yml). An older one makes every run warn that Node.js 20 is deprecated.
+NODE24 = {
+    "actions/checkout": 5, "actions/setup-python": 6, "actions/cache": 5, "actions/upload-artifact": 6,
+    "actions/download-artifact": 7, "actions/configure-pages": 6, "actions/upload-pages-artifact": 5, "actions/deploy-pages": 5,
+}
+
+
+def test_github_actions_run_on_node24(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["init", "--github"])
+    files = [ROOT / "action.yml", *sorted((ROOT / "examples" / "workflows").glob("*.yml")), *sorted((tmp_path / ".github" / "workflows").glob("*.yml"))]
+    files += sorted((ROOT / ".github" / "workflows").glob("*.yml"))  # not in the source archive
+    used = [(f.name, action, int(major)) for f in files for action, major in re.findall(r"uses:\s*(actions/[\w-]+)@v(\d+)", f.read_text(encoding="utf-8"))]
+    assert len(used) >= 10
+    for name, action, major in used:
+        assert action in NODE24, f"{name}: add {action} to NODE24 with its first Node 24 major"
+        assert major >= NODE24[action], f"{name}: {action}@v{major} runs on Node 20; use v{NODE24[action]} or later"
+
+
 def test_no_leftovers_of_the_old_name_or_placeholders():
     shipped = [ROOT / "README.md", ROOT / "CHANGELOG.md", ROOT / "action.yml", ROOT / "pyproject.toml", ROOT / "LICENSE"]
     shipped += [p for p in (ROOT / "src").rglob("*") if p.suffix in (".py", ".json")]

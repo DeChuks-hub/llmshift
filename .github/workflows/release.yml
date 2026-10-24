@@ -58,7 +58,7 @@ jobs:
           python -m venv sdist-venv
           sdist-venv/bin/python -m pip install --quiet dist/*.tar.gz "pytest>=7"
           cd sdist-check/llmshift-* && ../../sdist-venv/bin/python -m pytest -q -p no:cacheprovider
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dist
           path: dist/
@@ -72,7 +72,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: dist
           path: dist/

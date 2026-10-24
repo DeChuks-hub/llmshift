@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (2026-10-24)
 
 - `llmshift mcp` no longer starts a thread while it shuts down. Once the client closed its end, that could crash it on exit (exit code -11, seen once on macOS with Python 3.10) after every request had been answered.
 

@@ -451,7 +451,7 @@ A model is written `provider:model`; well-known IDs work without a prefix.
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-`@v0` follows the newest 0.x release: it moves once PyPI has a release, and never to a pre-release. Pin `@v0.1.1` or a commit SHA for builds that must not change.
+`@v0` follows the newest 0.x release: it moves once PyPI has a release, and never to a pre-release. Pin `@v0.1.2` or a commit SHA for builds that must not change.
 
 Inputs: `command` (any LLMShift command), `args` (split like shell words: quote an argument that holds spaces; nothing is expanded), `python-version`, `version` (empty = install from the action's source), `working-directory`. Outputs: `pass-rate`, `retired`, `retiring`, `recommended` (from `pick`). Complete workflows are in [`examples/workflows/`](https://github.com/DeChuks-hub/llmshift/tree/main/examples/workflows): PR checks, a nightly watch, prompt checks on pull requests, weekly upgrade pull requests and a weekly retirement digest. Pull requests from forks and Dependabot get no secrets, so those workflows skip the comparison there with a notice.
 

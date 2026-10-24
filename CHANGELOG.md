@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `llmshift mcp` no longer starts a thread while it shuts down. Once the client closed its end, that could crash it on exit (exit code -11, seen once on macOS with Python 3.10) after every request had been answered.
+
 ## 0.1.1 (2026-10-24)
 
 - `pick`: when the model you use today is also a candidate, today's cost is measured on the same tests, so its row reads "same" instead of a saving against itself. The header says where today's cost comes from (your recorded usage, or these tests), and "Keep" is recommended whenever today's model is the cheapest that passes.

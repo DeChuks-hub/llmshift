@@ -26,7 +26,6 @@ import queue
 import re
 import sys
 import threading
-import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -368,6 +367,8 @@ class Server:
 
         jobs: queue.Queue = queue.Queue()
         end = object()
+        done = threading.Event()  # serve returned: the grace period has nothing left to stop
+        closing: list[threading.Thread] = []
 
         def read_loop() -> None:
             try:
@@ -384,14 +385,21 @@ class Server:
             except Exception:  # pragma: no cover - unreadable input
                 traceback.print_exc(file=sys.stderr)
             finally:
+                # Started before `end` is queued (serve returns as soon as it sees it) and never
+                # once serve has returned: a thread started while Python shuts down can crash it
+                # (exit -11 on macOS).
+                if not done.is_set():
+                    grace = threading.Thread(target=wind_down, name="llmshift-mcp-eof", daemon=True)
+                    grace.start()
+                    closing.append(grace)
                 jobs.put(end)
-                threading.Thread(target=wind_down, name="llmshift-mcp-eof", daemon=True).start()
 
         def wind_down() -> None:
             """The input ended, which is how a client shuts the server down. Requests already
             read are answered, but a tool still running after EOF_GRACE seconds has its model
             calls and child processes stopped, and the requests behind it are dropped."""
-            time.sleep(EOF_GRACE)
+            if done.wait(EOF_GRACE):
+                return  # every request was answered
             with self._state:
                 busy = self._busy
                 if busy:
@@ -403,35 +411,40 @@ class Server:
                 kill_running()
 
         threading.Thread(target=read_loop, name="llmshift-mcp-reader", daemon=True).start()
-        while True:
-            try:
-                message = jobs.get(timeout=0.5)  # a timed wait keeps Ctrl+C working on Windows
-            except queue.Empty:
-                continue
-            if message is end or self._closed:
-                http.CANCEL.clear()
-                return
-            key = _key(message["id"]) if isinstance(message, dict) and _valid_id(message.get("id")) else None
-            with self._state:
-                self._queued.discard(key)
-                if key is not None and key in self._cancelled:
-                    self._cancelled.discard(key)
-                    continue  # cancelled before it started
-                http.CANCEL.clear()  # a cancellation applies to one request only
-                self._running = key
-                self._busy = True
-            try:
-                response = self.handle(message)
-            finally:
+        try:
+            while True:
+                try:
+                    message = jobs.get(timeout=0.5)  # a timed wait keeps Ctrl+C working on Windows
+                except queue.Empty:
+                    continue
+                if message is end or self._closed:
+                    http.CANCEL.clear()
+                    return
+                key = _key(message["id"]) if isinstance(message, dict) and _valid_id(message.get("id")) else None
                 with self._state:
-                    self._running = None
-                    self._busy = False
-                    cancelled = key is not None and key in self._cancelled
-                    self._cancelled.discard(key)
-                    if cancelled:
-                        http.CANCEL.clear()
-            if not cancelled and not self.send(writer, response):
-                return
+                    self._queued.discard(key)
+                    if key is not None and key in self._cancelled:
+                        self._cancelled.discard(key)
+                        continue  # cancelled before it started
+                    http.CANCEL.clear()  # a cancellation applies to one request only
+                    self._running = key
+                    self._busy = True
+                try:
+                    response = self.handle(message)
+                finally:
+                    with self._state:
+                        self._running = None
+                        self._busy = False
+                        cancelled = key is not None and key in self._cancelled
+                        self._cancelled.discard(key)
+                        if cancelled:
+                            http.CANCEL.clear()
+                if not cancelled and not self.send(writer, response):
+                    return
+        finally:
+            done.set()  # no thread is left starting or running when Python shuts down
+            for grace in list(closing):
+                grace.join()
 
 
 def _protocol_streams() -> tuple[Any, Any]:

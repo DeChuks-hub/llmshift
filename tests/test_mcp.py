@@ -334,6 +334,7 @@ def test_cli_registration(monkeypatch, tmp_path):
 class Client:
     def __init__(self, cwd: Path):
         env = dict(os.environ, NO_COLOR="1", LLMSHIFT_TODAY="2026-10-21", PYTHONPATH=os.pathsep.join([str(SRC), os.environ.get("PYTHONPATH", "")]))
+        env["PYTHONFAULTHANDLER"] = "1"  # a crash prints every thread's stack to stderr, which close() reports
         self.proc = subprocess.Popen([sys.executable, "-m", "llmshift.mcp"], cwd=str(cwd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.raw: list[bytes] = []
         self.replies: queue.Queue = queue.Queue()
@@ -431,7 +432,7 @@ def test_tools_that_run_git_answer_promptly_over_stdio(project):
         assert time.monotonic() - start < 20
         assert scan["models"] and "result" in check
         assert client.request("ping", rid=4)["result"] == {}  # the protocol stream is intact
-        assert client.close() == 0
+        assert client.close() == 0, b"".join(client.stderr).decode(errors="replace")[-3000:]
     finally:
         client.close()
 

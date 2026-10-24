@@ -290,8 +290,8 @@ jobs:
     permissions:
       contents: read
     env:
-      # Pull requests from forks get no secrets: compare is skipped there instead of failing.
-      LLMSHIFT_HAS_KEY: ${{ secrets.OPENAI_API_KEY != '' || secrets.ANTHROPIC_API_KEY != '' || secrets.GEMINI_API_KEY != '' }}
+      # Pull requests from forks and Dependabot get no secrets: compare is skipped there instead of failing.
+      LLMSHIFT_NO_SECRETS: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -304,10 +304,10 @@ jobs:
       - run: llmshift scan --fail-on retired
       # Re-runs the test set against the candidate model (needs your provider key as a secret):
       # the repository variable LLMSHIFT_CANDIDATE if set, else candidate: in llmshift.yaml.
-      - run: echo "::notice::llmshift compare skipped - no provider key (pull requests from forks get no secrets)"
-        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_HAS_KEY != 'true' }}
+      - run: echo "::notice::llmshift compare skipped - pull requests from forks and Dependabot get no secrets"
+        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_NO_SECRETS == 'true' }}
       - run: llmshift compare ${LLMSHIFT_CANDIDATE:+--to "$LLMSHIFT_CANDIDATE"}
-        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_HAS_KEY == 'true' }}
+        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_NO_SECRETS != 'true' }}
         env:
           LLMSHIFT_CANDIDATE: ${{ vars.LLMSHIFT_CANDIDATE }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

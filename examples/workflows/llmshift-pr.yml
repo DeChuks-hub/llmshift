@@ -12,8 +12,8 @@ jobs:
     permissions:
       contents: read
     env:
-      # Pull requests from forks get no secrets: the comparison is skipped there instead of failing.
-      LLMSHIFT_HAS_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+      # Pull requests from forks and Dependabot get no secrets: the comparison is skipped there instead of failing.
+      LLMSHIFT_NO_SECRETS: ${{ github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -25,12 +25,12 @@ jobs:
           command: scan
           args: --fail-on retired
 
-      - name: No provider key (a pull request from a fork)
-        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_HAS_KEY != 'true' }}
-        run: echo "::notice::The comparison is skipped - no OPENAI_API_KEY (pull requests from forks get no secrets)"
+      - name: No secrets (a pull request from a fork or Dependabot)
+        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_NO_SECRETS == 'true' }}
+        run: echo "::notice::The comparison is skipped - pull requests from forks and Dependabot get no secrets"
 
       - name: Compare the candidate model
-        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_HAS_KEY == 'true' }}
+        if: ${{ hashFiles('.llmshift/tests.jsonl') != '' && env.LLMSHIFT_NO_SECRETS != 'true' }}
         uses: DeChuks-hub/llmshift@v0.1.0
         with:
           command: compare

@@ -365,7 +365,7 @@ def test_long_prompts_and_hour_long_cache_writes_cost_what_is_billed():
 # ------------------------------------------------------------------ workflows
 
 
-def test_the_pr_workflows_skip_the_comparison_on_forks(tmp_path, monkeypatch):
+def test_the_pr_workflows_skip_the_comparison_only_where_secrets_are_withheld(tmp_path, monkeypatch):
     from pathlib import Path
 
     from llmshift import cli
@@ -375,4 +375,7 @@ def test_the_pr_workflows_skip_the_comparison_on_forks(tmp_path, monkeypatch):
     written = (tmp_path / ".github" / "workflows" / "llmshift.yml").read_text(encoding="utf-8")
     examples = Path(__file__).resolve().parents[1] / "examples" / "workflows"
     for text in (written, (examples / "llmshift-pr.yml").read_text(encoding="utf-8"), (examples / "llmshift-check.yml").read_text(encoding="utf-8")):
-        assert "LLMSHIFT_HAS_KEY: ${{ secrets." in text and "env.LLMSHIFT_HAS_KEY == 'true'" in text and "forks get no secrets" in text
+        guard = next(line for line in text.splitlines() if "LLMSHIFT_NO_SECRETS:" in line)
+        assert "github.event_name == 'pull_request'" in guard and "head.repo.full_name != github.repository" in guard and "dependabot[bot]" in guard
+        assert "secrets." not in guard  # a same-repo pull request still runs it, whatever the provider (mock, Ollama, Azure...)
+        assert "env.LLMSHIFT_NO_SECRETS == 'true'" in text and "env.LLMSHIFT_NO_SECRETS != 'true'" in text and "forks and Dependabot get no secrets" in text

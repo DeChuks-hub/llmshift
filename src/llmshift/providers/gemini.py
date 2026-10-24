@@ -55,6 +55,47 @@ def sanitize_schema(schema: Any, root: dict | None = None, depth: int = 0) -> An
     return out
 
 
+_GEMINI_VERSION_RE = re.compile(r"gemini-(\d+)")
+
+
+def _thinking_config(model: str, params: dict) -> dict | None:
+    """thinkingConfig from the request: reasoning_effort as Gemini 3's thinkingLevel, else
+    thinking as a budget (-1 dynamic, 0 off). Gemini 3 takes one of the two, not both."""
+    m = _GEMINI_VERSION_RE.search(str(model).lower())
+    effort = params.get("reasoning_effort")
+    if m and int(m.group(1)) >= 3 and isinstance(effort, str) and effort:
+        return {"thinkingLevel": {"none": "minimal", "xhigh": "high", "max": "high"}.get(effort, effort)}
+    thinking = params.get("thinking")
+    if not isinstance(thinking, dict):
+        return None
+    budget = thinking.get("budget_tokens")
+    if thinking.get("type") == "adaptive":
+        return {"thinkingBudget": -1}
+    if thinking.get("type") == "disabled":
+        return {"thinkingBudget": 0}
+    if thinking.get("type") == "enabled" and isinstance(budget, int) and not isinstance(budget, bool):
+        return {"thinkingBudget": budget}
+    return None
+
+
+def _usage(meta: dict) -> dict:
+    """Tokens as Google bills them: thinking tokens (thoughtsTokenCount) at the output price
+    with the answer's, tool-use prompt tokens at the input price, and the cached share of the
+    prompt (cachedContentTokenCount, already in promptTokenCount) at the cache price."""
+    if not meta:
+        return {}
+
+    def total(*keys: str) -> int | None:
+        found = [meta[k] for k in keys if isinstance(meta.get(k), int) and not isinstance(meta.get(k), bool)]
+        return sum(found) if found else None
+
+    usage = {"input_tokens": total("promptTokenCount", "toolUsePromptTokenCount"), "output_tokens": total("candidatesTokenCount", "thoughtsTokenCount")}
+    cached = meta.get("cachedContentTokenCount")
+    if isinstance(cached, int) and not isinstance(cached, bool) and cached > 0:
+        usage["cached_input_tokens"] = cached
+    return usage
+
+
 def _parts(content: Any) -> list[dict]:
     if content is None:
         return []
@@ -92,6 +133,7 @@ class GeminiProvider(Provider):
         self.api_key = (
             clean_key(o.get("api_key")) or (clean_key(os.environ.get(self.key_env)) if self.key_env else None) or clean_key(os.environ.get("GOOGLE_API_KEY"))
         )
+        self.adaptations: list[str] = []  # what was changed in requests this model rejected
 
     def identity(self) -> dict:
         shaping = {k: v for k, v in self.options.items() if k not in ("api_key", "timeout", "max_retries", "api_key_env", "timeout_set")}
@@ -178,6 +220,9 @@ class GeminiProvider(Provider):
             gen["stopSequences"] = [s for s in seqs if isinstance(s, str)][:5]
         if params.get("seed") is not None:
             gen["seed"] = params["seed"]
+        thinking = _thinking_config(self.model, params)
+        if thinking:
+            gen["thinkingConfig"] = thinking
         rf = params.get("response_format")
         if isinstance(rf, dict) and rf.get("type") in ("json_object", "json_schema"):
             gen["responseMimeType"] = "application/json"
@@ -217,7 +262,7 @@ class GeminiProvider(Provider):
     def parse(data: Any) -> Response:
         data = http.require_object(data, "Gemini generateContent", "candidates", "promptFeedback")
         usage = data.get("usageMetadata") if isinstance(data.get("usageMetadata"), dict) else {}
-        usage_out = {"input_tokens": usage.get("promptTokenCount"), "output_tokens": usage.get("candidatesTokenCount")} if usage else {}
+        usage_out = _usage(usage)
         candidates = data.get("candidates") or []
         if not candidates:
             reason = (data.get("promptFeedback") or {}).get("blockReason") or "no candidates returned"
@@ -245,7 +290,23 @@ class GeminiProvider(Provider):
         if not self.api_key:
             raise ProviderError(f"no API key for {self.spec}: set GEMINI_API_KEY (or GOOGLE_API_KEY)", code="missing_api_key")
         url = f"{self.base_url}/models/{urllib.parse.quote(self.model, safe='-._')}:generateContent"
-        data = http.post_json(url, self.build_body(request), headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
+        body = self.build_body(request)
+        try:
+            data = http.post_json(url, body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
+        except ProviderError as err:
+            gen = body.get("generationConfig") or {}
+            if err.status != 400 or "thinkingConfig" not in gen or "think" not in (err.message or "").lower():
+                raise
+            # A model with no thinking, or that cannot turn it off (budget 0): the answer is
+            # tested without the setting, and the setting is reported as rejected.
+            dropped = gen.pop("thinkingConfig")
+            note = f"dropped thinkingConfig {json.dumps(dropped)} for {self.model} ({err.message[:80]})"
+            if note not in self.adaptations:
+                self.adaptations.append(note)
+            data = http.post_json(url, body, headers={"x-goog-api-key": self.api_key}, timeout=self.timeout, max_retries=self.max_retries)
+            response = self.parse(data)
+            response.rejected = ["reasoning_effort" if "thinkingLevel" in dropped else "thinking"]
+            return response
         return self.parse(data)
 
     def embed(self, texts: list[str]) -> list[list[float]]:

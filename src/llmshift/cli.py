@@ -666,9 +666,11 @@ def cmd_compare(args: argparse.Namespace, cfg: dict) -> int:
     if other:
         con.out(con.style(f"Next: llmshift fix --to {candidate}  (suggests prompt changes for the {other} changed case(s))", "grey"))
     if s.get("evaluated", 0) == 0:
-        return EXIT_FAIL
+        return EXIT_USAGE if s.get("unchecked") else EXIT_FAIL
     if result.min_pass_rate is not None and not result.passed:
         return EXIT_FAIL
+    if s.get("unchecked"):  # what could be checked passed, but not everything could be: inconclusive
+        return EXIT_USAGE
     return EXIT_OK
 
 

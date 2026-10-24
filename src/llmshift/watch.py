@@ -82,7 +82,7 @@ def history_paths(history_dir: str | Path, model: str) -> tuple[Path, Path]:
     return base / "history.jsonl", base / "runs"
 
 
-_SUMMARY_NUMBERS = ("total", "evaluated", "passed", "warned", "failed", "errors", "pass_rate", "error_rate", "similarity", "changed_outputs")
+_SUMMARY_NUMBERS = ("total", "evaluated", "passed", "warned", "failed", "errors", "unchecked", "pass_rate", "error_rate", "similarity", "changed_outputs")
 
 
 def _clean_row(row: Any) -> dict | None:
@@ -160,6 +160,7 @@ def summarize_run(res: CompareResult, case_hashes: dict[str, str] | None = None)
         "warned": s.get("warned", 0),
         "failed": s.get("failed", 0),
         "errors": s.get("errors", 0),
+        "unchecked": s.get("unchecked", 0),
         "pass_rate": s.get("pass_rate", 0.0),
         "error_rate": round(s.get("errors", 0) / s["total"], 4) if s.get("total") else 0.0,
         "similarity": round(statistics.mean(sims), 4) if sims else None,
@@ -193,6 +194,7 @@ def detect_drift(
     registry: Registry | None = None,
     errors_sample: list[str] | None = None,
     fingerprint: str | None = None,
+    unchecked_sample: list[str] | None = None,
 ) -> list[Drift]:
     """`history` holds earlier runs, oldest first; `prev_cases` the per-case data of the
     latest comparable one. Runs of a different test set (`fingerprint`) are not compared."""
@@ -207,6 +209,9 @@ def detect_drift(
         drifts.append(Drift("critical", "Most requests to the model are failing", detail.strip()))
     elif summary.get("errors"):
         drifts.append(Drift("info", f"{summary['errors']} request(s) failed", "; ".join((errors_sample or [])[:2])))
+    if summary.get("unchecked"):  # a check could not run: the test or the judge needs fixing, not the model
+        n = summary["unchecked"]
+        drifts.append(Drift("warning", f"{n} case{'s' if n != 1 else ''} could not be checked", "; ".join((unchecked_sample or [])[:2])))
 
     rate = summary.get("pass_rate", 0.0)
     if min_pass_rate is not None and summary.get("evaluated") and rate + 1e-9 < min_pass_rate:
@@ -338,7 +343,8 @@ def run_watch(
         registry = Registry.load()
     except Exception:
         registry = None
-    errors_sample = [c.error for c in res.cases if c.error][:3]
+    errors_sample = [c.error for c in res.cases if c.error and not c.unchecked][:3]
+    unchecked_sample = [c.error for c in res.cases if c.unchecked and c.error][:3]
     drifts = detect_drift(
         summary,
         per_case,
@@ -351,6 +357,7 @@ def run_watch(
         retirement_warn_days=retirement_warn_days,
         registry=registry,
         errors_sample=errors_sample,
+        unchecked_sample=unchecked_sample,
         fingerprint=fingerprint,
     )
     outcome = WatchOutcome(

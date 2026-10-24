@@ -37,13 +37,22 @@ for line in sys.stdin:
 _MAY_BACKTRACK_RE = re.compile(r"[*+?{|]")
 
 
+GIVE_UP = 2  # timeouts after which a pattern is not tried again (10 cases cost 21 s, 1,000 would 33 minutes)
+
+
 class RegexStopped(Exception):
-    """A search that could not finish: it ran over TIMEOUT seconds, or broke the worker."""
+    """A search that could not finish: it ran over TIMEOUT seconds (timed_out), or its
+    worker process died."""
+
+    def __init__(self, message: str, timed_out: bool = False):
+        super().__init__(message)
+        self.timed_out = timed_out
 
 
 _lock = threading.Lock()
 _worker: subprocess.Popen | None = None
 _no_worker = False  # this Python cannot start one: searches run here, as before
+_timeouts: dict[tuple, int] = {}  # (pattern, flags) -> searches stopped after TIMEOUT
 
 
 def _start() -> subprocess.Popen | None:
@@ -98,30 +107,41 @@ def search(pattern: str, text: str, flags: int = 0) -> bool:
     if not _MAY_BACKTRACK_RE.search(pattern):
         return compiled.search(text) is not None
     request = json.dumps([pattern, flags, text]) + "\n"
+    key = (pattern, flags)
     with _lock:
-        if _worker is None and not _no_worker:
-            _worker = _start()
-            _no_worker = _worker is None
-        proc = _worker
-        if proc is None:
-            return compiled.search(text) is not None
-        limit = TIMEOUT + len(request) / 20_000_000  # sending a very long answer takes time too
-        timer = threading.Timer(limit, proc.kill)
-        start = time.monotonic()
-        timer.start()
-        try:
-            proc.stdin.write(request)
-            proc.stdin.flush()
-            line = proc.stdout.readline()
-        except (OSError, ValueError):
-            line = ""
-        finally:
-            timer.cancel()
-        if not line:  # killed by the timer, or by what the search did
+        if _timeouts.get(key, 0) >= GIVE_UP:
+            raise RegexStopped(f"stopped after {TIMEOUT:.3g} s on {GIVE_UP} earlier answers, so not tried again", timed_out=True)
+        for attempt in range(2):  # a worker that died between searches (Ctrl+C, an antivirus) is started again
+            if _worker is not None and _worker.poll() is not None:
+                _stop(_worker)
+                _worker = None
+            if _worker is None and not _no_worker:
+                _worker = _start()
+                _no_worker = _worker is None
+            proc = _worker
+            if proc is None:
+                return compiled.search(text) is not None
+            limit = TIMEOUT + len(request) / 20_000_000  # sending a very long answer takes time too
+            timer = threading.Timer(limit, proc.kill)
+            start = time.monotonic()
+            timer.start()
+            try:
+                proc.stdin.write(request)
+                proc.stdin.flush()
+                line = proc.stdout.readline()
+            except (OSError, ValueError):
+                line = ""
+            finally:
+                timer.cancel()
+            if line:
+                break
             _worker = None
             _stop(proc)
-            took = time.monotonic() - start
-            raise RegexStopped(f"stopped after {limit:.3g} s" if took >= limit * 0.9 else "the search stopped its worker process")
+            if time.monotonic() - start >= limit * 0.9:  # the timer stopped it
+                _timeouts[key] = _timeouts.get(key, 0) + 1
+                raise RegexStopped(f"stopped after {limit:.3g} s", timed_out=True)
+        else:  # it died at once, twice: what the search does breaks it (memory?)
+            raise RegexStopped("the search stopped its worker process twice")
     matched, error = json.loads(line)
     if error is not None:
         raise RegexStopped(error)
@@ -131,6 +151,8 @@ def search(pattern: str, text: str, flags: int = 0) -> bool:
 def stopped_message(pattern: str, exc: RegexStopped) -> str:
     """Why a pattern could not be checked, and how to fix it."""
     shown = pattern if len(pattern) <= 60 else pattern[:57] + "..."
+    if not exc.timed_out:
+        return f"regex /{shown}/ could not be checked ({exc})"
     return (
         f"regex /{shown}/ could not be checked ({exc}): it backtracks without end on this text. "
         "A repeat inside a repeat, such as (\\w+\\s?)*, is the usual cause: write it so each "

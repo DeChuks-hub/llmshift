@@ -405,6 +405,13 @@ def anthropic_request(req: dict) -> tuple[list[dict], dict]:
     fmt = output_config.get("format") if isinstance(output_config, dict) else None
     if isinstance(fmt, dict) and fmt.get("type") == "json_schema" and isinstance(fmt.get("schema"), dict):
         params["response_format"] = {"type": "json_schema", "json_schema": {"name": "output", "schema": fmt["schema"]}}
+    # Extended thinking and its effort: a Claude app that thinks is tested thinking.
+    thinking = req.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive", "disabled"):
+        params["thinking"] = {k: thinking[k] for k in ("type", "budget_tokens", "display") if thinking.get(k) is not None}
+    effort = output_config.get("effort") if isinstance(output_config, dict) else None
+    if isinstance(effort, str) and effort:
+        params["reasoning_effort"] = effort
     tools = []
     for t in req.get("tools") or []:
         if isinstance(t, dict) and t.get("name") and "input_schema" in t:
@@ -524,6 +531,16 @@ def gemini_request(req: dict) -> tuple[list[dict], dict]:
             params[dst] = gen[src]
     if gen.get("responseMimeType") == "application/json":
         params["response_format"] = {"type": "json_object"}
+    # Thinking, kept as the other providers' settings are: a budget (-1 dynamic, 0 off) as
+    # thinking, a level (Gemini 3) as reasoning_effort.
+    tc = gen.get("thinkingConfig") or gen.get("thinking_config")
+    if isinstance(tc, dict):
+        budget = tc.get("thinkingBudget", tc.get("thinking_budget"))
+        if isinstance(budget, int) and not isinstance(budget, bool):
+            params["thinking"] = {"type": "adaptive"} if budget < 0 else {"type": "disabled"} if budget == 0 else {"type": "enabled", "budget_tokens": budget}
+        level = tc.get("thinkingLevel", tc.get("thinking_level"))
+        if isinstance(level, str) and level:
+            params["reasoning_effort"] = level.lower()
     return msgs.clean_messages(messages), params
 
 

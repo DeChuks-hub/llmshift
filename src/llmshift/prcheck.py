@@ -22,7 +22,7 @@ from typing import Any, Callable
 from . import __version__
 from . import console as con
 from . import github as gh
-from .errors import EXIT_FAIL, EXIT_OK, UsageError
+from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .report import _md
 from .textutil import md_fence, report_json, show_bidi, source_lines
 
@@ -379,6 +379,11 @@ class PromptChange:
     def ran(self) -> bool:
         return self.result is not None
 
+    @property
+    def unchecked(self) -> int:
+        """Cases whose check could not run (an invalid regex, an unreachable judge)."""
+        return int(self.result.summary.get("unchecked") or 0) if self.result is not None else 0
+
     def passed(self, min_pass_rate: float | None) -> bool:
         if self.result is None:
             return True
@@ -544,6 +549,11 @@ class CheckRun:
     @property
     def passed(self) -> bool:
         return not self.failing
+
+    @property
+    def inconclusive(self) -> bool:
+        """Nothing failed, but some cases could not be checked."""
+        return self.passed and any(c.unchecked for c in self.tested)
 
     def to_dict(self) -> dict:
         return {
@@ -753,7 +763,8 @@ def check_markdown(run: CheckRun, marker: str = gh.CHECK_MARKER) -> str:
         for c in tested:
             s = c.result.summary
             ok = c.passed(run.min_pass_rate)
-            lines.append(f"| `{c.group}` | {', '.join(f'`{f}`' for f in c.files) or '-'} | {s.get('total', 0)} | {_rate(c)} | {s.get('warned', 0)} | {'pass' if ok else '**fail**'} |")
+            verdict = "**fail**" if not ok else f"**{c.unchecked} not checked**" if c.unchecked else "pass"
+            lines.append(f"| `{c.group}` | {', '.join(f'`{f}`' for f in c.files) or '-'} | {s.get('total', 0)} | {_rate(c)} | {s.get('warned', 0)} | {verdict} |")
         lines.append("")
     moved = [c for c in run.changes if c.status in ("removed", "moved")]
     for c in moved:
@@ -798,8 +809,10 @@ def check_terminal(run: CheckRun) -> str:
             continue
         s = c.result.summary
         ok = c.passed(run.min_pass_rate)
-        mark = con.style(con.sym("pass"), "green") if ok else con.style(con.sym("fail"), "red")
+        mark = con.style(con.sym("fail"), "red") if not ok else con.style(con.sym("warn"), "yellow") if c.unchecked else con.style(con.sym("pass"), "green")
         extra = "" if ok or run.min_pass_rate is None else f" (below {run.min_pass_rate:.0%})"
+        if c.unchecked:
+            extra += f" ({c.unchecked} could not be checked: a check could not run)"
         changed = f", {s['warned']} changed" if s.get("warned") else ""
         lines.append(f"  {mark} {c.group}  {where or '-'}  {s.get('total', 0)} case(s)  pass rate {_rate(c)}{changed}{extra}")
         if c.note:
@@ -896,4 +909,6 @@ def cmd_check(args: argparse.Namespace, cfg: dict) -> int:
                 con.out(con.style(f"  commented on pull request #{number}", "grey"))
             except Exception as exc:  # e.g. read-only tokens on pull requests from forks
                 con.warn(f"could not comment on pull request #{number}: {exc}")
-    return EXIT_OK if run.passed else EXIT_FAIL
+    if not run.passed:
+        return EXIT_FAIL
+    return EXIT_USAGE if run.inconclusive else EXIT_OK

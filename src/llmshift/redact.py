@@ -86,9 +86,10 @@ _SECRETS = [
     # key in a config dump, a tool's JSON arguments), when it looks like one.
     (r"(?i)" + _SECRET_WORD + _SEPARATOR + _QUOTED_VALUE, ("pass", "pwd", "secret", "key", "token", "credential")),
     (r"(?i)" + _SECRET_WORD + _SEPARATOR + _BARE_VALUE, ("pass", "pwd", "secret", "key", "token", "credential")),
-    # ... and in XML: <password>...</password> (a Maven settings.xml, a .NET config).
+    # ... and in XML: <password>...</password> (a Maven settings.xml, a .NET config). No > in the
+    # value: with it, a run of password>a1password>a1... made every word rescan the rest.
     (
-        r"(?i)" + _SECRET_WORD + r">(?P<v>(?=[^<\s]{0,63}?\d)(?=[^<\s]{0,63}?[A-Za-z])[^<\s]{6,4096})</",
+        r"(?i)" + _SECRET_WORD + r">(?P<v>(?=[^<>\s]{0,63}?\d)(?=[^<>\s]{0,63}?[A-Za-z])[^<>\s]{6,4096})</",
         ("pass", "pwd", "secret", "key", "token", "credential"),
     ),
 ]

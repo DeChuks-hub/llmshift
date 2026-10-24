@@ -261,10 +261,10 @@ def convert_grader(g: dict, item: dict, warnings: list[str]) -> dict | None:
         value = _static(g.get("reference", ""), item)
         value = value if isinstance(value, (str, list)) else json.dumps(value)
         check: dict
-        if op == "eq":
-            check = {"type": "equals", "value": value, "category": "custom"}
+        if op == "eq":  # exact, as OpenAI compares: no stripping
+            check = {"type": "equals", "value": value, "strip": False, "category": "custom"}
         elif op in ("ne", "neq"):
-            check = {"type": "not_equals", "value": value, "category": "custom"}
+            check = {"type": "not_equals", "value": value, "strip": False, "category": "custom"}
         elif op == "like":
             check = {"type": "contains", "value": value, "case_sensitive": True, "category": "custom"}
         elif op == "ilike":

@@ -308,7 +308,8 @@ def test_prices_and_cache_tokens():
     assert pricing.price_for("deepseek:deepseek-v3-2-251201") is None  # 0/0 in LiteLLM's list: unknown, not free
     assert pricing.price_for("x:y", {"x:y": pricing.Price(0.0, 0.0, "--price")}).input == 0.0  # your own 0 is a price
     usage = {"input_tokens": 120, "output_tokens": 50, "cache_read_input_tokens": 15000, "cache_creation_input_tokens": 400}
-    assert pricing.usage_tokens(usage) == (120 + 1500 + 500, 50, False)  # cache read at 0.1, writes at 1.25
+    usd, estimated = pricing.usage_cost(pricing.Price(1.0, 2.0, "t"), usage)
+    assert usd == pytest.approx((120 + 1500 + 500 + 50 * 2.0) / 1e6) and not estimated  # cache read at 0.1, writes at 1.25
     huge = {"a": {"mode": "chat", "input_cost_per_token": 1e308, "output_cost_per_token": 1e-6}, "b": {"mode": "chat", "input_cost_per_token": 2.5e-6, "output_cost_per_token": 1e-5}}
     assert pricing.convert_litellm(huge) == {"b": [2.5, 10.0]}  # one absurd entry is skipped, not the table
     assert pricing.prices_problems({"fetched": "2099-01-01", "prices": {"b": [2.5, 10.0]}}) == ["'fetched' date 2099-01-01 is in the future"]

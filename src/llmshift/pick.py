@@ -200,9 +200,8 @@ def _baseline_costs(cases: list[TestCase], baseline: str | None, overrides: dict
             continue
         used[model] = price
         usage = (case.baseline or {}).get("usage") or {}
-        inp, out, guessed = pricing.usage_tokens(usage, _prompt_text(case), _output_text(case.baseline_output, case.baseline_tool_calls))
+        costs[case.id], guessed = pricing.usage_cost(price, usage, _prompt_text(case), _output_text(case.baseline_output, case.baseline_tool_calls))
         estimated = estimated or guessed
-        costs[case.id] = price.cost(inp, out)
     prices = [{"model": m, **(_price_dict(p) or {})} for m, p in used.items()]
     return costs, estimated, unpriced, prices
 
@@ -239,9 +238,8 @@ def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, Tes
     for c in result.cases:
         if c.status == "error" or c.id not in cases:
             continue
-        inp, out, guessed = pricing.usage_tokens(c.usage, _prompt_text(cases[c.id]), _output_text(c.candidate_output, c.candidate_tool_calls))
+        costs[c.id], guessed = pricing.usage_cost(cand.price, c.usage, _prompt_text(cases[c.id]), _output_text(c.candidate_output, c.candidate_tool_calls))
         cand.estimated = cand.estimated or guessed
-        costs[c.id] = cand.price.cost(inp, out)
     if not costs:
         return
     cand.case_costs = costs

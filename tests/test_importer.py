@@ -92,7 +92,7 @@ def test_convert_with_output_items_and_fidelity():
     assert case.baseline == {"output": "Hardware", "model": "gpt-4.1-2025-04-14"}
     assert case.vars == ITEMS[0] and case.group.startswith("ticket-categories-")
     checks = {c["name"]: c for c in case.checks}
-    assert checks["Match label"] == {"type": "equals", "value": "Hardware", "category": "custom", "name": "Match label", "grader_id": "Match label-1111", "origin": "openai_evals:string_check"}
+    assert checks["Match label"] == {"type": "equals", "value": "Hardware", "strip": False, "category": "custom", "name": "Match label", "grader_id": "Match label-1111", "origin": "openai_evals:string_check"}  # exact, as OpenAI's eq
     assert checks["Mentions"]["type"] == "contains" and checks["Mentions"]["case_sensitive"] is False
     assert checks["Similar"]["type"] == "similarity" and checks["Similar"]["threshold"] == 0.8
     assert checks["Judge"]["type"] == "llm_label" and checks["Judge"]["model"] == "o3-mini" and "sampling_params" not in checks["Judge"]

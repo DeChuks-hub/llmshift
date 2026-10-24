@@ -4,7 +4,8 @@
     python scripts/update_pricing.py litellm.json    # or convert a local copy
 
 Keeps chat, completion, responses and embedding models that have token prices and
-stores them as USD per 1M tokens: {"model": [input, output]}. The conversion and its
+stores them as USD per 1M tokens: {"model": [input, output]}, or [input, output, cache
+read, cache write] for models with prompt-cache prices. The conversion and its
 checks are llmshift's own (pricing.convert_litellm and pricing.prices_problems), so a
 table `llmshift update --prices` would refuse is never written here either.
 """
@@ -36,7 +37,8 @@ def main() -> None:
     if len(prices) < 500:
         raise SystemExit(f"only {len(prices)} priced models found; the source format may have changed")
     data = {
-        "about": "Model prices for llmshift pick and cost estimates, in USD per 1M tokens [input, output]. "
+        "about": "Model prices for llmshift pick and cost estimates, in USD per 1M tokens [input, output], "
+        "or [input, output, cache read, cache write] with prompt-cache prices. "
         "Converted from LiteLLM's model_prices_and_context_window.json (MIT License, Copyright (c) 2023 Berri AI; full text in THIRD_PARTY_NOTICES).",
         "source": SOURCE,
         "fetched": _dt.date.today().isoformat(),

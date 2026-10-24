@@ -801,14 +801,18 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
     s = result.summary
     changed = sorted((c for c in result.cases if c.status != "pass"), key=lambda c: (_STATUS_ORDER.get(c.status, 3), c.group, c.id))
     shown = changed[: int(args.get("max_cases_shown", 10))]
+    unchecked = s.get("unchecked", 0)
     if s.get("evaluated", 0) == 0:
-        verdict, ok = "every request failed; see the cases for the errors", False
+        verdict = "no case could be checked: a check could not run; see the cases" if unchecked else "every request failed; see the cases for the errors"
+        ok = False
     elif result.min_pass_rate is not None:
-        ok = result.passed
-        verdict = f"pass rate {s['pass_rate']:.0%} {'meets' if ok else 'is below'} the {result.min_pass_rate:.0%} threshold"
+        ok = result.passed and not unchecked
+        verdict = f"pass rate {s['pass_rate']:.0%} {'meets' if result.passed else 'is below'} the {result.min_pass_rate:.0%} threshold"
     else:
-        ok = not (s.get("failed") or s.get("errors"))
+        ok = not (s.get("failed") or s.get("errors") or unchecked)
         verdict = f"{s.get('passed', 0)} unchanged, {s.get('warned', 0)} changed, {s.get('failed', 0)} failed, {s.get('errors', 0)} errors"
+    if unchecked and s.get("evaluated", 0):
+        verdict += f"; {unchecked} case{'s' if unchecked != 1 else ''} could not be checked (a check could not run), so the run is inconclusive"
     out = {
         "candidate": result.candidate,
         "baseline": result.baseline,
@@ -818,7 +822,7 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
         "min_pass_rate": result.min_pass_rate,
         "summary": {
             k: s.get(k)
-            for k in ("total", "evaluated", "passed", "warned", "failed", "errors", "pass_rate", "pass_rate_range", "cases_needed",
+            for k in ("total", "evaluated", "passed", "warned", "failed", "errors", "unchecked", "pass_rate", "pass_rate_range", "cases_needed",
                       "repeats", "flaky", "flaky_cases", "unchanged_rate", "latency_ms", "tokens", "agent", "vs_baseline")
             if s.get(k) is not None
         },

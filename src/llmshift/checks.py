@@ -120,6 +120,7 @@ CATEGORY_TITLES = {
     "safety": "Refusals",
     "custom": "Imported graders",
     "errors": "API errors",
+    "unchecked": "Could not check",
 }
 
 
@@ -410,7 +411,10 @@ def _norm_ws(s: str) -> str:
     return " ".join(s.split())
 
 
-def c_equals(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> Outcome:
+def _equal(check: dict, sample: Sample, case: TestCase) -> tuple[str, list[str], bool]:
+    """The answer, the values, and whether the answer equals one of them: stripped of spaces
+    and newlines unless strip is false, as numbers with numeric, in any case with
+    case_sensitive false. equals and not_equals both compare this way."""
     options = _values(check, case)
     text = _target(check, sample, case)
     if check.get("strip", True):
@@ -419,15 +423,21 @@ def c_equals(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> 
     if check.get("numeric"):
         try:
             got = float(re.sub(r"[,$€£%\s]", "", text))
-            if any(abs(got - float(re.sub(r"[,$€£%\s]", "", o))) <= float(check.get("tolerance", 1e-9)) for o in options):
-                return PASS()
+            tolerance = float(check.get("tolerance", 1e-9))
+            return text, options, any(abs(got - float(re.sub(r"[,$€£%\s]", "", o))) <= tolerance for o in options)
         except ValueError:
-            pass
-        return FAIL(f"expected {_fmt(options[0] if options else '')}, got {_fmt(text)}")
+            return text, options, False
     cs = check.get("case_sensitive", True)
     probe = text if cs else text.lower()
-    if any(probe == (o if cs else o.lower()) for o in options):
+    return text, options, any(probe == (o if cs else o.lower()) for o in options)
+
+
+def c_equals(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> Outcome:
+    text, options, equal = _equal(check, sample, case)
+    if equal:
         return PASS()
+    if check.get("numeric"):
+        return FAIL(f"expected {_fmt(options[0] if options else '')}, got {_fmt(text)}")
     hint = ""
     if any(tokenize(text) == tokenize(o) for o in options):
         hint = " (differs only in case/punctuation/spacing)"
@@ -436,9 +446,9 @@ def c_equals(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> 
 
 
 def c_not_equals(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> Outcome:
-    options = _values(check, case)
-    text = _target(check, sample, case)
-    if text in options:
+    """The opposite of equals with the same settings: "N/A\\n" equals the forbidden "N/A"."""
+    text, _, equal = _equal(check, sample, case)
+    if equal:
         return FAIL(f"output equals the forbidden value {_fmt(text)}")
     return PASS()
 

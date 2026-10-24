@@ -22,8 +22,8 @@ _DATA_URL_RE = re.compile(r"^data:([\w.+/-]+);base64,(.*)$", re.S)
 # temperature other than 1, or any top_p or top_k, is a 400 error. (API version 2026-10-21
 # rejects the three on every model, even at their defaults.)
 _CLAUDE_VERSION_RE = re.compile(
-    r"claude-(?:(?:opus|sonnet|haiku)-(?P<major>\d+)(?:[-.](?P<minor>\d{1,2})(?!\d))?"
-    r"|(?P<major2>\d+)(?:[-.](?P<minor2>\d{1,2})(?!\d))?-(?:opus|sonnet|haiku))"
+    r"claude-(?:(?P<family>opus|sonnet|haiku)-(?P<major>\d+)(?:[-.](?P<minor>\d{1,2})(?!\d))?"
+    r"|(?P<major2>\d+)(?:[-.](?P<minor2>\d{1,2})(?!\d))?-(?P<family2>opus|sonnet|haiku))"
 )
 _SAMPLING = (("temperature", "temperature"), ("top_p", "top_p"), ("top_k", "top_k"), ("stop", "stop_sequences"))  # request name, API name
 
@@ -50,6 +50,60 @@ def rejected_sampling(model: str, params: dict) -> list[str]:
         out.append(f"temperature={json.dumps(temperature, default=str)}")
     out += [f"{key}={json.dumps(params[key], default=str)}" for key in ("top_p", "top_k") if params.get(key) is not None]
     return out
+
+
+def _claude_version(model: str) -> tuple[str, int, int] | None:
+    """(family, major, minor): ("opus", 4, 7) for claude-opus-4-7. Fable and Mythos are newer
+    than any numbered model."""
+    model = str(model or "").lower()
+    if re.search(r"claude-(?:fable|mythos)\b", model):
+        return "fable", 99, 0
+    m = _CLAUDE_VERSION_RE.search(model)
+    if not m:
+        return None
+    return m.group("family") or m.group("family2"), int(m.group("major") or m.group("major2")), int(m.group("minor") or m.group("minor2") or 0)
+
+
+def takes_effort(model: str) -> bool:
+    """Whether a Claude model takes output_config.effort (Opus and Sonnet 4.6 and later,
+    Haiku 5 and later, Fable and Mythos)."""
+    v = _claude_version(model)
+    return v is not None and (v[0] == "fable" or (v[0] in ("opus", "sonnet") and v[1:] >= (4, 6)) or (v[0] == "haiku" and v[1] >= 5))
+
+
+def rejected_thinking(model: str, params: dict) -> list[str]:
+    """The thinking setting in `params` that `model` rejects with a 400 error: a token budget
+    on 4.7 and later (adaptive thinking only), disabled thinking on Opus and Sonnet 5.5."""
+    thinking = params.get("thinking")
+    if not isinstance(thinking, dict):
+        return []
+    v = _claude_version(model)
+    kind = thinking.get("type")
+    if kind == "enabled" and default_sampling_only(model):
+        return [f"thinking={json.dumps(thinking, sort_keys=True)}"]
+    if kind == "disabled" and v is not None and v[0] in ("opus", "sonnet") and v[1:] >= (5, 5):
+        return [f"thinking={json.dumps(thinking, sort_keys=True)}"]
+    return []
+
+
+def _thinking_body(model: str, thinking: Any) -> dict | None:
+    """The thinking object to send: as recorded, or what this model takes instead (adaptive
+    for a budget on 4.7 and later; nothing, which is adaptive there, for disabled on 5.5)."""
+    if not isinstance(thinking, dict) or thinking.get("type") not in ("enabled", "adaptive", "disabled"):
+        return None
+    if rejected_thinking(model, {"thinking": thinking}):
+        if thinking["type"] == "disabled":
+            return None
+        thinking = {"type": "adaptive", **({"display": thinking["display"]} if thinking.get("display") else {})}
+    body = {"type": thinking["type"]}
+    budget = thinking.get("budget_tokens")
+    if body["type"] == "enabled":
+        if not isinstance(budget, int) or isinstance(budget, bool):
+            return {"type": "adaptive"} if takes_effort(model) else None
+        body["budget_tokens"] = max(1024, budget)  # the API's minimum (a Gemini budget may be smaller)
+    if isinstance(thinking.get("display"), str):
+        body["display"] = thinking["display"]
+    return body
 
 
 def json_instruction(response_format: Any) -> str | None:
@@ -250,9 +304,23 @@ class AnthropicProvider(Provider):
             schema = (rf.get("json_schema") or {}).get("schema")
             if schema:
                 body["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        # Extended thinking as the app asked for it (a recorded thinking object, or a budget from
+        # Gemini's thinkingConfig), and how hard to think (reasoning_effort, Claude's effort).
+        thinking = _thinking_body(self.model, params.get("thinking"))
+        if thinking:
+            body["thinking"] = thinking
+            if thinking.get("budget_tokens") and body["max_tokens"] <= thinking["budget_tokens"]:
+                body["max_tokens"] = thinking["budget_tokens"] + body["max_tokens"]  # the budget must be below max_tokens
+        effort = params.get("reasoning_effort")
+        if isinstance(effort, str) and effort and takes_effort(self.model):
+            body["output_config"] = {**(body.get("output_config") or {}), "effort": {"none": "low", "minimal": "low"}.get(effort, effort)}
         if drops:
             with self._lock:
                 for key in self._drop:
+                    if key == "effort" and isinstance(body.get("output_config"), dict):
+                        body["output_config"].pop("effort", None)
+                        if not body["output_config"]:
+                            body.pop("output_config")
                     body.pop(key, None)
                 for key, values in self._refused.items():
                     if key in body and value_key(body[key]) in values:
@@ -267,6 +335,10 @@ class AnthropicProvider(Provider):
             out.append("assistant prefill")
         if (full.get("tool_choice") or {}).get("type") in ("any", "tool") and (sent.get("tool_choice") or {}).get("type") not in ("any", "tool"):
             out.append("tool_choice")
+        if "thinking" in full and "thinking" not in sent:
+            out.append("thinking")
+        if "effort" in (full.get("output_config") or {}) and "effort" not in (sent.get("output_config") or {}):
+            out.append("reasoning_effort")
         return out
 
     @staticmethod
@@ -312,6 +384,16 @@ class AnthropicProvider(Provider):
         if "tool_choice" in lower and isinstance(body.get("tool_choice"), dict) and body["tool_choice"].get("type") in ("any", "tool"):
             body["tool_choice"] = {"type": "auto"}
             self._note(f"{self.model} does not support forced tool choice; used tool_choice auto")
+            return True
+        if "effort" in lower and "effort" in (body.get("output_config") or {}):
+            body["output_config"].pop("effort")
+            if not body["output_config"]:
+                body.pop("output_config")
+            self._note(f"dropped reasoning effort for {self.model} ({err.message[:80]})", drop="effort")
+            return True
+        if "thinking" in lower and "thinking" in body:  # a model with no extended thinking, or not this kind
+            body.pop("thinking")
+            self._note(f"dropped extended thinking for {self.model} ({err.message[:80]})", drop="thinking")
             return True
         if "output_config" in lower and "output_config" in body:
             body.pop("output_config", None)

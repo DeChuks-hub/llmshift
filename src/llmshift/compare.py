@@ -45,7 +45,7 @@ def with_judge_check(case: TestCase) -> TestCase:
 _OPTIONAL_FIELDS = (
     "candidate_tool_calls", "error", "latency_ms", "usage", "finish_reason", "model", "fingerprint", "unstable",
     "baseline_live_output", "baseline_latency_ms", "baseline_model", "baseline_live_status", "raw_status",
-    "runs", "pass_fraction", "run_statuses", "flaky", "trace", "baseline_trace", "cost_usd", "baseline_cost_usd",
+    "runs", "pass_fraction", "run_statuses", "flaky", "trace", "baseline_trace", "cost_usd", "baseline_cost_usd", "unchecked",
 )
 
 
@@ -53,7 +53,7 @@ _OPTIONAL_FIELDS = (
 class CaseResult:
     id: str
     group: str
-    status: str  # pass | warn | fail | error
+    status: str  # pass | warn | fail | error (no answer, or unchecked)
     input_preview: str = ""
     baseline_output: str = ""
     candidate_output: str = ""
@@ -79,6 +79,7 @@ class CaseResult:
     baseline_trace: list[str] = field(default_factory=list)
     cost_usd: float | None = None
     baseline_cost_usd: float | None = None
+    unchecked: bool = False  # answered, but a check could not run: no verdict, not the model's failure
 
     @property
     def failing(self) -> list[CheckResult]:
@@ -165,12 +166,13 @@ class CompareResult:
         return s.get("pass_rate", 0.0) + 1e-9 >= threshold
 
 
-def request_rejections(model: str, params: dict, resp: Response) -> list[str]:
+def request_rejections(model: str, params: dict, resp: Response, kind: str | None = "anthropic") -> list[str]:
     """What `model` rejects of a request as it is sent (temperature=0, assistant prefill, ...).
-    Each was left out to test the answer, so the real call fails with a 400 error."""
-    from .providers.anthropic import rejected_sampling
+    Each was left out to test the answer, so the real call fails with a 400 error. Claude's
+    thinking only goes out through the Anthropic API (`kind`), not through OpenAI-style proxies."""
+    from .providers.anthropic import rejected_sampling, rejected_thinking
 
-    found = rejected_sampling(model, params)
+    found = rejected_sampling(model, params) + (rejected_thinking(model, params) if kind == "anthropic" else [])
     names = {item.split("=", 1)[0] for item in found}
     for name in resp.rejected:
         if name not in names:
@@ -191,25 +193,38 @@ def rejection_check(model: str, rejected: list[str], ctx: CheckContext) -> Check
     from .checks import severity_of
 
     them = "it" if len(rejected) == 1 else "them"
-    message = (
-        f"{model} rejects {', '.join(rejected)} as this request sends {them}: the real call fails with a 400 error "
-        f"(llmshift left {them} out to test the answer). Remove {them} from your code"
-    )
-    flags = " ".join(f"--drop-param {item.split('=', 1)[0]}" for item in rejected if "=" in item)
-    message += f", then test with {flags}." if flags else "."
+    plain = [item for item in rejected if not item.startswith("thinking=")]
+    message = f"{model} rejects {', '.join(rejected)} as this request sends {them}: the real call fails with a 400 error "
+    if plain:
+        those = "it" if len(plain) == 1 else "them"
+        message += f"(llmshift left {those} out to test the answer). Remove {those} from your code"
+        flags = " ".join(f"--drop-param {item.split('=', 1)[0]}" for item in plain if "=" in item)
+        message += f", then test with {flags}." if flags else "."
+    else:
+        message += "(llmshift used adaptive thinking to test the answer)."
+    if len(plain) < len(rejected):  # a thinking budget on 4.7 and later, or disabled thinking on 5.5
+        message += ' Send thinking as {"type": "adaptive"}; output_config.effort sets how much it thinks.'
     return CheckResult("request", "request", severity_of({"type": "request"}, ctx), "fail", message, name="request settings", details={"rejected": rejected})
 
 
 def case_status(results: list[CheckResult], error: str | None) -> str:
-    """fail: an error-level check failed, or could not be evaluated (unverified is not a pass);
+    """fail: an error-level check failed; error: no answer, or an error-level check could not
+    run (an invalid regex, a judge that cannot be reached: the test failed, not the model);
     warn: a warning-level check failed; pass otherwise. Info-level checks never count."""
     if error:
         return "error"
-    if any(r.status in ("fail", "error") and r.severity == "error" for r in results):
+    if any(r.status == "fail" and r.severity == "error" for r in results):
         return "fail"
-    if any(r.status in ("fail", "error") and r.severity == "warn" for r in results):
+    if any(r.status == "error" and r.severity == "error" for r in results):
+        return "error"
+    if any(r.status == "fail" and r.severity == "warn" for r in results):
         return "warn"
     return "pass"
+
+
+def not_checked(results: list[CheckResult]) -> list[CheckResult]:
+    """The error-level checks that could not run, which leave the case without a verdict."""
+    return [r for r in results if r.status == "error" and r.severity == "error"]
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -263,6 +278,8 @@ def failure_patterns(result: CheckResult) -> list[str]:
         return out or ["tool arguments changed"]
     if result.type == "llm_judge" and d.get("differences"):
         return [_short(str(x)) for x in d["differences"][:3]]
+    if result.type == "regex":  # the message quotes the pattern: its groups are not asides (/^(Yes|No)$/ is not /^$/)
+        return [_short(result.message or "regex", 120)]
     msg = (result.message or result.type)[:300]  # a pattern is a short phrase; the regex below is quadratic in a long one
     for _ in range(10):  # asides in brackets, innermost first, so "(a (b) c)" goes whole; the "(s)" of "call(s)" stays
         shorter = re.sub(r"\s*\((?!s\))[^()]*\)", "", msg)
@@ -288,6 +305,7 @@ SKIP_REASONS = {
 
 def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = None) -> dict:
     counts = Counter(c.status for c in cases)
+    unchecked = sum(1 for c in cases if c.unchecked)
     evaluated = len(cases) - counts["error"]
     by_category: dict[str, dict] = defaultdict(lambda: {"fail": 0, "warn": 0, "patterns": Counter(), "examples": {}})
     by_check: dict[str, Counter] = defaultdict(Counter)
@@ -305,19 +323,25 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
                 reason = (r.details or {}).get("skip_reason")
                 if reason in SKIP_REASONS:
                     skipped[SKIP_REASONS[reason]] += 1
-            if r.status in ("fail", "error") and r.severity in ("error", "warn"):
+            if r.status == "fail" and r.severity in ("error", "warn"):
                 (cats_fail if r.severity == "error" else cats_warn).add(r.category)
                 for p in failure_patterns(r):
                     by_category[r.category]["patterns"][p] += 1
                     by_category[r.category]["examples"].setdefault(p, r.message)
+        for r in not_checked(c.checks) if c.unchecked else ():
+            reason = f"{r.name or r.type}: " + _short(r.message or "could not run", 110)
+            by_category["unchecked"]["patterns"][reason] += 1
+            by_category["unchecked"]["examples"].setdefault(reason, r.message)
         for cat in cats_fail:
             by_category[cat]["fail"] += 1
         for cat in cats_warn - cats_fail:
             by_category[cat]["warn"] += 1
-    if counts["error"]:
-        by_category["errors"]["fail"] = counts["error"]
+    if unchecked:
+        by_category["unchecked"]["fail"] = unchecked
+    if counts["error"] > unchecked:
+        by_category["errors"]["fail"] = counts["error"] - unchecked
         for c in cases:
-            if c.status == "error":
+            if c.status == "error" and not c.unchecked:
                 by_category["errors"]["patterns"][re.sub(r"\s*\(.*?\)$", "", (c.error or "error"))[:90]] += 1
     latencies = [c.latency_ms for c in cases if c.latency_ms is not None and c.status != "error"]
     base_lat = [c.baseline_latency_ms for c in cases if c.baseline_latency_ms is not None]
@@ -328,10 +352,12 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
     cand_words = [word_count(c.candidate_output) for c in both]
     base_words = [word_count(c.baseline_output) for c in both]
     total = len(cases)
-    # Each case counts by the share of its runs that passed (0 or 1 without --repeat).
-    # Errors count against the pass rate: a case that could not be checked has not passed.
-    fractions = [c.pass_fraction if c.pass_fraction is not None else float(c.status in ("pass", "warn")) for c in cases]
-    rate, low, high = pass_rate_interval(fractions)
+    # Each case counts by the share of its runs that passed (0 or 1 without --repeat). A request
+    # that got no answer counts against the pass rate; a case whose check could not run (the
+    # test's fault, not the model's) is left out of it and reported apart.
+    checked = [c for c in cases if not c.unchecked]
+    fractions = [c.pass_fraction if c.pass_fraction is not None else float(c.status in ("pass", "warn")) for c in checked]
+    rate, low, high = pass_rate_interval(fractions) if fractions else (0.0, 0.0, 0.0)
     flaky = [c.id for c in cases if c.flaky]
     return {
         "total": total,
@@ -339,14 +365,15 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
         "passed": counts["pass"],
         "warned": counts["warn"],
         "failed": counts["fail"],
-        "errors": counts["error"],
-        "pass_rate": stored_rate(rate) if total else 0.0,
-        "pass_rate_range": [round(low, 4), round(high, 4)] if total else None,
-        "cases_needed": cases_needed(rate) if total else None,  # for a pass rate accurate to +/- 5 points
+        "errors": counts["error"] - unchecked,
+        "unchecked": unchecked,
+        "pass_rate": stored_rate(rate) if fractions else 0.0,
+        "pass_rate_range": [round(low, 4), round(high, 4)] if fractions else None,
+        "cases_needed": cases_needed(rate) if fractions else None,  # for a pass rate accurate to +/- 5 points
         "repeats": max((c.runs for c in cases), default=1),
         "flaky": len(flaky),
         "flaky_cases": flaky[:50],
-        "unchanged_rate": round(counts["pass"] / total, 4) if total else 0.0,
+        "unchanged_rate": round(counts["pass"] / len(checked), 4) if checked else 0.0,
         "by_category": {
             k: {
                 "fail": v["fail"],
@@ -372,6 +399,12 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
 def build_insights(summary: dict, cases: list[CaseResult], adapt: list[str]) -> list[str]:
     out = []
     evaluated = summary.get("evaluated", 0)
+    if summary.get("unchecked"):
+        n = summary["unchecked"]
+        out.append(
+            f"{n} case{'s' if n != 1 else ''} could not be checked, so the run is inconclusive: a check could not run "
+            "(see \"Could not check\"). The pass rate leaves them out; fix the check or the judge and run again."
+        )
     if summary.get("truncated"):
         out.append(
             f"{summary['truncated']} response(s) hit the output token limit (finish_reason=length). Reasoning models count "
@@ -544,7 +577,7 @@ def run_compare(
             return result
         checks = run_checks(eval_case, Sample.from_response(resp), ctx)
         sent = {**case.params, **{k: v for k, v in (overrides or {}).items() if v is not None}}
-        rejected = request_rejections(cand.model, sent, resp)
+        rejected = request_rejections(cand.model, sent, resp, getattr(cand, "kind", None))
         if rejected:
             checks.append(rejection_check(cand.spec, rejected, ctx))
         result.raw_status = case_status(checks, None)
@@ -557,6 +590,10 @@ def run_compare(
                     checks[i] = CheckResult(c.type, c.category, c.severity, "skip", f"also fails on the old model (noise): {c.message}", c.score, c.name, c.details)
         result.checks = checks
         result.status = case_status(checks, None)
+        if result.status == "error":  # answered, but a check that decides the case could not run
+            result.unchecked = True
+            reasons = dict.fromkeys(f"{r.name or r.type}: {r.message}" for r in not_checked(checks))
+            result.error = "could not check: " + "; ".join(reasons)
         return result
 
     def evaluate_all(case: TestCase) -> CaseResult:
@@ -632,7 +669,7 @@ def _agent_summary(cases: list[CaseResult]) -> dict | None:
 
 def _price_agent_tasks(results: list[CaseResult], cases: list[TestCase], cand_spec: str, base_spec: str | None, config: dict) -> None:
     """Cost of each agent task, old and new, where prices are known."""
-    from .pricing import overrides_from_config, price_for
+    from .pricing import overrides_from_config, price_for, usage_cost
 
     try:
         overrides = overrides_from_config(config)
@@ -646,11 +683,11 @@ def _price_agent_tasks(results: list[CaseResult], cases: list[TestCase], cand_sp
             continue
         usage = r.usage or {}
         if new_price is not None and isinstance(usage.get("input_tokens"), int):
-            r.cost_usd = round(new_price.cost(usage["input_tokens"], usage.get("output_tokens") or 0), 8)
+            r.cost_usd = round(usage_cost(new_price, usage)[0], 8)
         old_price = price_for(base_spec or case.baseline_model or (config or {}).get("baseline") or "", overrides)
         old_usage = (case.baseline or {}).get("usage") or {}
         if old_price is not None and isinstance(old_usage.get("input_tokens"), (int, float)):
-            r.baseline_cost_usd = round(old_price.cost(old_usage["input_tokens"], old_usage.get("output_tokens") or 0), 8)
+            r.baseline_cost_usd = round(usage_cost(old_price, old_usage)[0], 8)
 
 
 _ORDER = {"pass": 0, "warn": 1, "fail": 2, "error": 3}
@@ -661,15 +698,16 @@ def combine_runs(runs: list[CaseResult]) -> CaseResult:
     on a tie), with the share of runs that passed and whether the case is flaky."""
     if len(runs) == 1:
         return runs[0]
-    statuses = [r.status for r in runs]
+    checked = [r for r in runs if not r.unchecked] or runs  # a run whose check could not run is no verdict
+    statuses = [r.status for r in checked]
     counts = Counter(statuses)
     shown = max(counts, key=lambda st: (counts[st], _ORDER.get(st, 0)))
-    result = next(r for r in runs if r.status == shown)
+    result = next(r for r in checked if r.status == shown)
     passed = sum(1 for st in statuses if st in ("pass", "warn"))
     answered = sum(1 for st in statuses if st != "error")
     result.runs = len(runs)
-    result.run_statuses = statuses
-    result.pass_fraction = round(passed / len(runs), 4)  # a run that got no answer has not passed
+    result.run_statuses = ["unchecked" if r.unchecked else r.status for r in runs]
+    result.pass_fraction = round(passed / len(checked), 4)  # a run that got no answer has not passed
     # Flaky is the model answering differently, not a request that failed (a timeout, a 429).
     result.flaky = 0 < passed < answered
     return result
@@ -680,7 +718,7 @@ def paired_comparison(results: list[CaseResult]) -> dict:
     cases break than got fixed, beyond what chance explains?"""
     regressions = improvements = compared = 0
     for c in results:
-        if c.baseline_live_status in (None, "error") or c.raw_status is None:
+        if c.baseline_live_status in (None, "error") or c.raw_status in (None, "error"):  # no answer, or not checked
             continue
         compared += 1
         old_ok, new_ok = c.baseline_live_status in ("pass", "warn"), c.raw_status in ("pass", "warn")

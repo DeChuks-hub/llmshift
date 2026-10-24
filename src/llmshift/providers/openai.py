@@ -63,6 +63,18 @@ def _arguments_str(args: Any) -> str:
     return json.dumps(args if args is not None else {}, ensure_ascii=False)
 
 
+def _usage(usage: dict, inp: str, out: str, details: str) -> dict:
+    """Input and output tokens as reported (reasoning tokens are in the output), and the
+    cached share of the input, which costs the cache price."""
+    if not usage:
+        return {}
+    found = {"input_tokens": usage.get(inp), "output_tokens": usage.get(out)}
+    cached = usage.get(details).get("cached_tokens") if isinstance(usage.get(details), dict) else None
+    if isinstance(cached, int) and not isinstance(cached, bool) and cached > 0:
+        found["cached_input_tokens"] = cached
+    return found
+
+
 def _parse_arguments(args: Any) -> Any:
     if isinstance(args, str):
         try:
@@ -323,7 +335,7 @@ class OpenAIProvider(Provider):
             tool_calls=tool_calls,
             model=data.get("model"),
             finish_reason=choice.get("finish_reason"),
-            usage={"input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens")} if usage else {},
+            usage=_usage(usage, "prompt_tokens", "completion_tokens", "prompt_tokens_details"),
             fingerprint=data.get("system_fingerprint"),
             refusal=message.get("refusal") or None,
         )
@@ -364,7 +376,7 @@ class OpenAIProvider(Provider):
             tool_calls=tool_calls,
             model=data.get("model"),
             finish_reason=finish,
-            usage={"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens")} if usage else {},
+            usage=_usage(usage, "input_tokens", "output_tokens", "input_tokens_details"),
             refusal=refusal,
         )
 

@@ -55,6 +55,8 @@ class Price:
     output: float
     source: str  # where the price came from, for reports
     key: str = ""
+    cache_read: float | None = None  # input read from the provider's prompt cache, where the list says
+    cache_write: float | None = None  # input written to it (Anthropic)
 
     def cost(self, input_tokens: float, output_tokens: float) -> float:
         return (max(0.0, input_tokens) * self.input + max(0.0, output_tokens) * self.output) / 1_000_000
@@ -70,8 +72,10 @@ def _per_million(value: Any) -> float | None:
     return float(f"{per_million:.6g}") if math.isfinite(per_million) else None  # one absurd entry is skipped, not the table
 
 
-def convert_litellm(table: Any) -> dict[str, list[float]]:
-    """LiteLLM's model_prices_and_context_window.json -> {model: [input, output]} per 1M tokens."""
+def convert_litellm(table: Any) -> dict[str, list]:
+    """LiteLLM's model_prices_and_context_window.json -> {model: [input, output]} per 1M
+    tokens, or [input, output, cache read, cache write] (null where unknown) for a model
+    with prompt-cache prices. Readers before 0.1.1 use the first two."""
     prices = {}
     for key, entry in (table.items() if isinstance(table, dict) else ()):
         if key == "sample_spec" or not isinstance(entry, dict) or entry.get("mode") not in _MODES:
@@ -79,8 +83,14 @@ def convert_litellm(table: Any) -> dict[str, list[float]]:
         inp = _per_million(entry.get("input_cost_per_token"))
         out = _per_million(entry.get("output_cost_per_token", 0.0))
         if inp is not None and out is not None:
-            prices[str(key)] = [inp, out]
+            read = _per_million(entry.get("cache_read_input_token_cost"))
+            write = _per_million(entry.get("cache_creation_input_token_cost"))
+            prices[str(key)] = [inp, out] if read is None and write is None else [inp, out, read, write]
     return dict(sorted(prices.items()))
+
+
+def _valid_price(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0
 
 
 def prices_problems(data: Any, *, min_prices: int = 1) -> list[str]:
@@ -103,7 +113,7 @@ def prices_problems(data: Any, *, min_prices: int = 1) -> list[str]:
     bad = [
         k for k, v in prices.items()
         if not isinstance(v, (list, tuple)) or len(v) < 2
-        or not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) and x >= 0 for x in v[:2])
+        or not all(_valid_price(x) for x in v[:2]) or not all(x is None or _valid_price(x) for x in v[2:4])
     ]
     if bad:
         problems.append(f"{len(bad)} invalid price entries, e.g. {bad[0]!r}")
@@ -184,7 +194,14 @@ def overrides_from_config(config: dict | None) -> dict[str, Price]:
     for model, value in section.items():
         if not isinstance(value, dict) or "input" not in value:
             raise ValueError(f"pricing.{model} must look like {{input: 2.5, output: 10}} (USD per 1M tokens)")
-        out[str(model).strip().lower()] = Price(_number(value["input"], f"pricing.{model}.input"), _number(value.get("output", 0), f"pricing.{model}.output"), "config", str(model))
+        cache = {
+            field: _number(value[name], f"pricing.{model}.{name}")
+            for field, name in (("cache_read", "cached_input"), ("cache_write", "cache_write"))
+            if value.get(name) is not None
+        }
+        out[str(model).strip().lower()] = Price(
+            _number(value["input"], f"pricing.{model}.input"), _number(value.get("output", 0), f"pricing.{model}.output"), "config", str(model), **cache
+        )
     return out
 
 
@@ -226,7 +243,8 @@ def price_for(spec: str, overrides: dict[str, Price] | None = None) -> Price | N
         if entry:
             if not float(entry[0]) and not float(entry[1]):
                 continue  # 0 / 0 in the price list means unknown there, not free: try the other names
-            return Price(float(entry[0]), float(entry[1]), f"LiteLLM price list, {fetched}", key)
+            read, write = (float(x) if _valid_price(x) else None for x in (list(entry[2:4]) + [None, None])[:2])
+            return Price(float(entry[0]), float(entry[1]), f"LiteLLM price list, {fetched}", key, read, write)
     return None
 
 
@@ -244,27 +262,46 @@ def estimate_tokens(text: Any) -> int:
     return cjk + (len(text) - cjk + 3) // 4
 
 
-# Anthropic reports prompt-cache tokens apart from input_tokens and bills them against the
-# input price: writing the cache at 1.25 times it (5-minute cache), reading at 0.1 times.
+# Prompt-cache tokens. Anthropic reports them beside input_tokens and, where the price list
+# has no cache prices, bills them against the input price: writing the cache at 1.25 times it
+# (5-minute cache), reading at 0.1 times. OpenAI and Gemini count cached tokens inside their
+# input tokens; their parsers keep that share as cached_input_tokens.
 CACHE_RATES = {"cache_creation_input_tokens": 1.25, "cache_read_input_tokens": 0.1}
 CACHE_FIELDS = tuple(CACHE_RATES)
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cached_input_tokens", *CACHE_FIELDS)
 
 
-def usage_tokens(usage: dict | None, prompt: Any = None, output: Any = None) -> tuple[int, int, bool]:
-    """(input, output, estimated) tokens, from reported usage where possible."""
+def _count(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return max(0.0, float(value))
+
+
+def usage_cost(price: Price, usage: dict | None, prompt: Any = None, output: Any = None) -> tuple[float, bool]:
+    """What one answer cost in USD, and whether its token counts were estimated (no usage
+    reported). Cached input costs the model's cache price; without one in the list, an
+    OpenAI or Gemini cached share costs the full input price."""
     usage = usage or {}
-    inp, out = usage.get("input_tokens"), usage.get("output_tokens")
+    inp, out = _count(usage.get("input_tokens")), _count(usage.get("output_tokens"))
     estimated = False
-    if not isinstance(inp, (int, float)) or isinstance(inp, bool):
-        inp, estimated = estimate_tokens(prompt), True
-    else:  # Anthropic counts prompt-cache tokens apart from input_tokens: as input at its cache rates
-        for key, rate in CACHE_RATES.items():
-            extra = usage.get(key)
-            if isinstance(extra, (int, float)) and not isinstance(extra, bool) and extra > 0:
-                inp += extra * rate
-    if not isinstance(out, (int, float)) or isinstance(out, bool):
-        out, estimated = estimate_tokens(output), True
-    return int(inp), int(out), estimated
+    cached = read = write = 0.0
+    if inp is None:
+        inp, estimated = float(estimate_tokens(prompt)), True
+    else:
+        cached = min(_count(usage.get("cached_input_tokens")) or 0.0, inp)
+        read = _count(usage.get("cache_read_input_tokens")) or 0.0
+        write = _count(usage.get("cache_creation_input_tokens")) or 0.0
+    if out is None:
+        out, estimated = float(estimate_tokens(output)), True
+    read_price = price.cache_read
+    usd = (
+        (inp - cached) * price.input
+        + cached * (read_price if read_price is not None else price.input)
+        + read * (read_price if read_price is not None else price.input * CACHE_RATES["cache_read_input_tokens"])
+        + write * (price.cache_write if price.cache_write is not None else price.input * CACHE_RATES["cache_creation_input_tokens"])
+        + out * price.output
+    ) / 1_000_000
+    return usd, estimated
 
 
 def money(usd: float | None) -> str:

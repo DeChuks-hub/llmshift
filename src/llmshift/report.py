@@ -18,7 +18,7 @@ from .formats import parse_json_lenient
 from .textutil import diff_ratio, md_inert, plural, show_bidi, word_diff
 
 STATUS_ORDER = {"fail": 0, "error": 1, "warn": 2, "pass": 3}
-CATEGORY_ORDER = ["format", "facts", "tools", "safety", "semantics", "tone", "custom", "errors"]
+CATEGORY_ORDER = ["format", "facts", "tools", "safety", "semantics", "tone", "custom", "errors", "unchecked"]
 
 
 def _pct(x: float | None) -> str:
@@ -90,6 +90,8 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
     )
     if s.get("errors"):
         counts += f"   {style(sym('error') + ' ' + str(s['errors']) + ' errors', 'magenta', 'bold')}"
+    if s.get("unchecked"):
+        counts += f"   {style(sym('error') + ' ' + str(s['unchecked']) + ' not checked', 'magenta', 'bold')}"
     lines.append(counts)
     rate = s.get("pass_rate", 0.0)
     threshold = result.min_pass_rate
@@ -111,7 +113,7 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
                 continue
             label = []
             if n_fail:
-                label.append(style(f"{n_fail} failed", "red"))
+                label.append(style(f"{n_fail} not checked", "magenta") if cat == "unchecked" else style(f"{n_fail} failed", "red"))
             if n_warn:
                 label.append(style(f"{n_warn} changed", "yellow"))
             lines.append(f"  {_cat_title(cat):<24} {', '.join(label)}")
@@ -250,7 +252,8 @@ def compare_markdown(result: CompareResult, *, max_cases: int = 15, title: str =
         verdict = " ✅ meets threshold" if result.passed else f" ❌ below the {result.min_pass_rate:.0%} threshold"
     lines.append("| Pass rate | Unchanged | Changed | Failed | Errors |")
     lines.append("|---|---|---|---|---|")
-    lines.append(f"| **{_pct(rate)}**{verdict} | {s.get('passed', 0)} | {s.get('warned', 0)} | {s.get('failed', 0)} | {s.get('errors', 0)} |")
+    not_checked = f" (+{s['unchecked']} not checked)" if s.get("unchecked") else ""
+    lines.append(f"| **{_pct(rate)}**{verdict} | {s.get('passed', 0)} | {s.get('warned', 0)} | {s.get('failed', 0)} | {s.get('errors', 0)}{not_checked} |")
     if range_text(s):
         lines += ["", f"_{range_text(s)}_"]
     cats = s.get("by_category") or {}
@@ -307,14 +310,16 @@ def compare_junit(result: CompareResult) -> str:
     s = result.summary
     suite = f"llmshift {result.label}: {result.candidate}"
     total_time = sum((c.latency_ms or 0) for c in result.cases) / 1000.0
+    errors = s.get("errors", 0) + s.get("unchecked", 0)  # a case whose check could not run is an error, not a failure
     out = ['<?xml version="1.0" encoding="UTF-8"?>']
-    out.append(f"<testsuites name=\"llmshift\" tests=\"{s.get('total', 0)}\" failures=\"{s.get('failed', 0)}\" errors=\"{s.get('errors', 0)}\" time=\"{total_time:.3f}\">")
-    out.append(f"  <testsuite name={quoteattr(_xml_text(suite))} tests=\"{s.get('total', 0)}\" failures=\"{s.get('failed', 0)}\" errors=\"{s.get('errors', 0)}\" skipped=\"0\" time=\"{total_time:.3f}\">")
+    out.append(f"<testsuites name=\"llmshift\" tests=\"{s.get('total', 0)}\" failures=\"{s.get('failed', 0)}\" errors=\"{errors}\" time=\"{total_time:.3f}\">")
+    out.append(f"  <testsuite name={quoteattr(_xml_text(suite))} tests=\"{s.get('total', 0)}\" failures=\"{s.get('failed', 0)}\" errors=\"{errors}\" skipped=\"0\" time=\"{total_time:.3f}\">")
     for case in result.cases:
         t = (case.latency_ms or 0) / 1000.0
         out.append(f"    <testcase classname={quoteattr(_xml_text(case.group))} name={quoteattr(_xml_text(case.id))} time=\"{t:.3f}\">")
         if case.status == "error":
-            out.append(f"      <error message={quoteattr(_xml_text(case.error or 'error')[:300])} type=\"api_error\"/>")
+            kind = "not_checked" if case.unchecked else "api_error"
+            out.append(f"      <error message={quoteattr(_xml_text(case.error or 'error')[:300])} type=\"{kind}\"/>")
         elif case.status == "fail":
             failing = [r for r in case.checks if r.status == "fail" and r.severity == "error"]
             msg = "; ".join(f"{r.category}: {r.message}" for r in failing)[:500]
@@ -404,7 +409,10 @@ def compare_html(result: CompareResult) -> str:
     parts.append('<div class="cards">')
     rng = f"<div class=\"l\">{e(range_text(s))}</div>" if range_text(s) else ""
     parts.append(f"<div class=\"card\"><div class=\"l\">Pass rate</div><div class=\"n\">{_pct(s.get('pass_rate'))}</div>{verdict}{rng}</div>")
-    for label, key, cls in (("Unchanged", "passed", "pass"), ("Changed", "warned", "warn"), ("Failed", "failed", "fail"), ("Errors", "errors", "error")):
+    tiles = [("Unchanged", "passed", "pass"), ("Changed", "warned", "warn"), ("Failed", "failed", "fail"), ("Errors", "errors", "error")]
+    if s.get("unchecked"):
+        tiles.append(("Not checked", "unchecked", "error"))
+    for label, key, cls in tiles:
         parts.append(f"<div class=\"card\"><div class=\"l\">{label}</div><div class=\"n\"><span class=\"pill {cls}\">{s.get(key, 0)}</span></div></div>")
     parts.append("</div>")
     cats = s.get("by_category") or {}

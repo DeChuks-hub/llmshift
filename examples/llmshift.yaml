@@ -50,7 +50,7 @@ pick:                                    # llmshift pick (the savings finder)
   volume: 100k                           # requests per month, for a monthly saving
 
 pricing:                                 # USD per 1M tokens; wins over the bundled price list
-  azure:prod-gpt: {input: 2.5, output: 10}
+  azure:prod-gpt: {input: 2.5, output: 10, cached_input: 1.25}   # cached_input: cached prompt tokens (optional)
   # local:llama-3.1-70b: {input: 0, output: 0}
 
 watch:

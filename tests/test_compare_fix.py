@@ -92,8 +92,9 @@ def test_case_status_rules():
     assert case_status([r("pass", "error")], None) == "pass"
     assert case_status([r("fail", "warn")], None) == "warn"
     assert case_status([r("fail", "error"), r("fail", "warn")], None) == "fail"
-    assert case_status([r("error", "error")], None) == "fail"  # an unverifiable error-level check is not a pass
-    assert case_status([r("error", "warn")], None) == "warn"
+    assert case_status([r("error", "error")], None) == "error"  # could not be checked: neither a pass nor the model's failure
+    assert case_status([r("error", "error"), r("fail", "error")], None) == "fail"  # a failure that could be checked still counts
+    assert case_status([r("error", "warn")], None) == "pass"  # a warning-level check that could not run changes nothing
     assert case_status([r("fail", "info")], None) == "pass"
     assert case_status([], "timeout") == "error"
 

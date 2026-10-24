@@ -20,7 +20,7 @@ from . import messages as msgs
 from .agents import link_runs
 from .infer import GroupStats, group_stats, infer_checks, merge_checks
 from .logparse import DEFAULT_MAX_RECORDS, Interaction, LogStats, parse_logs, parse_time
-from .pricing import CACHE_FIELDS
+from .pricing import USAGE_FIELDS
 from .redact import Redactor
 from .testset import TestCase, case_id_for
 from .textutil import jaccard, stable_hash, tokenize
@@ -220,7 +220,7 @@ def build_snapshot(
             baseline["tool_calls"] = inter.tool_calls
         if inter.model:
             baseline["model"] = inter.model
-        usage = {k: v for k, v in (inter.usage or {}).items() if k in ("input_tokens", "output_tokens", *CACHE_FIELDS) and isinstance(v, (int, float)) and not isinstance(v, bool)}
+        usage = {k: v for k, v in (inter.usage or {}).items() if k in USAGE_FIELDS and isinstance(v, (int, float)) and not isinstance(v, bool)}
         if usage:
             baseline["usage"] = usage  # what the answer cost, for `llmshift pick`
         metadata = dict(inter.metadata)

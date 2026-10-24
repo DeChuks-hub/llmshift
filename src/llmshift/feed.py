@@ -181,8 +181,9 @@ def update_prices(url: str | None = None, *, check: bool = False) -> UpdateResul
         data = dict(table)
     else:
         data = {
-            "about": "Model prices in USD per 1M tokens [input, output], converted from LiteLLM's "
-            "model_prices_and_context_window.json (MIT License, Copyright (c) 2023 Berri AI).",
+            "about": "Model prices in USD per 1M tokens [input, output], or [input, output, cache read, cache write] "
+            "with prompt-cache prices, converted from LiteLLM's model_prices_and_context_window.json "
+            "(MIT License, Copyright (c) 2023 Berri AI).",
             "source": url,
             "fetched": reglib.today().isoformat(),
             "unit": "USD per 1M tokens",
@@ -192,8 +193,8 @@ def update_prices(url: str | None = None, *, check: bool = False) -> UpdateResul
     if problems:
         raise UpdateError(f"the prices from {url} were rejected: " + "; ".join(problems[:4]))
     current, current_date = pricing._table()
-    latest = {str(k).lower(): list(v[:2]) for k, v in data["prices"].items()}
-    changed = sum(1 for k, v in latest.items() if current.get(k) != v) + len(current.keys() - latest.keys())
+    latest = {str(k).lower(): list(v) for k, v in data["prices"].items()}  # cache prices too
+    changed = sum(1 for k, v in latest.items() if list(current.get(k) or []) != v) + len(current.keys() - latest.keys())
     counts = {"prices": len(latest), "changed": changed}
     older = (reglib._date(data.get("fetched")) or _dt.date.min) < (reglib._date(current_date) or _dt.date.min)
     if not changed or older:

@@ -106,7 +106,7 @@ Embedding, moderation, image and audio calls are skipped, and every skipped reco
 
 Then it:
 
-1. Drops failed calls and truncated outputs, and applies `--model`, `--since` and `--until` filters.
+1. Drops failed calls and truncated outputs, and applies `--model`, `--since` and `--until` filters. Each case keeps the request's settings, extended thinking included: OpenAI's reasoning effort, Claude's `thinking` and effort, and Gemini's `thinkingConfig`.
 2. Redacts secrets. With `--redact-pii` it also replaces e-mails, phone numbers and card numbers, using consistent placeholders so echoed values still match.
 3. Removes duplicates and groups requests by prompt template.
 4. Picks a diverse sample per template (`--max-cases`, `--per-group`).
@@ -199,11 +199,11 @@ What changed
            ```
 ```
 
-- Each case is **failed** (an error-level check broke: format, facts, tool calls, refusal, language) or **changed** (a warning-level difference: tone, length, structure, similarity). Change a check's level with `--severity tone=error`.
+- Each case is **failed** (an error-level check broke: format, facts, tool calls, refusal, language) or **changed** (a warning-level difference: tone, length, structure, similarity). Change a check's level with `--severity tone=error`. A case whose check could not run (an invalid regex, one stopped after 2 seconds, a judge that cannot be reached) is **not checked**: it is reported apart with the reason, left out of the pass rate, and the run exits with code 2 instead of blaming the new model.
 - `--baseline-model <old model>` also runs the old model live. A check that the old model fails as well is counted as noise, not a regression, and the two models are compared case by case (McNemar), so "worse" means significantly worse.
 - `--judge openai:gpt-5.6-terra` adds an LLM equivalence judge to free-text answers (JSON, labels and numbers are already checked exactly), and grades imported model graders. `judge:` in `llmshift.yaml` does the same for every run.
 - Reports: a self-contained HTML report with filters and word-level diffs, plus JSON, in `.llmshift/reports/`. Add `--markdown summary.md` for PR comments and `--junit junit.xml` for CI test views; without a file name they are written to `.llmshift/reports/` too. `llmshift report results.json --html` re-renders a saved run.
-- **A setting the new model rejects fails the case.** Claude 4.7 and later take only the default sampling (a `temperature` other than 1, or any `top_p` or `top_k`, is a 400 error), and OpenAI's reasoning models take only `temperature` 1. The answer is still tested without the setting, but the case fails, because the real call would. Once your code no longer sends it, test with `--drop-param temperature` (or `drop_params: [temperature]` in `llmshift.yaml`); `llmshift upgrade` lists where the code sets it. If a proxy between your code and the model removes such settings for you (LiteLLM's `drop_params`), set `severity: {request: info}` to keep the note without failing the case.
+- **A setting the new model rejects fails the case.** Claude 4.7 and later take only the default sampling (a `temperature` other than 1, or any `top_p` or `top_k`, is a 400 error) and only adaptive thinking (a `budget_tokens` is a 400 error), and OpenAI's reasoning models take only `temperature` 1. The answer is still tested without the setting, but the case fails, because the real call would. Once your code no longer sends it, test with `--drop-param temperature` (or `drop_params: [temperature]` in `llmshift.yaml`); `llmshift upgrade` lists where the code sets it. If a proxy between your code and the model removes such settings for you (LiteLLM's `drop_params`), set `severity: {request: info}` to keep the note without failing the case.
 - Other model quirks are handled automatically and listed in the report: `max_tokens` vs `max_completion_tokens`, Responses-only models, and the `developer` role. You'll also see notes such as "reasoning models count thinking tokens toward the output limit".
 - Responses are cached in `.llmshift/cache`, so re-runs are free. Turn this off with `--no-cache`; `llmshift cache clear` deletes every cached response.
 
@@ -234,7 +234,7 @@ Today: mock:legacy  $0.78 per 1,000 requests (from your recorded usage)
 Switch to mock:frugal: same quality (all 18 cases unchanged), 96% cheaper - about $75.22 a month saved at 100,000 requests a month.
 ```
 
-- Costs come from the token usage each provider reports (estimated from the text when it reports none, marked `~`). Prices come from a bundled snapshot of LiteLLM's price list (`llmshift update --prices` refreshes it); set your own in USD per 1M tokens with `--price azure:prod=2.5/10` or under `pricing:` in `llmshift.yaml`.
+- Costs come from the token usage each provider reports (estimated from the text when it reports none, marked `~`). Thinking tokens cost what output does, and cached input the model's cache price. Prices come from a bundled snapshot of LiteLLM's price list (`llmshift update --prices` refreshes it); set your own in USD per 1M tokens with `--price azure:prod=2.5/10` or under `pricing:` in `llmshift.yaml`.
 - Today's cost uses the usage recorded with your baseline answers and the price of `--baseline` (default: `baseline` in `llmshift.yaml`, else the recorded model). When today's model is also one of the candidates, today's cost is measured on the same tests instead, so every saving compares like with like.
 - The quality bar is `--min-pass-rate` (default `min_pass_rate`, 0.95). If nothing passes, `pick` names the closest candidate and what broke; `llmshift fix --to <model>` can often close the gap.
 - `--format json|markdown`, `--json [FILE]`, `--markdown [FILE]`. Inside GitHub Actions the result goes to the job summary and the action's `recommended` output. Exit code 0 when a model is recommended, 1 when none passes.
@@ -463,7 +463,7 @@ Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`;
 |---|---|
 | `0` | success |
 | `1` | the check failed: a retired model was found, the pass rate is below the threshold, drift was detected, the new model is riskier, no candidate passes, or `doctor` found a problem; for `update`, `snapshot` and `import`: nothing could be downloaded, read or imported |
-| `2` | usage or configuration problem, or the provider refused every request the same way (wrong key, model name or URL; an unreachable host). Timeouts and server errors count as failed cases instead (exit `1`) |
+| `2` | usage or configuration problem, or the provider refused every request the same way (wrong key, model name or URL; an unreachable host). Timeouts and server errors count as failed cases instead (exit `1`). Also when nothing failed but some cases could not be checked: a check could not run (an invalid regex, a judge that cannot be reached) |
 | `130` | interrupted |
 
 ## Privacy and safety
@@ -479,7 +479,7 @@ Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`;
 
 - The format, fact and tone checks are deterministic heuristics, tuned to flag real changes. Edit thresholds per check in the test file, or add `--judge` for semantic judgement.
 - Agent replay feeds the model recorded tool results, so a new model that takes a genuinely different path meets placeholders where nothing was recorded (they are counted in the report).
-- Costs in `pick` are per request on your test set. Cached-input discounts and batch pricing aren't modelled, and token counts estimated from text (about 4 characters per token) are rough.
+- Costs in `pick` are per request on your test set. Cached input costs the cache price from the price list (the full input price for a model the list gives none), batch pricing isn't modelled, and token counts estimated from text (about 4 characters per token) are rough.
 - `safety` compares two models; it is not an absolute safety score. Injection and PII detection are deterministic (a canary or a planted value in the answer).
 - Bedrock and Vertex AI are reached through an OpenAI-compatible proxy (for example LiteLLM) or a `python:` provider. Their native APIs are not built in.
 - Lifecycle data updates itself daily from the four providers that publish deprecation tables; Mistral, Cohere, xAI and DeepSeek changes are reviewed by a person (an issue is opened). Run `llmshift update` to get the newest data.

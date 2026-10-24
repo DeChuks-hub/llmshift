@@ -315,7 +315,11 @@ class Registry:
         m = _VERTEX_CLAUDE_RE.match(lower)
         if m:
             platform = platform or "vertex"
-            candidates.append(f"{m.group(1)}-{m.group(2)}")
+            candidates.append(lower.split("@", 1)[0])  # Vertex's own name (claude-3-5-sonnet-v2), whose date Vertex sets
+            candidates.append(f"{m.group(1)}-{m.group(2)}")  # the Anthropic API's (claude-3-5-sonnet-20241022)
+        if lower.startswith("gpt-35"):  # Azure's spelling: gpt-35-turbo-0613 is gpt-3.5-turbo-0613
+            platform = platform or "azure"
+            candidates.append("gpt-3.5" + lower[len("gpt-35") :])
         if lower.endswith("-completions"):
             candidates.append(lower[: -len("-completions")])
         for c in list(candidates):
@@ -366,13 +370,21 @@ class Registry:
 
     def lookup(self, raw: str, *, platform: str | None = None, warn_days: int = 180) -> Lookup:
         candidates, detected_platform, fine_tune_of = self.normalize(raw)
-        platform = platform or detected_platform
+        # What the id says (anthropic.claude-... is Bedrock's, claude-...@date Vertex's) wins over
+        # the file's hint: one AnthropicVertex in a file made its Bedrock ids Vertex's.
+        platform = detected_platform or platform
+        vertex_name = candidates[0].split("@", 1)[0] if candidates and _VERTEX_CLAUDE_RE.match(candidates[0]) else None
         entry = None
         others: list[dict] = []
         matched_id = candidates[0] if candidates else raw
-        for cand in candidates:
-            if cand in self.by_id:
-                entry, others = self._pick(self.by_id[cand], platform)
+        for i, cand in enumerate(candidates):
+            matches = self.by_id.get(cand) or []
+            if cand == vertex_name:  # for claude-3-haiku@20240307, only Vertex's own entry under claude-3-haiku
+                matches = [e for e in matches if e.get("provider") == "google-vertex"]
+            if matches:
+                entry, others = self._pick(matches, platform)
+                if cand == vertex_name:  # the Anthropic API's dates, for the record
+                    others = others + [e for later in candidates[i + 1 :] for e in self.by_id.get(later, [])]
                 matched_id = cand
                 break
         if entry is not None and entry.get("provider") == "google-vertex" and platform != "vertex":

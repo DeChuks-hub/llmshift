@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 (2026-10-24)
 
+- LLMShift is in the official MCP Registry as `io.github.DeChuks-hub/llmshift`. Each release publishes `server.json` there after PyPI has it, so MCP clients can install the server as `uvx llmshift mcp`.
+- The README opens with an animated demo of a real run (`docs/demo.gif`): `scan` finding retiring models, then `compare` on Claude Haiku 5.5.
 - The release and retirement-calendar workflows use the Node 24 releases of GitHub's artifact and Pages actions, so their runs no longer warn that Node.js 20 is deprecated. A test keeps every workflow, example and generated workflow on them.
 
 ## 0.1.3 (2026-10-24)

@@ -164,6 +164,18 @@ def test_action_examples_use_this_version():
     assert sum(map(len, refs.values())) >= 5 and {r for found in refs.values() for r in found} <= {major, f"v{llmshift.__version__}"}, refs
 
 
+def test_the_mcp_registry_entry_matches_this_release():
+    """The release publishes server.json to the MCP Registry, which takes a version once and
+    checks that the README on PyPI names the server (mcp-name:)."""
+    server = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+    assert server["version"] == llmshift.__version__ and len(server["description"]) <= 100
+    package = server["packages"][0]
+    assert (package["registryType"], package["identifier"], package["version"]) == ("pypi", "llmshift", llmshift.__version__)
+    assert [a["value"] for a in package["packageArguments"]] == ["mcp"]  # uvx llmshift mcp
+    assert f"<!-- mcp-name: {server['name']} -->" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert server["name"] == "io.github.DeChuks-hub/llmshift"  # the namespace GitHub sign-in grants this repository's owner
+
+
 # What a workflow can pass to and read from the action: `@v0` moves to every 0.x release,
 # so a name removed or renamed here would break workflows that never chose to upgrade.
 V0_INPUTS = {"command", "args", "python-version", "version", "working-directory"}

@@ -1,33 +1,33 @@
 {
-  "checked": "2026-10-22",
+  "checked": "2026-10-24",
   "pages": {
     "https://ai.google.dev/gemini-api/docs/changelog": {
       "sha256": "51a4a672831b986a93301401fa56936742e074096b66152f6d557e66bc020ddf",
       "chars": 44030
     },
     "https://ai.google.dev/gemini-api/docs/deprecations": {
-      "sha256": "122daa287fbf134be7b020f0b89a0a4a3859d8e890993ec8b3144131f7670393",
+      "sha256": "aa006cc0972fe5465c5607acbfe38ed7302610b23fb5b61b1a74b2a33247832b",
       "chars": 10440
     },
     "https://ai.google.dev/gemini-api/docs/models": {
-      "sha256": "34c5229458925049f184bbe8be471f6aa734040aa4db1b296c63206528383135",
-      "chars": 14604
+      "sha256": "5b90c9b6a114195766acc51dcc3025c21ba226bef31d0b2acf1fbcbc0db2cbd3",
+      "chars": 14287
     },
     "https://api-docs.deepseek.com/quick_start/pricing": {
       "sha256": "8cf997afcc7fffc97f629ec1817f909097bcb9e7bc8bd3ecb92c14d9051dac44",
       "chars": 2787
     },
     "https://api-docs.deepseek.com/updates": {
-      "sha256": "1b26af5380091f219570400386e439a7dfa41e5ae8c77c82d69300c420c538b6",
-      "chars": 3107
+      "sha256": "1259fcd273ca80e14f6c6496bc53fe2660ae5779deac522b631cef6f5ac2a5d7",
+      "chars": 17855
     },
     "https://developers.openai.com/api/docs/deprecations": {
-      "sha256": "893a086e5811fe29d9726852f9d57eff76b1fc48d97b086d73b34acccd61492e",
-      "chars": 26175
+      "sha256": "d000106c2e095dfe00f8676550d6e16bf181648b4ea2e5e80997911285b54e81",
+      "chars": 26462
     },
     "https://developers.openai.com/api/docs/models": {
-      "sha256": "bed46dcc4289d95ab52c95ec5a39c475c7186b29fe7f257e8f2d26e2cedf78aa",
-      "chars": 3322
+      "sha256": "942519b1cb2b4737fb94763dd40eef9aaf948cb0a6089c0d7d29a55a5484d27f",
+      "chars": 3355
     },
     "https://developers.openai.com/api/docs/models/chat-latest": {
       "sha256": "51da146c5d9bf40f1bfba5474d6d48cbc53e3bb2c311bf2ba0c655103e448f54",
@@ -158,8 +158,8 @@
       "chars": 3164
     },
     "https://developers.openai.com/api/docs/models/gpt-6-sol": {
-      "sha256": "de3060d2f05c2a11b9d86b3e8f1c593af2fe1d0fa7a8ea1075783873fa9e0abb",
-      "chars": 3177
+      "sha256": "d31a4434c87d9a4ab4e2362e36383897744c28ff9b44e502879893a1f40c274c",
+      "chars": 3148
     },
     "https://developers.openai.com/api/docs/models/gpt-6.1-sol": {
       "sha256": "176ef485c1ecad91bb8a5e22db2bc1cd29cfd76f5bc584c103907969da9beddb",
@@ -286,15 +286,15 @@
       "chars": 2235
     },
     "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/deprecations/partner-models": {
-      "sha256": "e191d2588b6fd05c90211d84a034be3c2aad41c788eb63690fe36eea90645a36",
+      "sha256": "a1f4b774fcb1670ba9925522201c203cbf42d4a80b87f9c3d04f881e621cb867",
       "chars": 12292
     },
     "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions": {
-      "sha256": "4a55cf916e58ac2b07bcaaefa18a15052310b42bcf70f0314d95114493dc28e5",
-      "chars": 6092
+      "sha256": "2af528b95e6f945584f65eb318791063249ff563a06e00fdeb3c99d51ab4245e",
+      "chars": 6743
     },
     "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations": {
-      "sha256": "3ce4459e33ac67775cda03a0d5121b69c34312ace6e15e81a41869700fb61d46",
+      "sha256": "679d05286547d2156f17be203bd791091680acb622fec5409b077f16ae4bf5b3",
       "chars": 1581
     },
     "https://docs.cohere.com/docs/deprecations": {
@@ -306,8 +306,8 @@
       "chars": 19346
     },
     "https://docs.mistral.ai/models": {
-      "sha256": "441baf32dbd108a0aa064a3a656a73f9749ede744fee1a44ac62014aaa1390d1",
-      "chars": 9213
+      "sha256": "9a076e88d9cdbd71910ebd7efb83d51213bd25d935b1449c4f33d49a02a211ca",
+      "chars": 9515
     },
     "https://docs.x.ai/developers/migration/imagine-image-quality-nov-2": {
       "sha256": "23c1b01e8b3aa03ea7ccfa303b5609b07f54c3da4c11e343fae480b1480b261d",
@@ -342,20 +342,20 @@
       "chars": 1225
     },
     "https://platform.claude.com/docs/en/about-claude/model-deprecations": {
-      "sha256": "b352a0ce9bf5827a0329b76876ba170717a425308ff49a0f436b3cc748b44732",
-      "chars": 9661
+      "sha256": "a74d51a4d9b6d4985d54645ffb20cd406b93ca43585622a305a2c623c64ccd31",
+      "chars": 9781
     },
     "https://platform.claude.com/docs/en/models/haiku-4-5/overview": {
-      "sha256": "fc75e58a19b6033cbe4fdd68fe6e3adc960ecb9c89b2bc8c69bfdae9cf929eb6",
-      "chars": 2965
+      "sha256": "c05cdd32defc5830395d009d31417ea57a0a612c9adcfa0db23afc4c692e5e6d",
+      "chars": 3159
     },
     "https://platform.claude.com/docs/en/models/opus-4-5/overview": {
-      "sha256": "cd939d12b6fe8fdb02b24a97e0c844646062d4d46d39b1aacc65311cf20171b6",
-      "chars": 2454
+      "sha256": "a8bcb38c10fb71eb640b47fbb7a8ffd3bad1d38d223b80bd0c21b203c912cadc",
+      "chars": 2647
     },
     "https://platform.claude.com/docs/en/models/sonnet-4-5/overview": {
-      "sha256": "f5b5d6e84720dff95941ebad471e6f239629a552b76ab4a91064f1691ba2bbb5",
-      "chars": 2593
+      "sha256": "86f26fb15814aecc127c56e422dbe4943b83b59aed6c729e04e7685f63ef64f2",
+      "chars": 2788
     }
   }
 }

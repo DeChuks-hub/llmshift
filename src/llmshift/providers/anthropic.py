@@ -64,11 +64,26 @@ def _claude_version(model: str) -> tuple[str, int, int] | None:
     return m.group("family") or m.group("family2"), int(m.group("major") or m.group("major2")), int(m.group("minor") or m.group("minor2") or 0)
 
 
+EFFORT_BETA = "effort-2025-11-24"  # Opus 4.5 takes effort with this beta header; it is GA from 4.6
+
+
 def takes_effort(model: str) -> bool:
-    """Whether a Claude model takes output_config.effort (Opus and Sonnet 4.6 and later,
-    Haiku 5 and later, Fable and Mythos)."""
+    """Whether a Claude model takes output_config.effort (Opus 4.5, Opus and Sonnet 4.6 and
+    later, Haiku 5 and later, Fable and Mythos)."""
     v = _claude_version(model)
-    return v is not None and (v[0] == "fable" or (v[0] in ("opus", "sonnet") and v[1:] >= (4, 6)) or (v[0] == "haiku" and v[1] >= 5))
+    return v is not None and (
+        v[0] == "fable" or (v[0] in ("opus", "sonnet") and v[1:] >= (4, 6)) or v == ("opus", 4, 5) or (v[0] == "haiku" and v[1] >= 5)
+    )
+
+
+def _effort_levels(model: str) -> tuple[str, ...]:
+    """The effort levels of a model that takes effort: max came with 4.6, xhigh with Opus 4.7."""
+    v = _claude_version(model)
+    if v == ("opus", 4, 5):
+        return ("low", "medium", "high")
+    if v is not None and v[0] in ("opus", "sonnet") and v[1:] == (4, 6):
+        return ("low", "medium", "high", "max")
+    return ("low", "medium", "high", "xhigh", "max")
 
 
 THINKING_TYPES = ("enabled", "adaptive", "disabled", "between_tools")
@@ -103,16 +118,15 @@ def thinking_types(model: str, effort: str | None = None) -> set[str] | None:
     return {"adaptive", "disabled"}  # Opus 4.7 and 4.8, Sonnet 5
 
 
-def _effort_for(model: str, effort: Any) -> tuple[str | None, bool]:
-    """(the effort level to send, whether the model rejects the level asked for)."""
+def _effort_for(model: str, effort: Any) -> tuple[str | None, str | None]:
+    """(the effort level to send, the level asked for when the model has no such level)."""
     if not isinstance(effort, str) or not effort.strip() or not takes_effort(model):
-        return None, False
+        return None, None
     level = effort.strip().lower()
     level = {"none": "low", "minimal": "low"}.get(level, level)  # OpenAI's levels below low
-    v = _claude_version(model)
-    if level == "xhigh" and v is not None and v[0] in ("opus", "sonnet") and v[1:] == (4, 6):
-        return "high", True  # xhigh came with Opus 4.7
-    return level, False
+    if level in ("xhigh", "max") and level not in _effort_levels(model):
+        return "high", level
+    return level, None
 
 
 def plan_thinking(model: str, params: dict) -> dict:
@@ -120,10 +134,11 @@ def plan_thinking(model: str, params: dict) -> dict:
     effort to send, the sampling settings to leave out, and what the model rejects as the
     request sends it (each a 400 on the real call), with what to send instead."""
     plan: dict = {"thinking": None, "effort": None, "drop": [], "rejected": [], "advice": []}
-    effort, refused = _effort_for(model, params.get("reasoning_effort"))
-    if refused:
+    effort, missing = _effort_for(model, params.get("reasoning_effort"))
+    if missing:
         plan["rejected"].append("reasoning_effort")
-        plan["advice"].append(f"{model} has no xhigh effort: use high or max.")
+        top = " or ".join(level for level in ("high", "max") if level in _effort_levels(model))
+        plan["advice"].append(f"{model} has no {missing} effort: use {top}.")
     thinking = params.get("thinking") if isinstance(params.get("thinking"), dict) else {}
     kind = thinking.get("type")
     if kind in THINKING_TYPES:
@@ -365,12 +380,15 @@ class AnthropicProvider(Provider):
         shaping["headers"] = {k: v for k, v in self.extra_headers.items() if k.lower() not in ("x-api-key", "authorization")}
         return {"kind": self.kind, "model": self.model, "base_url": self.base_url, "options": stable_hash(shaping, 16)}
 
-    def _headers(self) -> dict:
+    def _headers(self, body: dict | None = None) -> dict:
         if not self.api_key:
             raise ProviderError(f"no API key for {self.spec}: set the {self.key_env} environment variable", code="missing_api_key")
         headers = {"x-api-key": self.api_key, "anthropic-version": self.version}
-        if self.beta:
-            headers["anthropic-beta"] = self.beta if isinstance(self.beta, str) else ",".join(self.beta)
+        betas = [str(b).strip() for b in (self.beta.split(",") if isinstance(self.beta, str) else self.beta or []) if str(b).strip()]
+        if body and "effort" in (body.get("output_config") or {}) and _claude_version(self.model) == ("opus", 4, 5) and EFFORT_BETA not in betas:
+            betas.append(EFFORT_BETA)  # effort on Opus 4.5 is a beta
+        if betas:
+            headers["anthropic-beta"] = ",".join(betas)
         headers.update(self.extra_headers)
         return headers
 
@@ -543,7 +561,7 @@ class AnthropicProvider(Provider):
         adaptations = 0
         while True:
             try:
-                data = http.post_json(f"{self.base_url}/v1/messages", body, headers=self._headers(), timeout=self.timeout, max_retries=self.max_retries)
+                data = http.post_json(f"{self.base_url}/v1/messages", body, headers=self._headers(body), timeout=self.timeout, max_retries=self.max_retries)
                 response = self.parse(data)
                 response.rejected = self._rejected_in(request, body)
                 return response

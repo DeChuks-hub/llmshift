@@ -88,6 +88,26 @@ def test_xhigh_maps_to_high_where_it_does_not_exist_and_spoils_no_other_level(se
     assert by_id["low"].status == "pass"
 
 
+def test_opus_4_5_takes_effort_up_to_high_with_its_beta_header(server, monkeypatch):
+    from llmshift.providers.anthropic import plan_thinking
+
+    seen = []
+
+    def reply(req):
+        seen.append(((req["json"].get("output_config") or {}).get("effort"), req["headers"].get("anthropic-beta", "")))
+        return 200, {"id": "m", "type": "message", "role": "assistant", "model": req["json"]["model"], "content": [{"type": "text", "text": "ok"}],
+                     "stop_reason": "end_turn", "usage": {"input_tokens": 5, "output_tokens": 2}}, {}
+
+    server.route("POST", "/v1/messages", reply)
+    cases = [_case("medium", {"reasoning_effort": "medium"}), _case("max", {"reasoning_effort": "max"}), _case("none", {})]
+    by_id = {c.id: c for c in _run(server, "claude-opus-4-5", cases, monkeypatch).cases}
+    assert seen == [("medium", "effort-2025-11-24"), ("high", "effort-2025-11-24"), (None, "")]  # its effort was left out
+    assert by_id["medium"].status == "pass"
+    assert "claude-opus-4-5 has no max effort: use high." in next(r for r in by_id["max"].checks if r.type == "request").message
+    assert plan_thinking("claude-opus-4-6", {"reasoning_effort": "xhigh"})["advice"] == ["claude-opus-4-6 has no xhigh effort: use high or max."]
+    assert plan_thinking("claude-sonnet-4-5", {"reasoning_effort": "low"})["effort"] is None  # it takes none
+
+
 def test_an_effort_refused_beside_thinking_off_stays_with_that_case(server, monkeypatch):
     seen = []
     _anthropic_like(server, seen)
@@ -164,6 +184,25 @@ def test_a_regex_breaker_lives_for_one_run_and_one_model(make_case, monkeypatch)
     second = run_compare(fine, "mock:echo", show_progress=False, concurrency=1).summary  # a later run (an MCP call) tries it again
     assert second["passed"] == 3 and second["unchecked"] == 0
     assert userregex.search(pattern, "fine words")  # outside a run, nothing is remembered
+
+
+def test_the_candidate_and_the_live_baseline_have_a_regex_breaker_each(tmp_path, monkeypatch):
+    from llmshift import checks
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "app.py").write_text("def answer(request):\n    return 'a plain answer'\n", encoding="utf-8")  # reports no model name
+    config = {"providers": {"new": {"type": "python", "target_model": "m-new"}, "old": {"type": "python", "target_model": "m-old"}}}
+    breakers = []
+    original = checks.CheckContext.regex_breaker
+
+    def spy(self, sample):
+        breakers.append(original(self, sample))
+        return breakers[-1]
+
+    monkeypatch.setattr(checks.CheckContext, "regex_breaker", spy)
+    case = TestCase(id="c", input={"messages": [{"role": "user", "content": "q"}], "params": {}}, baseline={"output": "x"}, checks=[{"type": "regex", "pattern": "a+"}])
+    run_compare([case], "new:app.py:answer", baseline="old:app.py:answer", config=config, show_progress=False)
+    assert len(breakers) == 2 and breakers[0] is not breakers[1]  # both answers say "app.py:answer": they shared one
 
 
 # --------------------------------------------------------- providers, reports

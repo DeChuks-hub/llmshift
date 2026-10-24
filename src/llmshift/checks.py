@@ -134,9 +134,10 @@ class Sample:
     refusal: str | None = None
     finish_reason: str | None = None
     steps: list = field(default_factory=list)
+    source: str | None = None  # who answered (in compare, the side and its provider): each has its own regex breaker
 
     @classmethod
-    def from_response(cls, resp: Any) -> "Sample":
+    def from_response(cls, resp: Any, source: str | None = None) -> "Sample":
         return cls(
             text=getattr(resp, "text", "") or "",
             tool_calls=list(getattr(resp, "tool_calls", []) or []),
@@ -144,6 +145,7 @@ class Sample:
             refusal=getattr(resp, "refusal", None),
             finish_reason=getattr(resp, "finish_reason", None),
             steps=list(getattr(resp, "steps", []) or []),
+            source=source,
         )
 
     @property
@@ -189,12 +191,13 @@ class CheckContext:
     judge_skipped: int = 0
     judge_failed: int = 0  # judge calls that got no answer (a wrong key, an unknown model...)
     judge_error: str | None = None  # the first of those errors
-    # Patterns stopped after userregex.TIMEOUT, per answering model: a pattern given up on in
-    # one run on one model's answers is tried again for another model and in another run.
+    # Patterns stopped after userregex.TIMEOUT, per source of answers (compare's candidate and
+    # live baseline apart, even when both report the same model name, or none): a pattern given
+    # up on in one run on one source's answers is tried again for the other and in another run.
     regex_timeouts: dict = field(default_factory=dict)
 
     def regex_breaker(self, sample: "Sample") -> dict:
-        return self.regex_timeouts.setdefault(sample.model or "", {})
+        return self.regex_timeouts.setdefault(sample.source or sample.model or "", {})
 
 
 @dataclass
@@ -910,7 +913,7 @@ def evaluate(check: dict, sample: Sample, case: TestCase, ctx: CheckContext) -> 
     if fn is None:
         return CheckResult(ctype, category, severity, "error", f"unknown check type {ctype!r}", name=check.get("name"))
     try:
-        with userregex.breaker(ctx.regex_breaker(sample)):  # this run's, for this model's answers
+        with userregex.breaker(ctx.regex_breaker(sample)):  # this run's, for this source's answers
             outcome = fn(check, sample, case, ctx)
     except Exception as exc:  # a broken check must never abort a run
         from .providers.base import ProviderError

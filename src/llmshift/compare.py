@@ -588,7 +588,7 @@ def run_compare(
         if not resp.ok:
             result.status = "error"
             return result
-        checks = run_checks(eval_case, Sample.from_response(resp), ctx)
+        checks = run_checks(eval_case, Sample.from_response(resp, source=f"candidate {cand.spec}"), ctx)
         sent = {**case.params, **{k: v for k, v in (overrides or {}).items() if v is not None}}
         rejected = request_rejections(cand.model, sent, resp)
         if rejected:
@@ -596,7 +596,7 @@ def run_compare(
             checks.append(rejection_check(cand.spec, rejected, ctx, advice))
         result.raw_status = case_status(checks, None)
         if live is not None and live.ok:
-            base_checks = run_checks(eval_case, Sample.from_response(live), ctx)
+            base_checks = run_checks(eval_case, Sample.from_response(live, source=f"baseline {getattr(base, 'spec', '')}"), ctx)
             result.baseline_live_status = case_status(base_checks, None)
             for i, (c, b) in enumerate(zip(checks, base_checks)):
                 if c.status == "fail" and b.status == "fail":

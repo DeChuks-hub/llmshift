@@ -166,6 +166,14 @@ class CompareResult:
             return False
         return s.get("pass_rate", 0.0) + 1e-9 >= threshold
 
+    @property
+    def inconclusive(self) -> bool:
+        """No verdict (exit 2): some cases could not be checked (a check could not run) and the
+        others pass, or no case could be checked at all."""
+        s = self.summary
+        unchecked = s.get("unchecked", 0)
+        return bool(unchecked) and (unchecked >= s.get("total", 0) or self.passed)
+
 
 def request_rejections(model: str, params: dict, resp: Response) -> list[str]:
     """What `model` rejects of a request as it is sent (temperature=0, assistant prefill, a
@@ -318,7 +326,7 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
     unstable = 0
     for c in cases:
         groups[c.group]["total"] += 1
-        groups[c.group][c.status] += 1
+        groups[c.group]["unchecked" if c.unchecked else c.status] += 1
         unstable += len(c.unstable)
         cats_fail, cats_warn = set(), set()
         for r in c.checks:
@@ -347,7 +355,7 @@ def summarize(cases: list[CaseResult], responses: dict[str, Response] | None = N
         for c in cases:
             if c.status == "error" and not c.unchecked:
                 by_category["errors"]["patterns"][re.sub(r"\s*\(.*?\)$", "", (c.error or "error"))[:90]] += 1
-    latencies = [c.latency_ms for c in cases if c.latency_ms is not None and c.status != "error"]
+    latencies = [c.latency_ms for c in cases if c.latency_ms is not None and (c.status != "error" or c.unchecked)]  # answered
     base_lat = [c.baseline_latency_ms for c in cases if c.baseline_latency_ms is not None]
     tokens_in = sum(int((c.usage or {}).get("input_tokens") or 0) for c in cases)
     tokens_out = sum(int((c.usage or {}).get("output_tokens") or 0) for c in cases)
@@ -468,10 +476,11 @@ def build_insights(summary: dict, cases: list[CaseResult], adapt: list[str]) -> 
         elif b or c:
             out.append(f"Against the old model run live, {b} case(s) broke and {c} improved: not a significant difference (p={p:.2f}).")
     total, need = summary.get("total") or 0, summary.get("cases_needed") or 0
-    if 0 < total < need:
+    checked = total - (summary.get("unchecked") or 0)  # the cases the pass rate is over
+    if 0 < checked < need:
         low, high = summary.get("pass_rate_range") or (0, 1)
         out.append(
-            f"With {plural(total, 'case')} the pass rate is only known to within {low:.0%}-{high:.0%}; "
+            f"With {plural(checked, 'checked case') if checked < total else plural(total, 'case')} the pass rate is only known to within {low:.0%}-{high:.0%}; "
             f"about {need} cases would pin it down to +/-5 points."
         )
     if summary.get("errors") and evaluated == 0:

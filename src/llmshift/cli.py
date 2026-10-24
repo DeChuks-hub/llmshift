@@ -670,12 +670,10 @@ def cmd_compare(args: argparse.Namespace, cfg: dict) -> int:
         con.out(con.style(f"Next: remove {', '.join(refused)} from the calls (llmshift upgrade lists where), then re-run" + (f" with {flags}" if flags else ""), "grey"))
     if other:
         con.out(con.style(f"Next: llmshift fix --to {candidate}  (suggests prompt changes for the {other} changed case(s))", "grey"))
-    if s.get("evaluated", 0) == 0:
-        return EXIT_USAGE if s.get("unchecked") else EXIT_FAIL
-    if result.min_pass_rate is not None and not result.passed:
-        return EXIT_FAIL
-    if s.get("unchecked"):  # what could be checked passed, but not everything could be: inconclusive
+    if result.inconclusive:  # what could be checked passed, or nothing could be: no verdict
         return EXIT_USAGE
+    if s.get("evaluated", 0) == 0 or (result.min_pass_rate is not None and not result.passed):
+        return EXIT_FAIL
     return EXIT_OK
 
 
@@ -726,7 +724,7 @@ def cmd_fix(args: argparse.Namespace, cfg: dict) -> int:
         if st.get("changed"):
             detail.append(f"{st['changed']} changed")
         if st.get("errors"):
-            detail.append(f"{st['errors']} errors")
+            detail.append(plural(st["errors"], "error"))
         return f"{st.get('passed', 0)} of {st.get('cases', 0)} match" + (f" ({', '.join(detail)})" if detail else "")
 
     for g in result.groups:
@@ -841,7 +839,10 @@ def cmd_watch(args: argparse.Namespace, cfg: dict) -> int:
         _github_output("pass_rate", s.get("pass_rate"))  # the action's pass-rate output, as for compare
         con.out(con.style("LLMShift watch", "bold") + f"  {outcome.model}  run {outcome.run_id}")
         sim = f", similarity to baseline {s['similarity']:.2f}" if s.get("similarity") is not None else ""
-        con.out(f"  pass rate {s['pass_rate']:.0%} ({s['passed'] + s['warned']}/{s['evaluated']}), {s['failed']} failing, {s['errors']} errors{sim}")
+        checked = s.get("total", 0) - s.get("unchecked", 0)  # the cases the pass rate is over: a request with no answer counts
+        unchecked = f", {s['unchecked']} not checked" if s.get("unchecked") else ""
+        rate = f"pass rate {s['pass_rate']:.0%} ({s['passed'] + s['warned']}/{checked})" if checked > 0 else "pass rate n/a (no case could be checked)"
+        con.out(f"  {rate}, {s['failed']} failing, {plural(s['errors'], 'error')}{unchecked}{sim}")
         if outcome.previous:
             prev = outcome.previous.get("summary", {})
             con.out(con.style(f"  previous run {outcome.previous.get('run_id')}: pass rate {prev.get('pass_rate', 0):.0%}", "grey"))

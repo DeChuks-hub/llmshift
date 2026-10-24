@@ -206,6 +206,97 @@ def test_the_headline_says_inconclusive_when_the_exit_code_does(make_case):
     assert "inconclusive: 1 not checked" in compare_markdown(result) and "meets threshold" not in compare_markdown(result)
 
 
+def test_counts_name_the_cases_the_pass_rate_is_over(make_case):
+    from llmshift.report import compare_terminal, range_text
+
+    cases = [make_case(f"q{i}", user=f"q{i}", id=f"c{i}", group="g1" if i < 2 else "g2", checks=[{"type": "contains", "value": "q"}]) for i in range(3)]
+    cases[2].checks = [{"type": "regex", "pattern": "(unclosed"}]
+    result = run_compare(cases, "mock:echo", show_progress=False, min_pass_rate=0.95)
+    assert "over 2 of 3 cases" in range_text(result.summary)  # the range of 2 of 2, not of 3
+    text = compare_terminal(result)
+    assert "With 2 checked cases the pass rate is only known" in text
+    g2 = next(line for line in text.splitlines() if line.strip().startswith("g2"))
+    assert "1 not checked" in g2 and "error" not in g2  # it was "1 errors"
+
+
+def test_watch_counts_the_cases_its_pass_rate_is_over(tmp_path, monkeypatch, capsys):
+    from llmshift.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cases.yaml").write_text(
+        "- {id: a, prompt: q1, baseline: q1, checks: [{type: contains, value: q}]}\n"
+        "- {id: b, prompt: q2, baseline: q2, checks: [{type: contains, value: q}]}\n"
+        "- {id: c, prompt: q3, baseline: q3, checks: [{type: regex, pattern: '(unclosed'}]}\n",
+        encoding="utf-8",
+    )
+    main(["watch", "--model", "mock:echo", "--tests", "cases.yaml", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "pass rate 100% (2/2), 0 failing, 0 errors, 1 not checked" in out
+    # A request that got no answer counts against the pass rate, so in what it is over (was 1/1).
+    (tmp_path / "flaky.py").write_text(
+        "def answer(request):\n    text = request['messages'][-1]['content']\n    if text == 'q2':\n        raise RuntimeError('down')\n    return text\n",
+        encoding="utf-8",
+    )
+    main(["watch", "--model", "python:flaky.py:answer", "--tests", "cases.yaml", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "pass rate 50% (1/2), 0 failing, 1 error, 1 not checked" in out
+
+
+def test_a_run_where_no_case_could_be_checked_has_no_verdict(make_case, tmp_path, monkeypatch, capsys):
+    from llmshift.cli import main
+    from llmshift.pick import _rate_cell, run_pick
+    from llmshift.prcheck import PromptChange
+    from llmshift.report import compare_markdown, compare_terminal
+
+    cases = [make_case(f"q{i}", user=f"q{i}", id=f"c{i}", checks=[{"type": "regex", "pattern": "(unclosed"}]) for i in range(3)]
+    result = run_compare(cases, "mock:echo", show_progress=False, min_pass_rate=0.95)
+    assert result.inconclusive and not result.passed
+    text = compare_terminal(result)
+    assert "n/a" in text and "inconclusive: 3 not checked" in text and "below" not in text  # was "0.0% below the 95% threshold"
+    assert "**n/a** ⚠️ inconclusive: 3 not checked" in compare_markdown(result)
+    change = PromptChange(group="g1", old="a", new="b", files=["app.py"], status="changed", result=result)
+    assert change.passed(0.95)  # check: not a failure (it was), and so inconclusive
+    res = run_pick(cases, ["mock:echo", "mock:legacy"], min_pass_rate=0.95)
+    assert res.inconclusive and res.recommended is None and "passes 0%" not in res.recommendation
+    assert "no case could be checked on" in res.recommendation and "mock:legacy" in res.recommendation
+    assert _rate_cell(res.candidates[0]) == "3 not checked"  # was "0% (0/0), 3 not checked"
+    assert all(c.cost_per_1k is not None for c in res.candidates)  # the answers came, and cost
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cases.yaml").write_text("- {id: a, prompt: q1, baseline: q1, checks: [{type: regex, pattern: '(unclosed'}]}\n", encoding="utf-8")
+    assert main(["compare", "--to", "mock:echo", "--tests", "cases.yaml", "--no-report"]) == 2
+    assert main(["pick", "--models", "mock:echo", "--tests", "cases.yaml"]) == 2  # was 1: "passes 0% of cases"
+    # A request with no answer beside a case that could not be checked: that request failed (1).
+    (tmp_path / "cases.yaml").write_text(
+        "- {id: a, prompt: q1, baseline: q1, checks: [{type: regex, pattern: '(unclosed'}]}\n"
+        "- {id: b, prompt: q2, baseline: q2, checks: [{type: contains, value: q}]}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "flaky.py").write_text("def answer(request):\n    text = request['messages'][-1]['content']\n    if text == 'q2':\n        raise RuntimeError('down')\n    return text\n", encoding="utf-8")
+    assert main(["compare", "--to", "python:flaky.py:answer", "--tests", "cases.yaml", "--no-report"]) == 1
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("check, inconclusive", [("zzz", False), ("q", True)])
+def test_the_mcp_verdict_says_inconclusive_only_when_the_run_is(tmp_path, check, inconclusive):
+    import json
+
+    from llmshift import mcp
+
+    (tmp_path / "cases.yaml").write_text(
+        "- {id: a, prompt: q1, baseline: q1, checks: [{type: regex, pattern: '(unclosed'}]}\n"
+        f"- {{id: b, prompt: q2, baseline: q2, checks: [{{type: contains, value: {check}}}]}}\n",
+        encoding="utf-8",
+    )
+    server = mcp.Server(root=tmp_path)
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+    arguments = {"cwd": str(tmp_path), "to": "mock:echo", "tests": "cases.yaml", "min_pass_rate": 0.95}
+    reply = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "llmshift_compare", "arguments": arguments}})
+    data = json.loads(reply["result"]["content"][0]["text"])
+    assert data["ok"] is False and "1 case could not be checked" in data["verdict"]
+    assert ("so the run is inconclusive" in data["verdict"]) is inconclusive  # not beside "is below the threshold"
+
+
 @pytest.mark.parametrize("baseline, answer", [
     ("The meeting is at 2:30 PM.", "The meeting is at 14:30."),
     ("The temperature drops to -5 degrees.", "The temperature drops to minus 5 degrees."),

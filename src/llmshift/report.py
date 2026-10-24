@@ -25,12 +25,20 @@ def _pct(x: float | None) -> str:
     return "n/a" if x is None else f"{x * 100:.1f}%"
 
 
+def _shown_rate(s: dict) -> float | None:
+    """The pass rate, or None ("n/a") when no case could be checked: it is over no case."""
+    return s.get("pass_rate", 0.0) if s.get("total", 0) > s.get("unchecked", 0) else None
+
+
 def range_text(s: dict) -> str:
-    """"95% range 76%-88% over 50 cases x 3 runs; 2 flaky" (empty without a summary)."""
+    """"95% range 76%-88% over 50 cases x 3 runs; 2 flaky", or "over 48 of 50 cases" when 2 could
+    not be checked (empty without a summary)."""
     rng = s.get("pass_rate_range")
     if not rng or not s.get("total"):
         return ""
-    text = f"95% range {_pct(rng[0])}-{_pct(rng[1])} over {s['total']} case{'s' if s['total'] != 1 else ''}"
+    unchecked = s.get("unchecked") or 0  # left out of the pass rate, so of its range
+    over = f"{s['total'] - unchecked} of {s['total']} cases" if unchecked else plural(s["total"], "case")
+    text = f"95% range {_pct(rng[0])}-{_pct(rng[1])} over {over}"
     if (s.get("repeats") or 1) > 1:
         text += f" x {s['repeats']} runs"
     if s.get("flaky"):
@@ -89,7 +97,7 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
         f"   {style(sym('fail') + ' ' + str(s.get('failed', 0)) + ' failed', 'red', 'bold')}"
     )
     if s.get("errors"):
-        counts += f"   {style(sym('error') + ' ' + str(s['errors']) + ' errors', 'magenta', 'bold')}"
+        counts += f"   {style(sym('error') + ' ' + plural(s['errors'], 'error'), 'magenta', 'bold')}"
     if s.get("unchecked"):
         counts += f"   {style(sym('error') + ' ' + str(s['unchecked']) + ' not checked', 'magenta', 'bold')}"
     lines.append(counts)
@@ -98,11 +106,11 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
     verdict = ""
     if threshold is not None:
         ok = result.passed
-        if ok and s.get("unchecked"):  # the exit code is 2: what could be checked passed, not everything could be
+        if result.inconclusive:  # the exit code is 2: what could be checked passed (or nothing could be), not everything could be
             verdict = "  " + style(f"{sym('warn')} inconclusive: {s['unchecked']} not checked", "yellow", "bold")
         else:
             verdict = "  " + (style(f"{sym('pass')} meets the {threshold:.0%} threshold", "green") if ok else style(f"{sym('fail')} below the {threshold:.0%} threshold", "red", "bold"))
-    lines.append(f"  pass rate {bar(rate)} {_pct(rate)}{verdict}")
+    lines.append(f"  pass rate {bar(rate)} {_pct(_shown_rate(s))}{verdict}")
     if range_text(s):
         lines.append(style(f"            {range_text(s)}", "grey"))
     cats = s.get("by_category") or {}
@@ -133,7 +141,7 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
                     text += f", e.g. {ex}"
                 lines.append(style(f"      {truncate(text, width() - 8)}", "grey"))
     groups = s.get("groups") or {}
-    bad_groups = {g: v for g, v in groups.items() if v.get("fail") or v.get("warn") or v.get("error")}
+    bad_groups = {g: v for g, v in groups.items() if v.get("fail") or v.get("warn") or v.get("error") or v.get("unchecked")}
     if len(groups) > 1 and bad_groups:
         lines.append("")
         lines.append(style("By prompt template", "bold"))
@@ -144,7 +152,9 @@ def compare_terminal(result: CompareResult, *, show: int = 5, verbose: bool = Fa
             if v.get("warn"):
                 parts.append(style(f"{v['warn']} changed", "yellow"))
             if v.get("error"):
-                parts.append(style(f"{v['error']} errors", "magenta"))
+                parts.append(style(plural(v["error"], "error"), "magenta"))
+            if v.get("unchecked"):
+                parts.append(style(f"{v['unchecked']} not checked", "magenta"))
             lines.append(f"  {truncate(g, 44):<44} {v.get('total', 0):>4} {'case ' if v.get('total', 0) == 1 else 'cases'}  " + ", ".join(parts))
     problem = _interleave_groups([c for c in result.cases if c.status != "pass"])
     if problem:
@@ -249,16 +259,15 @@ def compare_markdown(result: CompareResult, *, max_cases: int = 15, title: str =
     lines = [f"## {title}", ""]
     lines.append(f"**{result.baseline}** → **{result.candidate}**" + (f" · tests: `{result.tests_path}`" if result.tests_path else ""))
     lines.append("")
-    rate = s.get("pass_rate", 0.0)
     verdict = ""
     if result.min_pass_rate is not None:
         verdict = " ✅ meets threshold" if result.passed else f" ❌ below the {result.min_pass_rate:.0%} threshold"
-        if result.passed and s.get("unchecked"):
+        if result.inconclusive:
             verdict = f" ⚠️ inconclusive: {s['unchecked']} not checked"
     lines.append("| Pass rate | Unchanged | Changed | Failed | Errors |")
     lines.append("|---|---|---|---|---|")
     not_checked = f" (+{s['unchecked']} not checked)" if s.get("unchecked") else ""
-    lines.append(f"| **{_pct(rate)}**{verdict} | {s.get('passed', 0)} | {s.get('warned', 0)} | {s.get('failed', 0)} | {s.get('errors', 0)}{not_checked} |")
+    lines.append(f"| **{_pct(_shown_rate(s))}**{verdict} | {s.get('passed', 0)} | {s.get('warned', 0)} | {s.get('failed', 0)} | {s.get('errors', 0)}{not_checked} |")
     if range_text(s):
         lines += ["", f"_{range_text(s)}_"]
     cats = s.get("by_category") or {}
@@ -411,11 +420,11 @@ def compare_html(result: CompareResult) -> str:
     verdict = ""
     if result.min_pass_rate is not None:
         verdict = f"<div class=\"l\">{'meets' if result.passed else 'below'} the {result.min_pass_rate:.0%} threshold</div>"
-        if result.passed and s.get("unchecked"):
+        if result.inconclusive:
             verdict = f"<div class=\"l\">inconclusive: {s['unchecked']} not checked</div>"
     parts.append('<div class="cards">')
     rng = f"<div class=\"l\">{e(range_text(s))}</div>" if range_text(s) else ""
-    parts.append(f"<div class=\"card\"><div class=\"l\">Pass rate</div><div class=\"n\">{_pct(s.get('pass_rate'))}</div>{verdict}{rng}</div>")
+    parts.append(f"<div class=\"card\"><div class=\"l\">Pass rate</div><div class=\"n\">{_pct(_shown_rate(s))}</div>{verdict}{rng}</div>")
     tiles = [("Unchanged", "passed", "pass"), ("Changed", "warned", "warn"), ("Failed", "failed", "fail"), ("Errors", "errors", "error")]
     if s.get("unchecked"):
         tiles.append(("Not checked", "unchecked", "error"))

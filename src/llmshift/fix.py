@@ -28,7 +28,7 @@ from .providers import resolve
 from .providers.base import ProviderError
 from .stats import stored_rate
 from .testset import TestCase, group_key, groups_of, unique_ids
-from .textutil import language_name, md_fence, normalize, shorten, show_bidi, unified_diff, word_count
+from .textutil import language_name, md_fence, normalize, plural, shorten, show_bidi, unified_diff, word_count
 
 HEADER = "Output requirements:"
 
@@ -550,10 +550,10 @@ def fix_markdown(fix: FixResult) -> str:
         if g.locations:
             lines.append("Prompt found at: " + ", ".join(f"`{loc}`" for loc in g.locations))
             lines.append("")
-        errs = f", {g.before['errors']} errors" if g.before.get("errors") else ""
+        errs = f", {plural(g.before['errors'], 'error')}" if g.before.get("errors") else ""
         lines.append(f"- Before: {g.before.get('passed', 0)} of {g.before.get('cases', 0)} match the baseline ({g.before.get('failed', 0)} failing, {g.before.get('changed', 0)} changed{errs})")
         if g.suggested_prompt:
-            errs = f", {g.after['errors']} errors" if g.after.get("errors") else ""
+            errs = f", {plural(g.after['errors'], 'error')}" if g.after.get("errors") else ""
             lines.append(f"- After: {g.after.get('passed', 0)} of {g.after.get('cases', 0)} match the baseline ({g.after.get('failed', 0)} failing, {g.after.get('changed', 0)} changed{errs}) using **{g.strategy}**")
         else:
             lines.append("- No prompt change improved this template.")

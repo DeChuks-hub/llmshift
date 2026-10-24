@@ -389,7 +389,7 @@ class PromptChange:
             return True
         s = self.result.summary
         if not s.get("evaluated"):
-            return False
+            return self.result.inconclusive  # no case could be checked: no verdict, not a failure
         return min_pass_rate is None or s.get("pass_rate", 0.0) + 1e-9 >= min_pass_rate
 
     def to_dict(self, min_pass_rate: float | None = None) -> dict:
@@ -563,6 +563,7 @@ class CheckRun:
             "min_pass_rate": self.min_pass_rate,
             "files": self.files,
             "passed": self.passed,
+            "inconclusive": self.inconclusive,  # passed, but some cases could not be checked
             "changes": [c.to_dict(self.min_pass_rate) for c in self.changes],
         }
 
@@ -730,6 +731,8 @@ def _patterns(result: Any, n: int = 3) -> list[str]:
 
 def _rate(change: PromptChange) -> str:
     s = change.result.summary
+    if s.get("total", 0) <= s.get("unchecked", 0):  # no case could be checked: no pass rate
+        return "n/a"
     return f"{s.get('pass_rate', 0.0):.0%}"
 
 

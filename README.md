@@ -237,7 +237,7 @@ Switch to mock:frugal: same quality (all 18 cases unchanged), 96% cheaper - abou
 - Costs come from the token usage each provider reports (estimated from the text when it reports none, marked `~`). Thinking tokens cost what output does, cached input and 1-hour cache writes their own prices, and a long prompt its long-context price where the list has one. A candidate with cases that could not be checked is not recommended. Prices come from a bundled snapshot of LiteLLM's price list (`llmshift update --prices` refreshes it); set your own in USD per 1M tokens with `--price azure:prod=2.5/10` or under `pricing:` in `llmshift.yaml`.
 - Today's cost uses the usage recorded with your baseline answers and the price of `--baseline` (default: `baseline` in `llmshift.yaml`, else the recorded model). When today's model is also one of the candidates, today's cost is measured on the same tests instead, so every saving compares like with like.
 - The quality bar is `--min-pass-rate` (default `min_pass_rate`, 0.95). If nothing passes, `pick` names the closest candidate and what broke; `llmshift fix --to <model>` can often close the gap.
-- `--format json|markdown`, `--json [FILE]`, `--markdown [FILE]`. Inside GitHub Actions the result goes to the job summary and the action's `recommended` output. Exit code 0 when a model is recommended, 1 when none passes, and 2 when one passes only the cases that could be checked.
+- `--format json|markdown`, `--json [FILE]`, `--markdown [FILE]`. Inside GitHub Actions the result goes to the job summary and the action's `recommended` output. Exit code 0 when a model is recommended, 1 when none passes, and 2 when some cases could not be checked and the rest pass (no verdict yet).
 
 ## safety: is the new model riskier?
 

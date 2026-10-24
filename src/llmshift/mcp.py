@@ -36,7 +36,7 @@ from typing import Any, BinaryIO, Callable
 from . import __version__
 from . import console as con
 from .errors import EXIT_INTERRUPTED, EXIT_OK, UsageError
-from .textutil import json_loads, report_json
+from .textutil import json_loads, plural, report_json
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")  # newest first
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -803,16 +803,22 @@ def _compare_tool(args: dict, cfg: Any) -> dict:
     shown = changed[: int(args.get("max_cases_shown", 10))]
     unchecked = s.get("unchecked", 0)
     if s.get("evaluated", 0) == 0:
-        verdict = "no case could be checked: a check could not run; see the cases" if unchecked else "every request failed; see the cases for the errors"
+        if not unchecked:
+            verdict = "every request failed; see the cases for the errors"
+        elif not s.get("errors"):
+            verdict = "no case could be checked: a check could not run; see the cases"
+        else:
+            verdict = f"no case could be checked: {plural(s['errors'], 'request')} failed and the other cases' checks could not run; see the cases"
         ok = False
     elif result.min_pass_rate is not None:
         ok = result.passed and not unchecked
         verdict = f"pass rate {s['pass_rate']:.0%} {'meets' if result.passed else 'is below'} the {result.min_pass_rate:.0%} threshold"
     else:
         ok = not (s.get("failed") or s.get("errors") or unchecked)
-        verdict = f"{s.get('passed', 0)} unchanged, {s.get('warned', 0)} changed, {s.get('failed', 0)} failed, {s.get('errors', 0)} errors"
+        verdict = f"{s.get('passed', 0)} unchanged, {s.get('warned', 0)} changed, {s.get('failed', 0)} failed, {plural(s.get('errors', 0), 'error')}"
     if unchecked and s.get("evaluated", 0):
-        verdict += f"; {unchecked} case{'s' if unchecked != 1 else ''} could not be checked (a check could not run), so the run is inconclusive"
+        verdict += f"; {unchecked} case{'s' if unchecked != 1 else ''} could not be checked (a check could not run)"
+        verdict += ", so the run is inconclusive" if result.inconclusive else ""
     out = {
         "candidate": result.candidate,
         "baseline": result.baseline,

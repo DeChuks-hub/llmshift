@@ -336,7 +336,7 @@ class Progress:
             now = time.time()
             if self.enabled and (now - self._last > 0.1 or self.done == self.total):
                 self._last = now
-                extra = f", {self.failed} errors" if self.failed else ""
+                extra = f", {self.failed} error{'s' if self.failed != 1 else ''}" if self.failed else ""
                 msg = f"\r  {self.label}: {self.done}/{self.total}{extra}"
                 try:
                     sys.stderr.write(msg)

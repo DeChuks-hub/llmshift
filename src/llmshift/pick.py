@@ -228,8 +228,8 @@ def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, Tes
     cand.low, cand.high = s.get("pass_rate_range") or (None, None)  # over the same cases as the pass rate
     cand.meets_bar = cand.total > 0 and not cand.unchecked and cand.pass_rate + 1e-9 >= threshold
     cand.latency_p50_ms = (s.get("latency_ms") or {}).get("p50")
-    cats = sorted(
-        ((k, v.get("fail", 0), v.get("warn", 0)) for k, v in (s.get("by_category") or {}).items() if v.get("fail") or v.get("warn")),
+    cats = sorted(  # what failed: a case that could not be checked did not
+        ((k, v.get("fail", 0), v.get("warn", 0)) for k, v in (s.get("by_category") or {}).items() if k != "unchecked" and (v.get("fail") or v.get("warn"))),
         key=lambda x: (-x[1], -x[2], x[0]),
     )
     cand.top_failures = [
@@ -240,7 +240,7 @@ def _evaluate_candidate(cand: CandidateResult, result: Any, cases: dict[str, Tes
         return
     costs: dict[str, float] = {}
     for c in result.cases:
-        if c.status == "error" or c.id not in cases:
+        if (c.status == "error" and not c.unchecked) or c.id not in cases:  # an unchecked case was answered: it cost
             continue
         costs[c.id], guessed = pricing.usage_cost(cand.price, c.usage, _prompt_text(cases[c.id]), _output_text(c.candidate_output, c.candidate_tool_calls))
         cand.estimated = cand.estimated or guessed
@@ -280,18 +280,21 @@ def _recommend(res: PickResult) -> None:
     if not tested:
         res.recommendation = "None of the candidates could be tested: " + "; ".join(f"{c.spec}: {c.error}" for c in res.candidates)
         return
-    # A candidate that passes the cases that could be checked, but not all could be: no verdict.
-    unsure = [c for c in tested if c.unchecked and c.total > c.unchecked and (c.pass_rate or 0.0) + 1e-9 >= threshold]
+    # A candidate that passes the cases that could be checked, but not all could be (or none
+    # could be): no verdict.
+    unsure = [c for c in tested if c.unchecked and (c.unchecked >= c.total or (c.pass_rate or 0.0) + 1e-9 >= threshold)]
     cheapest = min(passing, key=_rank) if passing else None
-    for c in unsure:
-        if cheapest is None or _rank(c) < _rank(cheapest):
-            res.notes.append(f"{c.spec} passes the cases that could be checked, but {c.unchecked} could not be (a check could not run): fix the check and run again.")
+    for c in unsure:  # cheaper than the recommendation, maybe, but not known to keep quality
+        if cheapest is not None and _rank(c) < _rank(cheapest):
+            what = f"no case could be checked on {c.spec}" if c.unchecked >= c.total else f"{c.spec} passes the cases that could be checked, but {c.unchecked} could not be"
+            res.notes.append(f"{what[0].upper()}{what[1:]} (a check could not run): fix the check and run again.")
     if not passing and unsure:
         res.inconclusive = True
-        res.recommendation = (
-            f"No candidate can be recommended yet: {', '.join(c.spec for c in unsure)} "
-            f"{'passes' if len(unsure) == 1 else 'pass'} the cases that could be checked, but some could not be (a check could not run)."
-        )
+        some = [c.spec for c in unsure if c.unchecked < c.total]
+        none = [c.spec for c in unsure if c.unchecked >= c.total]
+        parts = [f"{', '.join(some)} {'passes' if len(some) == 1 else 'pass'} the cases that could be checked, but some could not be"] if some else []
+        parts += [f"no case could be checked on {' or '.join(none)}"] if none else []
+        res.recommendation = f"No candidate can be recommended yet: {'; '.join(parts)} (a check could not run). Fix the check and run again."
         return
     if not passing:
         best = max(tested, key=lambda c: (c.pass_rate or 0.0, -(c.cost_per_1k or 0.0)))
@@ -486,6 +489,8 @@ def _vs_today(c: CandidateResult) -> str:
 
 def _rate_cell(c: CandidateResult) -> str:
     checked = c.total - c.unchecked
+    if not checked:  # no pass rate: it would be over no case
+        return f"{c.unchecked} not checked"
     cell = f"{c.pass_rate:.0%} ({c.passed + c.warned}/{checked})"
     return cell + f", {c.unchecked} not checked" if c.unchecked else cell
 
@@ -633,7 +638,8 @@ def cmd_pick(args: argparse.Namespace, cfg: dict) -> int:
             con.out(con.style(f"  {c.spec}: could not run ({con.truncate(c.error, 120)})", "red"), err=True)
         else:
             cost = f", {_cost_cell(c.cost_per_1k, c.estimated)} per 1,000 requests" if c.cost_per_1k is not None else ""
-            con.out(con.style(f"  {c.spec}: pass rate {c.pass_rate:.0%}{cost} ({c.seconds:.0f}s)", "grey"), err=True)
+            rate = f"pass rate {c.pass_rate:.0%}" + (f", {c.unchecked} not checked" if c.unchecked else "") if c.total > c.unchecked else "no case could be checked"
+            con.out(con.style(f"  {c.spec}: {rate}{cost} ({c.seconds:.0f}s)", "grey"), err=True)
 
     res = run_pick(
         cases,

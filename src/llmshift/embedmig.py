@@ -24,7 +24,7 @@ from . import __version__
 from . import console as con
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.base import ProviderError
-from .textutil import json_loads, jsonl_lines, report_json, show_bidi
+from .textutil import credit, json_loads, jsonl_lines, report_json, show_bidi
 
 TEXT_SUFFIXES = {".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".json", ".jsonl", ".ndjson"}
 TEXT_FIELDS = ("text", "content", "body", "page_content", "chunk", "document", "passage", "summary")
@@ -594,6 +594,7 @@ def report_markdown(r: EmbeddingReport) -> str:
             lines.append(f"- {query} (overlap {w['overlap']:.0%})")
     for note in r.notes:
         lines += ["", f"> {_md(note)}"]
+    lines += ["", credit()]
     return show_bidi("\n".join(lines) + "\n")
 
 

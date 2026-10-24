@@ -27,7 +27,7 @@ from .checks import CATEGORY_TITLES
 from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .pricing import Price, money
 from .testset import TestCase, unique_ids
-from .textutil import plural, report_json, show_bidi
+from .textutil import credit, plural, report_json, show_bidi
 
 DEFAULT_MIN_PASS_RATE = 0.95
 
@@ -585,6 +585,7 @@ def pick_markdown(res: PickResult) -> str:
         lines.append(_md(price_line))
     for note in res.notes:
         lines.append(f"- {_md(note)}")
+    lines += ["", credit()]
     return show_bidi("\n".join(lines) + "\n")
 
 

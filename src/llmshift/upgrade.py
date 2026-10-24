@@ -24,7 +24,7 @@ from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, UsageError
 from .providers.anthropic import default_sampling_only
 from .providers.base import ProviderError
-from .textutil import md_fence, parse_python, plural, show_bidi
+from .textutil import PROJECT_URL, md_fence, parse_python, plural, show_bidi
 
 PROTECTED_DIRS = {".git", ".hg", ".svn", "node_modules", "vendor", "vendors", "third_party", "third-party", "site-packages", ".venv", "venv", "dist", "build", ".llmshift"}
 CONFIG_NAMES = {"llmshift.yaml", "llmshift.yml", ".llmshift.yaml", ".llmshift.yml"}
@@ -838,7 +838,7 @@ def plan_markdown(plan: UpgradePlan, min_pass_rate: float | None = None) -> str:
         lines.append(md_fence(diff[:40000].rstrip(), "diff"))
         lines.append("</details>")
         lines.append("")
-    lines.append("_Opened by `llmshift upgrade`. Review the diff and the test results before merging._")
+    lines.append(f"_Opened by [`llmshift upgrade`]({PROJECT_URL}). Review the diff and the test results before merging._")
     return show_bidi("\n".join(lines) + "\n")
 
 

@@ -24,7 +24,7 @@ from . import console as con
 from . import github as gh
 from .errors import EXIT_FAIL, EXIT_OK, EXIT_USAGE, UsageError
 from .report import _md
-from .textutil import md_fence, report_json, show_bidi, source_lines
+from .textutil import credit, md_fence, report_json, show_bidi, source_lines
 
 MIN_PROMPT = 15  # shorter strings are not prompts
 LIVES_RATIO = 0.85  # how close a string in the base version must be to the recorded prompt
@@ -751,6 +751,7 @@ def check_markdown(run: CheckRun, marker: str = gh.CHECK_MARKER) -> str:
         lines.append("## LLMShift prompt check: no prompt changes")
         lines.append("")
         lines.append("This change does not edit any prompt covered by the test set.")
+        lines += ["", credit()]
         return show_bidi("\n".join(lines) + "\n")
     what = "prompt(s)" if run.ran_all else "prompt change(s)"  # --all also runs the prompts this change left alone
     if run.failing:
@@ -797,6 +798,7 @@ def check_markdown(run: CheckRun, marker: str = gh.CHECK_MARKER) -> str:
         lines.append("")
         lines.append("</details>")
         lines.append("")
+    lines += ["", credit()]
     return show_bidi("\n".join(lines).rstrip() + "\n")
 
 

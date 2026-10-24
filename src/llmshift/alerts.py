@@ -160,9 +160,10 @@ def _send_github(dest: dict, msg: AlertMessage) -> None:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
     label = str(dest.get("label", "llmshift"))
     from .report import _md  # the lines quote answers and patterns: no links, images or @mentions
+    from .textutil import credit
 
     title = msg.issue_title or f"[llmshift] {msg.model}: behaviour drift detected"
-    body = "\n".join([f"**{_md(msg.title)}**", ""] + [f"- {_md(line)}" for line in msg.lines] + (["", f"Run: {msg.run_url}"] if msg.run_url else []))
+    body = "\n".join([f"**{_md(msg.title)}**", ""] + [f"- {_md(line)}" for line in msg.lines] + (["", f"Run: {msg.run_url}"] if msg.run_url else []) + ["", credit("Sent by")])
     existing = None
     for page in range(1, 11):  # every open issue with the label, not just the first page
         issues = http.get_json(

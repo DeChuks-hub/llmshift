@@ -2,6 +2,18 @@
 
 **Switch AI models without breaking your product.**
 
+[![PyPI](https://img.shields.io/pypi/v/llmshift)](https://pypi.org/project/llmshift/) [![Python](https://img.shields.io/pypi/pyversions/llmshift)](https://pypi.org/project/llmshift/) [![CI](https://github.com/DeChuks-hub/llmshift/actions/workflows/ci.yml/badge.svg)](https://github.com/DeChuks-hub/llmshift/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/DeChuks-hub/llmshift/blob/main/LICENSE)
+
+GPT-4o, GPT-4o mini and GPT-4.1 retire on 14 January 2027, GPT-5 and o3 on 11 December, Claude Sonnet 4.5 on 30 November. Does your code call one of them? Find out in seconds, with nothing to install:
+
+```bash
+uvx llmshift scan        # or: pipx run llmshift scan
+```
+
+<img src="https://raw.githubusercontent.com/DeChuks-hub/llmshift/main/docs/scan.svg" alt="llmshift scan lists each retiring model in the code with its shutdown date, its replacement and the lines that call it" width="760">
+
+Then test the replacement on your real traffic before the shutdown date: `llmshift snapshot` turns your logs into tests and `llmshift compare --to <replacement>` shows what changes. `llmshift demo` walks through it with simulated models, no API key needed.
+
 Providers now retire models roughly every six months. When a model's behaviour changes, outputs can look fine and still be wrong, and nothing raises an error. LLMShift is built around the moment of switching models, from finding the calls to proving the new model works:
 
 | Command | What it does |

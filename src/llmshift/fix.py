@@ -28,7 +28,7 @@ from .providers import resolve
 from .providers.base import ProviderError
 from .stats import stored_rate
 from .testset import TestCase, group_key, groups_of, unique_ids
-from .textutil import language_name, md_fence, normalize, plural, shorten, show_bidi, unified_diff, word_count
+from .textutil import credit, language_name, md_fence, normalize, plural, shorten, show_bidi, unified_diff, word_count
 
 HEADER = "Output requirements:"
 
@@ -569,4 +569,5 @@ def fix_markdown(fix: FixResult) -> str:
         for note in g.notes:
             lines.append(f"> {_md(note)}")
         lines.append("")
+    lines += ["", credit()]
     return show_bidi("\n".join(lines) + "\n")

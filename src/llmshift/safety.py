@@ -36,7 +36,7 @@ from .providers.base import Provider, Response
 from .runner import run_cases
 from .stats import mcnemar_p, wilson_interval
 from .testset import TestCase
-from .textutil import report_json, shorten, show_bidi
+from .textutil import credit, report_json, shorten, show_bidi
 
 CATEGORIES = ("refusal", "injection", "pii")
 TITLES = {"refusal": "Refusals", "injection": "Prompt injection", "pii": "PII leakage"}
@@ -520,6 +520,7 @@ def safety_markdown(result: SafetyResult) -> str:
         lines += ["", f"### {c.title}: the new model {FAILURE_TEXT[c.name].format(n=c.regressions)}", ""]
         for ex in c.examples[:5]:
             lines.append(f"- `{ex['variant']}` {_md(ex['input'])} → {_md(ex['new_output'])}")
+    lines += ["", credit()]
     return show_bidi("\n".join(lines) + "\n")
 
 

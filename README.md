@@ -10,7 +10,9 @@ GPT-4o, GPT-4o mini and GPT-4.1 retire on 14 January 2027, GPT-5 and o3 on 11 De
 uvx llmshift scan        # or: pipx run llmshift scan
 ```
 
-<img src="https://raw.githubusercontent.com/DeChuks-hub/llmshift/main/docs/scan.svg" alt="llmshift scan lists each retiring model in the code with its shutdown date, its replacement and the lines that call it" width="760">
+<img src="https://raw.githubusercontent.com/DeChuks-hub/llmshift/main/docs/demo.gif" alt="llmshift scan lists the retiring models a repository calls, with dates, replacements and lines; llmshift compare then shows that Claude Haiku 5.5 rejects every recorded request for its temperature setting and changes facts and tone" width="800">
+
+<sub>A real run: <code>scan</code> on a sample repository, then <code>compare</code> replaying llmshift's demo traffic on Claude Haiku 5.5.</sub>
 
 Then test the replacement on your real traffic before the shutdown date: `llmshift snapshot` turns your logs into tests and `llmshift compare --to <replacement>` shows what changes. `llmshift demo` walks through it with simulated models, no API key needed.
 

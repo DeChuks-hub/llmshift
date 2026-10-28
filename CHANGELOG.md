@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Security:** the config search stays inside what is yours. Before, outside a git repository, llmshift looked in every parent folder up to the drive root. A config that another user planted higher up, such as `C:\.llmshift\config.yaml` (which any user can create), could name programs that llmshift would then run as you. That is the hole git closed as CVE-2022-24765. Now the search:
+- **Security:** the config search stays inside what is yours. Before, outside a git repository, the search went through every parent folder up to the drive root. A config that another user planted higher up, such as `C:\.llmshift\config.yaml` (which any user can create), could name programs that would then run as you. That is the hole git closed as CVE-2022-24765. Now the search:
   - stops at the git root, at your home directory, and at the project an MCP server was started on;
   - never reads a drive root or `/`;
   - on Linux and macOS, ignores files another user owns and says so in the warnings;

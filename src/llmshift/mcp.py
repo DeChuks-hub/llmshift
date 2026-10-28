@@ -256,7 +256,7 @@ class Server:
 
         try:
             with self._workspace(arguments):
-                cfg = load_config(self.config_path)
+                cfg = load_config(self.config_path, stop=self.root)  # never a config from above the project
                 data = spec.handler(arguments, cfg)
         except RunAborted as exc:
             return self._result(f"every request failed: {exc}. Check the model name and that the provider's API key "

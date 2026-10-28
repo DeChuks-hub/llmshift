@@ -182,6 +182,69 @@ def test_programs_are_never_found_in_the_current_directory(tmp_path, monkeypatch
     assert not re.search(r"""\[\s*["'](?:git|taskkill)["']""", source), "start git and taskkill by full path"
 
 
+def test_the_config_search_stays_inside_your_project_and_home(tmp_path, monkeypatch):
+    # A config can name programs to run, so one planted in a shared parent folder must not
+    # be read (as git's CVE-2022-24765, where any user could create C:\.git).
+    from llmshift import config
+
+    home = tmp_path / "home"
+    sub = home / "proj" / "sub"
+    sub.mkdir(parents=True)
+    (tmp_path / "llmshift.yaml").write_text("candidate: mock:above-home\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_home", lambda: home.resolve())
+    assert config.find_config(sub) is None  # stops at the home directory
+    (home / "proj" / "llmshift.yaml").write_text("candidate: mock:mine\n", encoding="utf-8")
+    assert config.find_config(sub) == home / "proj" / "llmshift.yaml"
+    assert config.find_config(sub, stop=sub) is None  # an MCP server's project bounds it too
+    (home / "proj" / "sub" / ".git").mkdir()
+    assert config.find_config(sub) is None  # and the git root does
+
+
+def test_on_windows_a_shared_folder_is_searched_only_up_to_its_git_root(tmp_path, monkeypatch):
+    from llmshift import config
+
+    monkeypatch.setattr(config, "_windows_rules", lambda: True)
+    monkeypatch.setattr(config, "_home", lambda: (tmp_path / "somebody").resolve())  # outside home
+    sub = tmp_path / "shared" / "proj" / "sub"
+    sub.mkdir(parents=True)
+    (tmp_path / "shared" / "llmshift.yaml").write_text("candidate: mock:planted\n", encoding="utf-8")
+    assert config.find_config(sub) is None  # no git: only the folder itself
+    (tmp_path / "shared" / "proj" / ".git").mkdir()
+    assert config.find_config(sub) is None  # the git root is proj, below the planted file
+    (tmp_path / "shared" / "proj" / "llmshift.yaml").write_text("candidate: mock:mine\n", encoding="utf-8")
+    assert config.find_config(sub) == tmp_path / "shared" / "proj" / "llmshift.yaml"
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="POSIX file owners, as a normal user")
+def test_a_config_owned_by_another_user_is_ignored_and_reported(tmp_path, monkeypatch):
+    from llmshift import config
+
+    (tmp_path / "llmshift.yaml").write_text("candidate: mock:planted\n", encoding="utf-8")
+    real = os.geteuid()
+    monkeypatch.setattr(config, "_home", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(os, "geteuid", lambda: real + 4242 if real else 4242)  # as if someone else ran it
+    cfg = config.load_config()
+    assert cfg.path is None and any("another user owns it" in w for w in cfg.warnings)
+
+
+def test_the_mcp_server_never_reads_a_config_from_above_its_project(tmp_path, monkeypatch):
+    from llmshift import config, mcp
+
+    seen = {}
+    real_load = config.load_config
+
+    def spy(path=None, *, stop=None):
+        seen["stop"] = stop
+        return real_load(path, stop=stop)
+
+    monkeypatch.setattr(config, "load_config", spy)
+    (tmp_path / "proj").mkdir()
+    server = mcp.Server(root=tmp_path / "proj")
+    server.call_tool(mcp.TOOLS["llmshift_doctor"], {})
+    assert seen["stop"] == server.root
+
+
 def test_the_official_openai_api_is_matched_by_host_name():
     from llmshift.providers.openai import OpenAIProvider
 

@@ -473,7 +473,7 @@ Inputs: `command` (any LLMShift command), `args` (split like shell words: quote 
 
 ## Configuration
 
-Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`; the nearest one in the current directory or a parent (up to the git root) is used. Relative paths in it are relative to the file, so commands work from any subdirectory. `${VAR}` and `${VAR:-default}` are read from the environment. Command-line flags win, and values of the wrong type are reported with the key's name. [`examples/llmshift.yaml`](https://github.com/DeChuks-hub/llmshift/blob/main/examples/llmshift.yaml) documents every key: default models, judge, repeats, thresholds, severities, scan options, snapshot limits and redaction, fix rounds, pick candidates and prices, watch thresholds and alerts, the digest, and custom providers.
+Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`. The nearest one in the current directory or a parent is used, up to the git root or your home directory, but never one from a drive root or one that another user owns ([SECURITY.md](https://github.com/DeChuks-hub/llmshift/blob/main/SECURITY.md)). Relative paths in it are relative to the file, so commands work from any subdirectory. `${VAR}` and `${VAR:-default}` are read from the environment. Command-line flags win, and values of the wrong type are reported with the key's name. [`examples/llmshift.yaml`](https://github.com/DeChuks-hub/llmshift/blob/main/examples/llmshift.yaml) documents every key: default models, judge, repeats, thresholds, severities, scan options, snapshot limits and redaction, fix rounds, pick candidates and prices, watch thresholds and alerts, the digest, and custom providers.
 
 ## Exit codes
 

@@ -42,6 +42,13 @@ Two features run Python code that you supply. Both run with your own permissions
 
 llmshift also runs `git` (to list files and to open pull requests). It always finds git's full path in your `PATH`, never in the current directory, so a `git.exe` inside a cloned repository cannot run in its place.
 
+Because a config can name programs to run, llmshift only reads a config that belongs to your project. It looks in the current directory and its parents, and stops at:
+- the git root;
+- your home directory;
+- the project an MCP server was started on.
+
+It never reads a config from a drive root or `/`, where any user can create `C:\.llmshift`. On Linux and macOS it ignores a config file that another user owns, and says so. On Windows, outside your home directory, it looks above the current directory only up to the git root. Git closed the same hole as CVE-2022-24765.
+
 Treat `llmshift.yaml`, or `[tool.llmshift]` in `pyproject.toml`, like code:
 
 - Don't turn on python graders for evals you haven't read.

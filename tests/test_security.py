@@ -215,6 +215,23 @@ def test_on_windows_a_shared_folder_is_searched_only_up_to_its_git_root(tmp_path
     assert config.find_config(sub) == tmp_path / "shared" / "proj" / "llmshift.yaml"
 
 
+def test_the_windows_rule_applies_on_windows_and_only_there(tmp_path, monkeypatch):
+    # The test above swaps the switch in, and test folders sit inside the home folder, where
+    # the rule never applies. So this one keeps the real switch: a switch that is always off
+    # would quietly drop the protection on Windows, and every other test would still pass.
+    from llmshift import config
+
+    monkeypatch.setattr(config, "_home", lambda: (tmp_path / "somebody").resolve())  # outside home
+    sub = tmp_path / "shared" / "proj" / "sub"
+    sub.mkdir(parents=True)
+    planted = tmp_path / "shared" / "llmshift.yaml"
+    planted.write_text("candidate: mock:planted\n", encoding="utf-8")
+    if sys.platform == "win32":
+        assert config.find_config(sub) is None  # no git: only the folder itself
+    else:
+        assert config.find_config(sub) == planted  # yours, so it is read
+
+
 @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="POSIX file owners, as a normal user")
 def test_a_config_owned_by_another_user_is_ignored_and_reported(tmp_path, monkeypatch):
     from llmshift import config

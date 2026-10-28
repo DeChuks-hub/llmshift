@@ -32,6 +32,29 @@ def long_path(path: str | os.PathLike, *, always: bool = False) -> str:
     return "\\\\?\\UNC\\" + full[2:] if full.startswith("\\\\") else "\\\\?\\" + full
 
 
+def find_program(name: str) -> str | None:
+    """The full path of a program in a PATH folder, never one in the current directory.
+    Windows looks in the current directory first when it starts "git", so a git.exe that a
+    cloned repository puts there would run instead (an untrusted search path, as in
+    GitPython's CVE-2023-40590). On Windows only .exe files count: batch files go through
+    cmd.exe, which re-reads the arguments."""
+    suffixes = (".exe",) if os.name == "nt" else ("",)
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        folder = folder.strip().strip('"')
+        if not folder or not os.path.isabs(folder):  # "" and "." are the current directory
+            continue
+        for suffix in suffixes:
+            candidate = os.path.join(folder, name + suffix)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
+def windows_tool(name: str) -> str:
+    """A program that ships with Windows, by its full path in System32."""
+    return os.path.join(os.environ.get("SystemRoot") or r"C:\Windows", "System32", name + ".exe")
+
+
 if os.name == "nt":
     import msvcrt
 

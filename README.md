@@ -467,7 +467,7 @@ A model is written `provider:model`; well-known IDs work without a prefix.
     OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-`@v0` follows the newest 0.x release: it moves once PyPI has a release, and never to a pre-release. Pin `@v0.1.4` or a commit SHA for builds that must not change.
+`@v0` follows the newest 0.x release: it moves once PyPI has a release, and never to a pre-release. Pin `@v0.1.5` or a commit SHA for builds that must not change.
 
 Inputs: `command` (any LLMShift command), `args` (split like shell words: quote an argument that holds spaces; nothing is expanded), `python-version`, `version` (empty = install from the action's source), `working-directory`. Outputs: `pass-rate`, `retired`, `retiring`, `recommended` (from `pick`). Complete workflows are in [`examples/workflows/`](https://github.com/DeChuks-hub/llmshift/tree/main/examples/workflows): PR checks, a nightly watch, prompt checks on pull requests, weekly upgrade pull requests and a weekly retirement digest. Pull requests from forks and Dependabot get no secrets, so those workflows skip the comparison there with a notice.
 
@@ -489,7 +489,8 @@ Settings live in `llmshift.yaml` or under `[tool.llmshift]` in `pyproject.toml`;
 - Prompts and outputs are sent only to the providers you name. The cache and reports stay on disk, and `init` adds them to `.gitignore`. `llmshift cache clear` deletes the cached responses (they hold your prompts and the answers).
 - `snapshot`, `record` and shadow mode redact secrets by default. PII redaction is available with `--redact-pii`.
 - `safety` uses only synthetic personal data in its probes.
-- Imported Python graders execute code, so they only run with `--allow-python`, in a separate process.
+- Imported Python graders execute code, so they only run with `--allow-python`, in a separate process. `command` providers never run through a shell.
+- Every push and every release is scanned (Bandit, pip-audit, CodeQL and llmshift's own security tests). [SECURITY.md](https://github.com/DeChuks-hub/llmshift/blob/main/SECURITY.md) says how to report a vulnerability privately.
 - Reports escape all model output (HTML-safe).
 - Hostile input is tested: YAML alias bombs, gzip bombs, huge or corrupt logs, broken Unicode and oversized provider responses produce clear errors, or are skipped and counted, instead of hanging or crashing.
 

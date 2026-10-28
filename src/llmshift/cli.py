@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -54,11 +55,9 @@ def _step_summary(markdown: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not path:
         return
-    try:
+    with contextlib.suppress(OSError):
         with open(path, "a", encoding="utf-8", errors="replace") as fh:
             fh.write(markdown + "\n")
-    except OSError:
-        pass
 
 
 def _github_output(name: str, value: Any) -> None:
@@ -66,7 +65,7 @@ def _github_output(name: str, value: Any) -> None:
     if not path:
         return
     text = str(value)
-    try:
+    with contextlib.suppress(OSError):
         with open(path, "a", encoding="utf-8", errors="replace") as fh:
             if "\n" in text or "\r" in text:  # a line break would start another output: the multi-line form
                 import secrets
@@ -75,8 +74,6 @@ def _github_output(name: str, value: Any) -> None:
                 fh.write(f"{name}<<{delimiter}\n{text}\n{delimiter}\n")
             else:
                 fh.write(f"{name}={text}\n")
-    except OSError:
-        pass
 
 
 def _cache(cfg: dict, args: argparse.Namespace) -> Any:
@@ -410,15 +407,13 @@ def cmd_init(args: argparse.Namespace, cfg: dict) -> int:
             _write(wf, text)
             con.out(f"{con.style(con.sym('pass'), 'green')} wrote {_rel(wf)}")
     gi = Path(".gitignore")
-    try:
+    with contextlib.suppress(OSError):
         # Bytes: the file may not be UTF-8, and its encoding must be left as it is.
         existing = gi.read_bytes() if gi.exists() else b""
         if b".llmshift/cache" not in existing:
             with gi.open("ab") as fh:
                 fh.write((b"\n" if existing and not existing.endswith(b"\n") else b"") + b"# llmshift\n.llmshift/cache/\n.llmshift/reports/\n")
             con.out(f"{con.style(con.sym('pass'), 'green')} added .llmshift/cache and .llmshift/reports to .gitignore")
-    except OSError:
-        pass
     con.out("")
     con.out("Next steps:")
     con.out("  1. llmshift scan                         # which models your code calls, and when they retire")
@@ -1247,7 +1242,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="with --api: import every eval in the project")
     p.add_argument("--eval-id", action="append", help="with --api: import this eval id (repeatable)")
     p.add_argument("--eval", action="append", help="only evals whose name matches this glob (repeatable)")
-    p.add_argument("--data", help="data file for an exported eval ({\"item\": ...} JSONL)")
+    p.add_argument("--data", help="data file for an exported eval, as {\"item\": ...} JSONL")
     p.add_argument("--max-items", type=positive_int, help="at most N items per eval")
     p.add_argument("--output", "-o", help="test file to write (default .llmshift/tests.jsonl)")
     p.add_argument("--split", help="write one test file per eval into this directory")
@@ -1278,10 +1273,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["clear"])
     p.set_defaults(func=cmd_cache)
 
-    import importlib
+    from . import calibrate, embedmig, feed, mcp, pick, prcheck, safety, shadow, upgrade
 
+    modules = {"calibrate": calibrate, "pick": pick, "safety": safety, "shadow": shadow, "mcp": mcp, "prcheck": prcheck, "upgrade": upgrade, "embedmig": embedmig, "feed": feed}
     for name in EXTENSIONS:
-        importlib.import_module(f"{__package__}.{name}").register(sub)
+        modules[name].register(sub)
     return parser
 
 
@@ -1369,10 +1365,8 @@ def entry() -> None:
     if code == EXIT_INTERRUPTED:
         # Worker threads may still be blocked in network reads: exit without waiting for them.
         for stream in (sys.stdout, sys.stderr):
-            try:
+            with contextlib.suppress(Exception):
                 stream.flush()
-            except Exception:
-                pass
         os._exit(code)
     sys.exit(code)
 

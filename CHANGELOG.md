@@ -1,8 +1,32 @@
 # Changelog
 
-## Unreleased
+## 0.1.5 (2026-10-28)
 
 - `llmshift calendar --goatcounter <code>` counts visits to the calendar site with GoatCounter, which sets no cookies, and says so in the page footer. GoatCounter's script is pinned to one version (`count.v5.js`) with its integrity hash, so browsers refuse it if it ever changes.
+- Python graders now run as an ordinary module. Their source is written to a file in a temporary directory and imported by a separate Python process, so it is never handed to Python's `exec`. They are still off unless you pass `--allow-python` or set `allow_python_checks: true`. This answers an automated static-analysis advisory, GCVE-110-VULN-PYPI-2026-000499 (CWE-94). A test now fails if a call to `exec` or `eval` appears anywhere in llmshift's own source.
+- **Security:** on Windows, git and taskkill now start by their full path. Windows looks in the current directory before `PATH`, so a `git.exe` inside a cloned repository could have run in place of git when you scanned it. That is the untrusted search path GitPython fixed as CVE-2023-40590. Git is found in a `PATH` folder and never in the current one.
+- **Changed:** a `command` provider never runs its command through a shell. A string command is split into words as a shell would split them (quotes group words), and nothing in it is expanded, piped or chained, so text in a config can no longer start a second program. On Windows the program splits the string itself. For shell features, name the shell yourself: `command: ["sh", "-c", "a | b"]`. An unclosed quote is a config error.
+- Code that security scanners report is gone:
+  - The subcommand modules and the OpenAI SDK's schema converters are loaded with ordinary `import` statements, not looked up from strings.
+  - `OLLAMA_HOST=0.0.0.0` is recognised with `ipaddress` instead of a hard-coded address.
+  - The scanner's `shell=` option is now `shell_script=`, since scanners take any `shell=` argument for a shell.
+- `tests/test_security.py` fails on code that scanners report:
+  - dynamic code execution;
+  - shells, pickle, or unsafe YAML;
+  - unverified connections;
+  - weak hashes used for security;
+  - hidden bidirectional text.
+- Bandit reports no issues at any severity on llmshift's code. Every safe-by-design case is marked `# nosec Bxxx` with its reason:
+  - errors that are ignored on purpose now use `contextlib.suppress`;
+  - retry jitter and recording sampling use the operating system's random source;
+  - the JUnit writer escapes XML itself instead of importing `xml.sax`;
+  - the maintenance scripts fetch only `https://` addresses.
+- A `security` workflow runs Bandit, `pip-audit` and those tests on every push, every pull request and every Monday. It runs Bandit at every severity on llmshift's code, and at medium and above on the tests, scripts and the vendored PyYAML. Releases wait for it before publishing.
+- CodeQL scans the code and the workflows, and Dependabot proposes updates to actions and dependencies each week.
+- `SECURITY.md` covers:
+  - how to report a vulnerability privately;
+  - how each change is checked;
+  - which features run code you supply (python graders, `python:` and `command` providers) and how to keep them safe.
 
 ## 0.1.4 (2026-10-24)
 

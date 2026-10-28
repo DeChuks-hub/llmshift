@@ -32,7 +32,7 @@ DEFAULTS: dict[str, Any] = {
     "cache": True,
     "cache_dir": ".llmshift/cache",
     "reports_dir": ".llmshift/reports",
-    "min_pass_rate": 0.95,
+    "min_pass_rate": 0.95,  # nosec B105  # a check status or setting name, not a password
     "allow_python_checks": False,
     "severity": {},
     "providers": {},
@@ -54,13 +54,13 @@ DEFAULTS: dict[str, Any] = {
     "fix": {
         "rounds": 3,
         "optimizer": None,
-        "target_pass_rate": 1.0,
+        "target_pass_rate": 1.0,  # nosec B105  # a check status or setting name, not a password
         "max_cases_per_group": 12,
     },
     "watch": {
         "history": ".llmshift/watch",
-        "max_pass_rate_drop": 0.05,
-        "min_pass_rate": None,
+        "max_pass_rate_drop": 0.05,  # nosec B105  # a check status or setting name, not a password
+        "min_pass_rate": None,  # nosec B105  # a check status or setting name, not a password
         "max_similarity_drop": 0.10,
         "retirement_warn_days": 30,
         "fail_on": "warning",

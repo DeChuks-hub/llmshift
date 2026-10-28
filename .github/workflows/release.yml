@@ -63,8 +63,11 @@ jobs:
           name: dist
           path: dist/
 
+  security:  # the same scans as every push; a finding stops the release before PyPI sees it
+    uses: ./.github/workflows/security.yml
+
   publish:
-    needs: [test, build]
+    needs: [test, build, security]
     runs-on: ubuntu-latest
     environment:
       name: pypi

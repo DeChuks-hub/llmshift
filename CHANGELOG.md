@@ -1,12 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 (2026-10-28)
 
 - **Security:** the config search stays inside what is yours. Before, outside a git repository, the search went through every parent folder up to the drive root. A config that another user planted higher up, such as `C:\.llmshift\config.yaml` (which any user can create), could name programs that would then run as you. That is the hole git closed as CVE-2022-24765. Now the search:
   - stops at the git root, at your home directory, and at the project an MCP server was started on;
   - never reads a drive root or `/`;
   - on Linux and macOS, ignores files another user owns and says so in the warnings;
   - on Windows, outside your home directory, looks above the current folder only up to its git root.
+- `llmshift calendar` writes a page for every model and every provider: the shutdown date, the replacement, the official source, the error a retired model returns and the commands that move a codebase off it, linked from the calendar's table and to each other. It also writes `llms.txt`, so AI assistants can answer "when does this model retire?" from the site. `--base-url` (the site's https:// address) adds canonical links, `sitemap.xml`, `robots.txt` and an RSS feed (`feed.xml`) of the retirements in the next year; the `calendar` workflow passes it.
+- `scan` counts in words ("1 file, 1 model reference" instead of "1 files"), and its next step names the replacement of the most urgent model (`llmshift compare --to claude-sonnet-5-5`) and how to keep the check on every pull request (`llmshift init --github`).
+- A Claude Code plugin: `claude plugin marketplace add DeChuks-hub/llmshift`, then `claude plugin install llmshift@llmshift`, adds the MCP server (run with `uvx`, nothing to install first) and a `migrate-models` skill that walks Claude through scan, snapshot, compare, fix and upgrade.
+- pre-commit hooks: `llmshift-scan` stops a commit that calls a retired model, and `llmshift-scan-retiring` also one that calls a model retiring within 180 days.
+- The README sets up the MCP server with `uvx llmshift mcp`, so nothing has to be installed first, and says how to see retiring models as code scanning alerts (`scan --format sarif`).
 
 ## 0.1.5 (2026-10-28)
 

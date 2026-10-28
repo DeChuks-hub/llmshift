@@ -13,7 +13,7 @@ from .checks import CATEGORY_TITLES
 from .compare import CaseResult, CompareResult
 from .console import bar, status_label, style, sym, truncate, width
 from .formats import parse_json_lenient
-from .textutil import PROJECT_URL, credit, diff_ratio, md_inert, plural, show_bidi, word_diff
+from .textutil import PROJECT_URL, credit, diff_ratio, md_inert, plural, quoteattr, show_bidi, word_diff, xml_escape
 
 STATUS_ORDER = {"fail": 0, "error": 1, "warn": 2, "pass": 3}  # nosec B105  # a check status or setting name, not a password
 CATEGORY_ORDER = ["format", "facts", "tools", "safety", "semantics", "tone", "custom", "errors", "unchecked"]
@@ -240,22 +240,6 @@ def _md(text: str) -> str:
 
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 _STATUSES = {"pass", "warn", "fail", "error", "skip"}
-
-
-def xml_escape(text: str) -> str:
-    """XML text content, as xml.sax.saxutils.escape writes it (llmshift writes XML and never
-    parses it, so it has no reason to import an XML parser package)."""
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def quoteattr(text: str) -> str:
-    """A quoted XML attribute value, as xml.sax.saxutils.quoteattr writes it."""
-    text = xml_escape(text).replace("\n", "&#10;").replace("\r", "&#13;").replace("\t", "&#9;")
-    if '"' not in text:
-        return f'"{text}"'
-    if "'" not in text:
-        return f"'{text}'"
-    return '"' + text.replace('"', "&quot;") + '"'
 
 
 def _xml_text(text: str) -> str:
@@ -529,7 +513,8 @@ def _scan_label(lk: Any, warn_days: int) -> tuple[str, tuple]:
 
 def scan_terminal(scan: Any, *, verbose: bool = False, max_locations: int = 4) -> str:
     models = scan.models()
-    lines = [style("LLMShift scan", "bold") + f"  {scan.files_scanned} files, {len(scan.findings)} model references, {len(models)} distinct models" + style(f"   (lifecycle data: {scan.registry_updated})", "grey")]
+    counted = f"{plural(scan.files_scanned, 'file')}, {plural(len(scan.findings), 'model reference')}, {plural(len(models), 'distinct model')}"
+    lines = [style("LLMShift scan", "bold") + f"  {counted}" + style(f"   (lifecycle data: {scan.registry_updated})", "grey")]
     if not models:
         lines.append("")
         lines.append("  No model IDs found. Try --include-docs, or check the paths you passed.")
@@ -589,7 +574,7 @@ def _skipped(scan: Any, shown: int = 5) -> list[str]:
 
 
 def scan_markdown(scan: Any) -> str:
-    lines = ["## LLMShift scan", "", f"{scan.files_scanned} files scanned, {len(scan.findings)} model references, lifecycle data from {scan.registry_updated}.", ""]
+    lines = ["## LLMShift scan", "", f"{plural(scan.files_scanned, 'file')} scanned, {plural(len(scan.findings), 'model reference')}, lifecycle data from {scan.registry_updated}.", ""]
     models = scan.models()
     skipped = ["- " + s.strip() for s in _skipped(scan)]
     if not models:

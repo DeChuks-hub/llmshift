@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llmshift"
-version = "0.1.5"
+version = "0.1.6"
 description = "Switch AI models without breaking your product: find model calls, turn real usage into tests, compare models, fix prompts and watch for drift."
 readme = "README.md"
 requires-python = ">=3.9"

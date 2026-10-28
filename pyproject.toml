@@ -53,7 +53,7 @@ packages = ["src/llmshift"]
 "THIRD_PARTY_NOTICES" = "llmshift/THIRD_PARTY_NOTICES"  # the licenses of the price list and the vendored PyYAML
 
 [tool.hatch.build.targets.sdist]
-include = ["src/llmshift", "tests", "examples", "scripts", "README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY_NOTICES", "action.yml", "server.json", "pyproject.toml"]
+include = ["src/llmshift", "tests", "examples", "scripts", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "THIRD_PARTY_NOTICES", "action.yml", "server.json", "pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

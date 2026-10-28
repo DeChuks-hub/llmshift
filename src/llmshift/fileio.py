@@ -106,9 +106,9 @@ def append(path: str | os.PathLike, data: bytes) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
     try:  # read access, to look at the last byte
-        fd = os.open(str(target), os.O_RDWR | flags, 0o644)
+        fd = os.open(str(target), os.O_RDWR | flags, 0o600)  # they hold prompts: owner only
     except OSError:  # a write-only file or device (/dev/stdout in a container)
-        fd = os.open(str(target), os.O_WRONLY | flags, 0o644)
+        fd = os.open(str(target), os.O_WRONLY | flags, 0o600)
     try:
         _lock(fd)
         try:

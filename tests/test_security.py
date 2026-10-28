@@ -182,6 +182,40 @@ def test_programs_are_never_found_in_the_current_directory(tmp_path, monkeypatch
     assert not re.search(r"""\[\s*["'](?:git|taskkill)["']""", source), "start git and taskkill by full path"
 
 
+def test_the_official_openai_api_is_matched_by_host_name():
+    from llmshift.providers.openai import OpenAIProvider
+
+    def official(url: str) -> bool:
+        return OpenAIProvider("m", options={"base_url": url, "api_key": "x"}).official
+
+    assert official("https://api.openai.com/v1") and official("https://API.OpenAI.com/v1")
+    assert not official("https://api.openai.com.example.net/v1") and not official("https://example.net/api.openai.com/v1")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_appended_files_are_readable_by_their_owner_only(tmp_path):
+    from llmshift import fileio
+
+    path = tmp_path / "recording.jsonl"
+    fileio.append(path, b'{"x": 1}\n')
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_third_party_actions_are_pinned_to_a_commit():
+    # A tag such as @release/v1 can be moved to other code; a commit cannot. GitHub's own
+    # actions (actions/*, github/*) are exempt, as CodeQL's rule exempts them.
+    workflows = ROOT / ".github" / "workflows"
+    if not workflows.is_dir():
+        pytest.skip("the source archive has no workflows")
+    loose = [
+        f"{path.name}: {ref}"
+        for path in sorted(workflows.glob("*.yml"))
+        for ref in re.findall(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)", path.read_text(encoding="utf-8"), re.M)
+        if not ref.startswith(("actions/", "github/", "./")) and not re.search(r"@[0-9a-f]{40}$", ref)
+    ]
+    assert loose == []
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows splits the command line itself")
 def test_command_with_an_unclosed_quote_is_a_config_error():
     from llmshift.providers.base import ProviderError

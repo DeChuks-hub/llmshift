@@ -5,6 +5,8 @@
 - `llmshift calendar --goatcounter <code>` counts visits to the calendar site with GoatCounter, which sets no cookies, and says so in the page footer. GoatCounter's script is pinned to one version (`count.v5.js`) with its integrity hash, so browsers refuse it if it ever changes.
 - Python graders now run as an ordinary module. Their source is written to a file in a temporary directory and imported by a separate Python process, so it is never handed to Python's `exec`. They are still off unless you pass `--allow-python` or set `allow_python_checks: true`. This answers an automated static-analysis advisory, GCVE-110-VULN-PYPI-2026-000499 (CWE-94). A test now fails if a call to `exec` or `eval` appears anywhere in llmshift's own source.
 - **Security:** on Windows, git and taskkill now start by their full path. Windows looks in the current directory before `PATH`, so a `git.exe` inside a cloned repository could have run in place of git when you scanned it. That is the untrusted search path GitPython fixed as CVE-2023-40590. Git is found in a `PATH` folder and never in the current one.
+- **Security:** the official OpenAI API is recognised by its host name. Before, any base URL containing `api.openai.com`, such as `api.openai.com.example.net`, got the official API's request shapes.
+- **Security:** recordings, histories and the other files that are appended to are created readable by their owner only (`0o600`), like the temporary files, because they hold prompts and answers.
 - **Changed:** a `command` provider never runs its command through a shell. A string command is split into words as a shell would split them (quotes group words), and nothing in it is expanded, piped or chained, so text in a config can no longer start a second program. On Windows the program splits the string itself. For shell features, name the shell yourself: `command: ["sh", "-c", "a | b"]`. An unclosed quote is a config error.
 - Code that security scanners report is gone:
   - The subcommand modules and the OpenAI SDK's schema converters are loaded with ordinary `import` statements, not looked up from strings.
@@ -22,7 +24,9 @@
   - the JUnit writer escapes XML itself instead of importing `xml.sax`;
   - the maintenance scripts fetch only `https://` addresses.
 - A `security` workflow runs Bandit, `pip-audit` and those tests on every push, every pull request and every Monday. It runs Bandit at every severity on llmshift's code, and at medium and above on the tests, scripts and the vendored PyYAML. Releases wait for it before publishing.
-- CodeQL scans the code and the workflows, and Dependabot proposes updates to actions and dependencies each week.
+- CodeQL (the `security-extended` queries) scans the code and the workflows, and Dependabot proposes updates to actions and dependencies each week.
+- The PyPI publish action is pinned to a commit rather than a tag that could move.
+- The source archive includes `SECURITY.md`.
 - `SECURITY.md` covers:
   - how to report a vulnerability privately;
   - how each change is checked;

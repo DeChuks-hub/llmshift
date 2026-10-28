@@ -498,13 +498,16 @@ def _read_text(path: Path) -> tuple[str | None, str | None]:
     return decode_text(data), None
 
 
+_AZURE_HOST_RE = re.compile(r"\bopenai\.azure\.com\b")
+
+
 def platform_hint(text: str) -> str | None:
     lower = text.lower()
     if "anthropicvertex" in lower or "vertexai" in lower or "aiplatform" in lower or "vertex_ai/" in lower:
         return "vertex"
     if "bedrock-runtime" in lower or "bedrockruntime" in lower or "bedrock_runtime" in lower or "anthropicbedrock" in lower:
         return "bedrock"
-    if "azureopenai" in lower or "openai.azure.com" in lower or "azure_endpoint" in lower:
+    if "azureopenai" in lower or "azure_endpoint" in lower or _AZURE_HOST_RE.search(lower):
         return "azure"
     return None
 

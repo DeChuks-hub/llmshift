@@ -477,9 +477,21 @@ def cmd_scan(args: argparse.Namespace, cfg: dict) -> int:
     _github_output("retiring", counts["retiring_soon"])
     if fmt == "table" and not args.output:
         if counts["retired"] or counts["retiring_soon"]:
+            from .providers import infer_provider
+
+            # Name the replacement of the most urgent model when `compare --to` takes it as written
+            # (some replacements are an API or an SDK, a few need a provider: prefix).
+            replacement = next(
+                (m["lookup"].replacement for m in result.models()
+                 if m["lookup"] and m["lookup"].status in ("retired", "retiring") and m["lookup"].replacement
+                 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@-]*", m["lookup"].replacement)
+                 and infer_provider(m["lookup"].replacement)),
+                "<replacement>",
+            )
             con.out("")
             con.out(con.style("Next:", "bold") + " snapshot real traffic and check the replacement before the shutdown date:")
-            con.out("  llmshift snapshot <your-logs>  &&  llmshift compare --to <replacement>")
+            con.out(f"  llmshift snapshot <your-logs>  &&  llmshift compare --to {replacement}")
+            con.out(con.style("Then keep it checked on every pull request: llmshift init --github", "grey"))
     if should_fail(result, fail_on):
         if fmt == "table" and not args.output and not getattr(args, "in_demo", False):
             con.out(con.style(f"\nExit code 1: found models matching --fail-on {fail_on} (in CI this fails the job).", "red"), err=True)

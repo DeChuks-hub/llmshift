@@ -515,7 +515,8 @@ def _scan_label(lk: Any, warn_days: int) -> tuple[str, tuple]:
 
 def scan_terminal(scan: Any, *, verbose: bool = False, max_locations: int = 4) -> str:
     models = scan.models()
-    lines = [style("LLMShift scan", "bold") + f"  {scan.files_scanned} files, {len(scan.findings)} model references, {len(models)} distinct models" + style(f"   (lifecycle data: {scan.registry_updated})", "grey")]
+    counted = f"{plural(scan.files_scanned, 'file')}, {plural(len(scan.findings), 'model reference')}, {plural(len(models), 'distinct model')}"
+    lines = [style("LLMShift scan", "bold") + f"  {counted}" + style(f"   (lifecycle data: {scan.registry_updated})", "grey")]
     if not models:
         lines.append("")
         lines.append("  No model IDs found. Try --include-docs, or check the paths you passed.")
@@ -575,7 +576,7 @@ def _skipped(scan: Any, shown: int = 5) -> list[str]:
 
 
 def scan_markdown(scan: Any) -> str:
-    lines = ["## LLMShift scan", "", f"{scan.files_scanned} files scanned, {len(scan.findings)} model references, lifecycle data from {scan.registry_updated}.", ""]
+    lines = ["## LLMShift scan", "", f"{plural(scan.files_scanned, 'file')} scanned, {plural(len(scan.findings), 'model reference')}, lifecycle data from {scan.registry_updated}.", ""]
     models = scan.models()
     skipped = ["- " + s.strip() for s in _skipped(scan)]
     if not models:

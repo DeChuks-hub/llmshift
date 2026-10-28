@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `llmshift calendar` writes a page for every model and every provider: the shutdown date, the replacement, the official source, the error a retired model returns and the commands that move a codebase off it, linked from the calendar's table and to each other. It also writes `llms.txt`, so AI assistants can answer "when does this model retire?" from the site. `--base-url` (the site's https:// address) adds canonical links, `sitemap.xml`, `robots.txt` and an RSS feed (`feed.xml`) of the retirements in the next year; the `calendar` workflow passes it.
+- `scan` counts in words ("1 file, 1 model reference" instead of "1 files"), and its next step names the replacement of the most urgent model (`llmshift compare --to claude-sonnet-5-5`) and how to keep the check on every pull request (`llmshift init --github`).
+- A Claude Code plugin: `claude plugin marketplace add DeChuks-hub/llmshift`, then `claude plugin install llmshift@llmshift`, adds the MCP server (run with `uvx`, nothing to install first) and a `migrate-models` skill that walks Claude through scan, snapshot, compare, fix and upgrade.
+- pre-commit hooks: `llmshift-scan` stops a commit that calls a retired model, and `llmshift-scan-retiring` also one that calls a model retiring within 180 days.
+- The README sets up the MCP server with `uvx llmshift mcp`, so nothing has to be installed first, and says how to see retiring models as code scanning alerts (`scan --format sarif`).
 - `llmshift calendar --goatcounter <code>` counts visits to the calendar site with GoatCounter, which sets no cookies, and says so in the page footer. GoatCounter's script is pinned to one version (`count.v5.js`) with its integrity hash, so browsers refuse it if it ever changes.
 
 ## 0.1.4 (2026-10-24)

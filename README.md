@@ -14,7 +14,7 @@ uvx llmshift scan        # or: pipx run llmshift scan
 
 <sub>A real run: <code>scan</code> on a sample repository, then <code>compare</code> replaying llmshift's demo traffic on Claude Haiku 5.5.</sub>
 
-Leaving the OpenAI Evals platform? It goes read-only on 31 October and its API shuts down on 30 November 2026. `llmshift import openai-evals --api --all` pulls every eval, its latest run and the graded outputs into tests you keep, and runs them on any model ([how](https://github.com/DeChuks-hub/llmshift#import-move-off-the-openai-evals-platform)).
+Leaving the OpenAI Evals platform? It goes read-only on 31 October and its API shuts down on 30 November 2026. `llmshift import openai-evals --api --all` pulls every eval, its latest run and the graded outputs into tests you keep, and runs them on any model ([how](https://github.com/DeChuks-hub/llmshift#import-move-off-the-openai-evals-platform), or the [step-by-step guide](https://dev.to/enzii/your-openai-evals-freeze-on-saturday-heres-how-to-get-them-out-and-keep-testing-on-any-model-3hmb)).
 
 Then test the replacement on your real traffic before the shutdown date: `llmshift snapshot` turns your logs into tests and `llmshift compare --to <replacement>` shows what changes. `llmshift demo` walks through it with simulated models, no API key needed.
 

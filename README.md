@@ -400,11 +400,12 @@ OpenAI's hosted Evals become read-only on 2026-10-31, and the dashboard and API 
 
 ```bash
 export OPENAI_API_KEY=...
-llmshift import openai-evals --api --all --split .llmshift/evals/
+llmshift import openai-evals --api --all --split .llmshift/evals/ --save-raw
 llmshift compare --tests .llmshift/evals/ --to openai:gpt-5.6-sol --judge openai:gpt-5.6-terra
 ```
 
 - For each eval, LLMShift reads the testing criteria, the latest run's data source, and the run's **output items**. Those hold the exact inputs sent and the outputs the model gave, which become recorded baselines.
+- `--save-raw` also keeps every API response exactly as read (the evals with their graders, every run with its data source and settings, the output items and the data files) in a dated file next to the tests, such as `.llmshift/evals/openai-evals-raw-2026-10-29.json`, or in the file you name. Commit it with the tests: after 30 November it is the only copy of what the original evals did, and the grader definitions are what you will compare against. It holds response bodies only, never your API key.
 - Graders map one-to-one:
   - `string_check` (eq/ne/like/ilike) → `equals` / `not_equals` / `contains`
   - `text_similarity` → `similarity`, with the same metric and threshold

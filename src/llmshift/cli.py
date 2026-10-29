@@ -171,10 +171,22 @@ def _load_compare_json(path: str) -> Any:
         raise UsageError(f"{path}: unexpected compare result ({exc})") from None
 
 
-def _refuse_overwrite(paths: list, force: bool) -> None:
+def _refuse_overwrite(paths: list, force: bool, elsewhere: str = "-o") -> None:
     existing = [str(x) for x in paths if Path(x).exists()]
     if existing and not force:
-        raise UsageError(f"{', '.join(existing[:3])} already exist{'s' if len(existing) == 1 else ''}; pass --force to replace, or -o to write elsewhere")
+        raise UsageError(f"{', '.join(existing[:3])} already exist{'s' if len(existing) == 1 else ''}; pass --force to replace, or {elsewhere} to write elsewhere")
+
+
+def _raw_archive_path(args: argparse.Namespace, cfg: dict) -> Path:
+    """Where `import --save-raw` keeps the API responses: the file given, else a dated file beside the tests."""
+    if args.save_raw:
+        return Path(args.save_raw)
+    if args.split:
+        folder = Path(args.split)
+    else:
+        out = Path(args.output or cfg.get("tests") or ".llmshift/tests.jsonl")
+        folder = out if out.is_dir() else out.parent
+    return folder / f"openai-evals-raw-{_dt.date.today().isoformat()}.json"
 
 
 def _positive(value: Any, what: str) -> int:
@@ -907,13 +919,20 @@ def _watch_outage(model: str, exc: Exception, alerts: list, args: argparse.Names
 def cmd_import(args: argparse.Namespace, cfg: dict) -> int:
     from .importers import openai_evals as oe
     from .infer import infer_checks, merge_checks
-    from .testset import save_tests
+    from .testset import atomic_write, save_tests
 
     if args.source_kind != "openai-evals":
         raise UsageError(f"unknown import source {args.source_kind!r}")
-    if args.api or args.eval_id or args.all:
+    from_api = bool(args.api or args.eval_id or args.all)
+    raw_path = None
+    if args.save_raw is not None:
+        if not from_api:
+            raise UsageError("--save-raw works with --api (an exported file is already the raw copy)")
+        raw_path = _raw_archive_path(args, cfg)
+        _refuse_overwrite([raw_path], args.force, "--save-raw FILE")  # before any API call, not after the whole download
+    if from_api:
         con.out(con.style(f"Reading evals from the OpenAI API (the platform turns read-only on {oe.READ_ONLY_DATE} and shuts down on {oe.SHUTDOWN_DATE})...", "grey"), err=True)
-        result = oe.import_from_api(args.eval_id, all_evals=args.all, max_items=args.max_items, name_filter=args.eval, progress=lambda m: con.out(con.style(f"  {m}", "grey"), err=True))
+        result = oe.import_from_api(args.eval_id, all_evals=args.all, max_items=args.max_items, name_filter=args.eval, progress=lambda m: con.out(con.style(f"  {m}", "grey"), err=True), keep_raw=raw_path is not None)
     elif args.source:
         src = Path(args.source)
         if not src.exists():
@@ -924,6 +943,10 @@ def cmd_import(args: argparse.Namespace, cfg: dict) -> int:
             result = oe.import_from_export(args.source, data=args.data, max_items=args.max_items)
     else:
         raise UsageError("pass a source: --api (with --all or --eval-id), an exported eval JSON file, or an openai/evals registry directory")
+    if raw_path is not None:  # saved even when nothing converts: the graders and data sources are the record
+        archive = {"source": "OpenAI Evals API", "saved_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"), "llmshift": __version__, "responses": result.raw}
+        atomic_write(raw_path, json.dumps(archive, indent=1, ensure_ascii=False) + "\n")
+        con.out(f"{con.style(con.sym('pass'), 'green')} saved {plural(len(result.raw), 'API response')} as read to {_rel(raw_path)}")
     if args.auto_checks:
         for case in result.cases:
             if case.has_baseline:
@@ -1261,6 +1284,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--auto-checks", action="store_true", help="also infer format/fact/tone checks from recorded outputs (as warnings)")
     p.add_argument("--allow-python", action="store_true", help="run python graders during the fidelity check")
     p.add_argument("--no-verify", action="store_true", help="skip re-grading recorded outputs to check fidelity")
+    p.add_argument("--save-raw", nargs="?", const="", metavar="FILE", help="with --api: also keep every API response as read, in a dated JSON file next to the tests (or FILE)")
     p.add_argument("--force", action="store_true", help="replace existing test files")
     p.set_defaults(func=cmd_import)
 

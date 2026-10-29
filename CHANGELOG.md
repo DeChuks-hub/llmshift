@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `llmshift import openai-evals --api --save-raw` also keeps every API response exactly as read: the evals with their graders, every run with its data source and settings, the output items and the data files. They go to a dated file next to the tests (`openai-evals-raw-2026-10-29.json`), or to the file you name. Before, the import turned this data into tests and kept nothing else, so once the API shuts down on 30 November nothing would show what the original graders did. The file holds response bodies only, never the API key, and is never replaced without `--force`, which is checked before any API call. Suggested by Shuttlewright on DEV.
+
 ## 0.1.6 (2026-10-28)
 
 - **Security:** the config search stays inside what is yours. Before, outside a git repository, the search went through every parent folder up to the drive root. A config that another user planted higher up, such as `C:\.llmshift\config.yaml` (which any user can create), could name programs that would then run as you. That is the hole git closed as CVE-2022-24765. Now the search:

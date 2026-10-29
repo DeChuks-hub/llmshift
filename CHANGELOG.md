@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.7 (2026-10-29)
 
 - `llmshift import openai-evals --api --save-raw` also keeps every API response exactly as read: the evals with their graders, every run with its data source and settings, the output items and the data files. They go to a dated file next to the tests (`openai-evals-raw-2026-10-29.json`), or to the file you name. Before, the import turned this data into tests and kept nothing else, so once the API shuts down on 30 November nothing would show what the original graders did. The file holds response bodies only, never the API key, and is never replaced without `--force`, which is checked before any API call. Suggested by Shuttlewright on DEV.
 

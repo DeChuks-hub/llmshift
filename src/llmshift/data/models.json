@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-11-06",
+  "updated": "2026-11-07",
   "about": "Model lifecycle registry for llmshift scan. Built from the providers' official deprecation pages on 2026-10-21. status is recomputed from dates at run time; notes may contain not_before:YYYY-MM-DD (no retirement before that date) and mark inferred rows.",
   "sources": {"openai": "https://developers.openai.com/api/docs/deprecations", "anthropic": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "google": "https://ai.google.dev/gemini-api/docs/deprecations", "google-vertex": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "mistral": "https://docs.mistral.ai/models", "cohere": "https://docs.cohere.com/docs/deprecations", "xai": "https://docs.x.ai/docs/models", "deepseek": "https://api-docs.deepseek.com/quick_start/pricing"},
   "models": [
@@ -271,8 +271,8 @@
     {"id": "veo-2.0-generate-001", "provider": "google-vertex", "status": "retired", "retires": "2026-06-30", "replacement": "veo-3.1-generate-001", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-05-27"},
     {"id": "veo-3.0-fast-generate-001", "provider": "google-vertex", "status": "retired", "retires": "2026-06-30", "replacement": "veo-3.1-fast-generate-001", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-07-29"},
     {"id": "veo-3.0-generate-001", "provider": "google-vertex", "status": "retired", "retires": "2026-06-30", "replacement": "veo-3.1-generate-001", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-07-29"},
-    {"id": "veo-3.1-fast-generate-001", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-11-17; not_before:2026-11-17"},
-    {"id": "veo-3.1-generate-001", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-11-17; not_before:2026-11-17"},
+    {"id": "veo-3.1-fast-generate-001", "provider": "google-vertex", "status": "active", "replacement": "gemini-omni-1.2-flash", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-11-17; not_before:2026-11-17"},
+    {"id": "veo-3.1-generate-001", "provider": "google-vertex", "status": "active", "replacement": "gemini-omni-1.2-flash", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2025-11-17; not_before:2026-11-17"},
     {"id": "vertexai.generative_models (Vertex AI SDK Generative AI module)", "provider": "google-vertex", "status": "retired", "deprecated": "2025-06-24", "retires": "2026-06-24", "replacement": "google-genai SDK", "source": "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations", "note": "system/SDK module, not a model ID; migrate to Google Gen AI SDK"},
     {"id": "codestral-2405", "provider": "mistral", "status": "retired", "deprecated": "2024-12-02", "retires": "2025-06-16", "replacement": "codestral-2508", "source": "https://docs.mistral.ai/models", "note": "model: Codestral v24.05; alt named 'Codestral' on page"},
     {"id": "codestral-2501", "provider": "mistral", "status": "retired", "deprecated": "2025-11-06", "retires": "2025-11-30", "replacement": "codestral-2508", "source": "https://docs.mistral.ai/models", "note": "model: Codestral v25.01; alt named 'Codestral' on page"},

@@ -1,5 +1,5 @@
 {
-  "checked": "2026-11-06",
+  "checked": "2026-11-07",
   "pages": {
     "https://ai.google.dev/gemini-api/docs/changelog": {
       "sha256": "3eadf5d33c56db77f5ffe590479719b8ec7fcc2e11e75d17be7a58e153c81be0",
@@ -290,8 +290,8 @@
       "chars": 12292
     },
     "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions": {
-      "sha256": "f7b8f0b46d0efa0846e997f8ea193a291f8a1164024fe1b5b6e7decbe9d20b77",
-      "chars": 6874
+      "sha256": "dbac0518fe7ab1aed65c1ee604dfd6b54a520c08b6f8597f8742831a5792d92f",
+      "chars": 6918
     },
     "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations": {
       "sha256": "61ca770ebf2ce03f66c0fa828f9eabddf52231eb734bacea981ddeff2a344eb4",

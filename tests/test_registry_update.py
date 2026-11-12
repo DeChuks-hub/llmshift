@@ -24,6 +24,7 @@ def updater(tmp_path, monkeypatch):
     models.write_bytes((ROOT / "tests" / "data" / "models-2026-10-21.json").read_bytes())  # frozen: the shipped copy moves daily
     monkeypatch.setattr(module, "MODELS", models)
     monkeypatch.setattr(module, "STATE", tmp_path / "sources.json")
+    monkeypatch.setattr(module._watcher(), "LINES", tmp_path / "reviewed-lines.json")
     return module
 
 
@@ -201,6 +202,8 @@ def test_main_writes_only_valid_reviewed_sized_updates(updater, tmp_path, capsys
     assert data["updated"] == TODAY and "added openai/gpt-4.9-preview-2026" in summary.read_text(encoding="utf-8")
     state = json.loads((tmp_path / "sources.json").read_text(encoding="utf-8"))
     assert set(state["pages"]) == {"https://developers.openai.com/api/docs/deprecations", "https://platform.claude.com/docs/en/about-claude/model-deprecations"}
+    reviewed = json.loads((tmp_path / "reviewed-lines.json").read_text(encoding="utf-8"))  # the next issue diffs against these
+    assert set(reviewed) == set(state["pages"]) and "Jan 6, 2027 | tts-1 | gpt-realtime-2.1-mini" in reviewed["https://developers.openai.com/api/docs/deprecations"]
     capsys.readouterr()
     assert updater.main(["--pages", str(pages), "--today", TODAY]) == 0 and "No changes" in capsys.readouterr().out  # idempotent
 

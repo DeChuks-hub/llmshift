@@ -47,8 +47,6 @@ MIN_ROWS = 5  # fewer readable rows than this: the page layout changed; leave it
 MAX_CHANGES = 40  # more changes than this in one run: write nothing, ask for a review
 ID_RE = re.compile(r"\b[a-z][a-z0-9]*(?:[-._][a-z0-9]+)+\b")
 _PARENS_RE = re.compile(r"\([^)]*\)")
-_MARKDOC_TABLE_RE = re.compile(r"\{%\s*table\b[^%]*%\}(.*?)\{%\s*/table\s*%\}", re.S)
-_MD_HEADING_RE = re.compile(r"^#{1,4}\s+(.+?)\s*(?:\{%[^%]*%\})?\s*$")
 MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
 _NOT_A_DATE = (
     "not sooner", "no sooner", "or later", "no shutdown", "no retirement", "not announced", "n/a", "earliest",
@@ -99,36 +97,6 @@ class _Tables(HTMLParser):
             self._in_heading.append(data)
         if self._cell is not None:
             self._cell.append(data)
-
-
-def markdoc_tables(text: str) -> list[tuple[str, list[list[str]]]]:
-    """Tables written in Markdoc, each with the heading before it: between {% table %} and
-    {% /table %}, one "* cell" line per cell (a cell may wrap onto the next lines) and
-    "---" between rows."""
-    tables: list[tuple[str, list[list[str]]]] = []
-    heading, start = "", 0
-    for found in _MARKDOC_TABLE_RE.finditer(text):
-        for line in text[start:found.start()].splitlines():
-            title = _MD_HEADING_RE.match(line.strip())
-            if title:
-                heading = title.group(1)
-        start = found.end()
-        rows: list[list[str]] = []
-        row: list[str] = []
-        for line in found.group(1).splitlines():
-            line = line.strip()
-            if line == "---":
-                if row:
-                    rows.append(row)
-                row = []
-            elif line == "*" or line.startswith("* "):
-                row.append(line[1:].strip())
-            elif line and row:
-                row[-1] = f"{row[-1]} {line}".strip()
-        if row:
-            rows.append(row)
-        tables.append((heading, rows))
-    return tables
 
 
 def parse_date(text: str) -> str | None:
@@ -193,7 +161,8 @@ def parse_page(html: str, provider: str, url: str, model_words: tuple, date_word
     parser = _Tables()
     parser.feed(html)
     rows: list[Row] = []
-    for heading, table in parser.tables + markdoc_tables(_watcher().noscript_document(html) or html):
+    watcher = _watcher()
+    for heading, table in parser.tables + watcher.markdoc_tables(watcher.noscript_document(html) or html):
         if len(table) < 2:
             continue
         header = table[0]
@@ -300,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     before = json.loads(json.dumps(data))
     rows: list[Row] = []
     read: dict[str, str] = {}  # url -> page text, for pages whose tables were read
+    lines: dict[str, list[str]] = {}  # url -> its lines about deprecations and retirements, recorded with it
     for provider, url, model_words, date_words, replacement_words in SOURCES:
         try:  # a page saved by a browser may not be UTF-8: read what can be read
             html = (args.pages / f"{provider}.html").read_bytes().decode("utf-8", "replace") if args.pages else watcher.fetch(url)
@@ -313,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {provider}: {len(found)} rows from {url}")
         rows.extend(found)
         read[url] = watcher.page_text(html)
+        lines[url] = watcher.lifecycle_lines(html)
     review: list[str] = []
     changes = merge(data, rows, today, review)
     for line in review:
@@ -345,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         for url, text in read.items():  # these pages are now reflected in the data
             pages[url] = {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "chars": len(text)}
         STATE.write_bytes((json.dumps({"checked": today, "pages": dict(sorted(pages.items()))}, indent=2) + "\n").encode("utf-8"))
+        watcher.record_lines(lines)
         shown = MODELS.relative_to(ROOT) if MODELS.is_relative_to(ROOT) else MODELS
         print(f"Wrote {shown} ({summary.get('after', len(data['models']))} models).")
     return 4 if review else 0  # 4: written, but some dates wait for a person (the workflow publishes, then fails)

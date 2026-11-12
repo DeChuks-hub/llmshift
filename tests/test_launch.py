@@ -139,7 +139,8 @@ def test_package_metadata_is_launch_ready():
     meta = _toml(ROOT / "pyproject.toml")["project"]
     assert meta["name"] == "llmshift" and meta["version"] == llmshift.__version__
     assert meta["scripts"] == {"llmshift": "llmshift.cli:entry"}
-    assert meta["authors"] == [{"name": "Chukwu Nzubechi", "email": "nzubechukwu00176@gmail.com"}]
+    assert meta["authors"] == [{"name": "Chukwu Nzubechi"}]  # PyPI shows metadata to everyone: a name, no e-mail address
+    assert not re.search(r"[\w.+-]+@[\w-]+\.[\w.]+", (ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert "Chukwu Nzubechi" in (ROOT / "LICENSE").read_text(encoding="utf-8")
     assert re.search(r'^author:\s*"Chukwu Nzubechi"', (ROOT / "action.yml").read_text(encoding="utf-8"), re.M)
     assert (ROOT / "CHANGELOG.md").read_text(encoding="utf-8").count(f"## {llmshift.__version__} ") == 1

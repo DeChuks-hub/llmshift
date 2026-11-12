@@ -408,6 +408,21 @@ def test_watcher_text_and_change_detection(watcher, monkeypatch):
     assert urls and all("#" not in u and u.startswith("http") for u in urls)
 
 
+def test_watcher_reads_a_javascript_page_by_its_noscript_markdown(watcher):
+    # Google's Gemini API docs (AI Studio) are a JavaScript app: the text is Markdown in <noscript><pre>.
+    shell = (
+        '<!doctype html><html><head><title>Google AI Studio</title><script>var build = "{build}";</script></head>'
+        "<body><noscript><pre>{doc}</pre></noscript><ms-app></ms-app></body></html>"
+    )
+    doc = "# Gemini deprecations\n{% table %}\n* `gemini-3.1-flash-tts-preview`\n* November 17, 2026\n{% /table %}"
+    text = watcher.page_text(shell.format(build="W316", doc=doc))
+    assert "gemini-3.1-flash-tts-preview" in text and "November 17, 2026" in text
+    assert watcher.page_text(shell.format(build="X999", doc=doc)) == text  # a new build of the app is no change
+    assert watcher.page_text(shell.format(build="W316", doc=doc.replace("17", "24"))) != text  # a new date is
+    # A short <noscript> note on an ordinary page does not replace the page's text.
+    assert watcher.page_text("<main><p>gpt-4 retires 2026-10-23</p></main><noscript><pre>Turn on JavaScript</pre></noscript>") == "gpt-4 retires 2026-10-23"
+
+
 def test_watcher_main_exit_codes(watcher, monkeypatch, capsys):
     monkeypatch.setattr(watcher, "source_urls", lambda: ["https://a.example/x"])
     monkeypatch.setattr(watcher, "fetch", lambda url, **kw: (_ for _ in ()).throw(RuntimeError("offline")))

@@ -37,6 +37,7 @@ LABEL = "registry-watch"
 _DROP_RE = re.compile(r"<(script|style|noscript|template|svg|head|nav|footer)\b.*?</\1\s*>", re.I | re.S)
 _MAIN_RE = re.compile(r"<(main|article)\b[^>]*>(.*)</\1\s*>", re.I | re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
+_NOSCRIPT_DOC_RE = re.compile(r"<noscript>\s*<pre>(.*?)</pre>\s*</noscript>", re.I | re.S)
 
 
 def source_urls(models_path: Path = MODELS) -> list[str]:
@@ -46,14 +47,24 @@ def source_urls(models_path: Path = MODELS) -> list[str]:
     return sorted(u for u in urls if re.match(r"^https?://", u))
 
 
+def noscript_document(raw: str) -> str:
+    """The Markdown a JavaScript docs app puts in <noscript><pre> for readers without
+    scripts, or "". Google's AI Studio docs, where the Gemini API pages moved in
+    November 2026, are served this way."""
+    found = _NOSCRIPT_DOC_RE.search(raw)
+    return html.unescape(found.group(1)) if found else ""
+
+
 def page_text(raw: str) -> str:
-    """The readable text of a page: main content when marked up, without markup."""
+    """The readable text of a page: main content when marked up, without markup. A page
+    that is a JavaScript app gives the document in its <noscript> when that holds more."""
     text = _DROP_RE.sub(" ", raw)
     main = _MAIN_RE.search(text)
     if main:
         text = main.group(2)
-    text = html.unescape(_TAG_RE.sub(" ", text))
-    return " ".join(text.split())
+    text = " ".join(html.unescape(_TAG_RE.sub(" ", text)).split())
+    doc = " ".join(noscript_document(raw).split())
+    return doc if len(doc) > len(text) else text
 
 
 def _https(url: str) -> str:

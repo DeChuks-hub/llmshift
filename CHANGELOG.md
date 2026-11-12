@@ -11,6 +11,7 @@
 - The daily data update reads Google's Gemini API pages again. In November they moved to AI Studio, a JavaScript app that carries each page as Markdown, and since then the update had skipped Google without saying so.
 - The issue the data watch opens now shows, for each changed provider page, the lines about deprecations, retirements and shutdowns that changed since the last review, so a review takes minutes.
 - The package metadata names the author without an e-mail address.
+- The MCP Registry entry lists the server's ten tools, each with the first sentence of its description, so directories that read the registry stop showing "tools not listed". CI now validates `server.json` on every push, as the release does.
 
 ## 0.1.7 (2026-10-29)
 

@@ -177,6 +177,19 @@ def test_the_mcp_registry_entry_matches_this_release():
     assert server["name"] == "io.github.DeChuks-hub/llmshift"  # the namespace GitHub sign-in grants this repository's owner
 
 
+def test_the_mcp_registry_entry_lists_the_servers_tools():
+    """Directories that read the MCP Registry showed "tools not listed": server.json has no field
+    for tools. The registry keeps up to 4 KB of publisher-provided metadata, so the entry lists
+    each tool's name and the first sentence of its description, taken from the server itself."""
+    from llmshift import mcp
+
+    server = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+    provided = server["_meta"]["io.modelcontextprotocol.registry/publisher-provided"]
+    expected = [{"name": t.name, "description": re.split(r"(?<=\.)\s+(?=[A-Z`])", t.description.strip(), maxsplit=1)[0]} for t in mcp.TOOLS.values()]
+    assert provided["tools"] == expected  # a tool added, renamed or reworded must be listed the same way
+    assert len(json.dumps(provided, ensure_ascii=False).encode("utf-8")) <= 4096  # larger and the registry refuses the release
+
+
 # What a workflow can pass to and read from the action: `@v0` moves to every 0.x release,
 # so a name removed or renamed here would break workflows that never chose to upgrade.
 V0_INPUTS = {"command", "args", "python-version", "version", "working-directory"}

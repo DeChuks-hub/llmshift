@@ -457,6 +457,13 @@ def test_watcher_keeps_the_lines_about_deprecations_and_retirements(watcher):
         "Jan 14, 2027 | gpt-4o gpt-4o-2024-08-06 | gpt-6-luna",
         "Older models are retired after their shutdown date.",
     ]  # not the price table, the prices, the menu, the footer or the script
+    # Mistral's page puts the header in a table of its own and the rows in the next one.
+    split = (
+        "<main><table><thead><tr><th>Model</th><th>API</th><th>Deprecation</th><th>Retirement</th></tr></thead></table>"
+        "<table><tr><td>Mistral Large 3</td><td>mistral-large-2512</td><td>10/31/2026</td><td>4/30/2027</td></tr></table>"
+        "<table><tr><td>Mistral Small 4</td><td>$0.10</td></tr></table></main>"  # a later, unrelated table
+    )
+    assert watcher.lifecycle_lines(split) == ["Model | API | Deprecation | Retirement", "Mistral Large 3 | mistral-large-2512 | 10/31/2026 | 4/30/2027"]
     # AI Studio's Markdown: wrapped lines of one paragraph are one line; Markdoc rows too.
     page = f"<html><body><noscript><pre>{LIFECYCLE_MD}</pre></noscript><ms-app></ms-app></body></html>"
     assert watcher.lifecycle_lines(page) == [

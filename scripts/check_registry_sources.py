@@ -134,15 +134,18 @@ def markdoc_tables(text: str) -> list[tuple[str, list[list[str]]]]:
 class _Lines(HTMLParser):
     """A page as lines: one per paragraph, heading or list item, and one per table row with its
     cells joined by " | ". Each line says whether it belongs to a table whose header names a
-    deprecation, retirement or shutdown."""
+    deprecation, retirement or shutdown. A table that holds only a header row (Mistral's page
+    has one above the table of its rows) lends that to the next table."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.lines: list[tuple[str, bool]] = []
         self._text: list[str] = []
         self._skip = 0
-        self._tables: list[bool | None] = []  # per open table: its header names a lifecycle date (None before the header)
+        self._tables: list[dict] = []  # per open table: "about" (None before its first row), "rows", "header_only", "lent"
+        self._lent: bool | None = None  # what the header-only table just closed says about the next one
         self._row: list[str] | None = None
+        self._row_tags: set[str] = set()
         self._cell: list[str] | None = None
 
     def _flush(self) -> None:
@@ -158,11 +161,13 @@ class _Lines(HTMLParser):
             return
         elif tag == "table":
             self._flush()
-            self._tables.append(None)
+            self._tables.append({"about": None, "rows": 0, "header_only": True, "lent": self._lent})
+            self._lent = None
         elif tag == "tr" and self._tables:
-            self._row = []
+            self._row, self._row_tags = [], set()
         elif tag in ("td", "th") and self._row is not None:
             self._cell = []
+            self._row_tags.add(tag)
         elif self._cell is not None:
             self._cell.append(" ")  # words in neighbouring elements of a cell stay apart
         elif tag in _BLOCK_TAGS:
@@ -178,13 +183,19 @@ class _Lines(HTMLParser):
             self._cell = None
         elif tag == "tr" and self._row is not None and self._tables:
             line = " | ".join(cell for cell in self._row if cell)
+            table = self._tables[-1]
+            header = "th" in self._row_tags and "td" not in self._row_tags
             if line:
-                if self._tables[-1] is None:  # the header row says what the table is about
-                    self._tables[-1] = bool(_LIFECYCLE_RE.search(line))
-                self.lines.append((line, bool(self._tables[-1])))
+                if table["about"] is None:  # the first row says what the table is about...
+                    lent = table["lent"]  # ...unless it is a row of data under a header-only table
+                    table["about"] = lent if lent is not None and not header else bool(_LIFECYCLE_RE.search(line))
+                table["rows"] += 1
+                table["header_only"] = table["header_only"] and header
+                self.lines.append((line, bool(table["about"])))
             self._row = None
         elif tag == "table" and self._tables:
-            self._tables.pop()
+            table = self._tables.pop()
+            self._lent = table["about"] if table["rows"] == 1 and table["header_only"] else None
         elif self._cell is not None:
             self._cell.append(" ")
         elif tag in _BLOCK_TAGS:

@@ -1,13 +1,13 @@
 {
-  "checked": "2026-11-14",
+  "checked": "2026-11-21",
   "pages": {
     "https://ai.google.dev/gemini-api/docs/changelog": {
       "sha256": "5750cf38721c1c2757d00b593c491bea3331ae0dc4dd4dce2ea65878f0e66c74",
       "chars": 63857
     },
     "https://ai.google.dev/gemini-api/docs/deprecations": {
-      "sha256": "917ee2e91a3454daa941715cbfe053244132aba5b70dccdcaed01e05e793a6f1",
-      "chars": 16830
+      "sha256": "590ce8c1787fbf495e37d7ba3c1d35b789de65faa8fba1335b7f122442cf7c3e",
+      "chars": 17245
     },
     "https://ai.google.dev/gemini-api/docs/models": {
       "sha256": "b9c2dbc89f02c1f916c289671e15a41eb964bfdffbbc24bbd38f7b7e44fd3b8a",
@@ -22,8 +22,8 @@
       "chars": 17897
     },
     "https://developers.openai.com/api/docs/deprecations": {
-      "sha256": "43248a6c722d6089912592dbc6b4e06160670106a1e39d2eaaecd19d92d8e572",
-      "chars": 19108
+      "sha256": "c53b2bb59edaeeea743989e73497d4c3edf5b0b63630b9f1be5a9dd451b48bf6",
+      "chars": 19358
     },
     "https://developers.openai.com/api/docs/models": {
       "sha256": "7d3d5162d44062de0bc337a3cfc45ceb0fc5a931d2c9434ab4506d2286a444e1",
@@ -306,8 +306,8 @@
       "chars": 14404
     },
     "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions": {
-      "sha256": "7cc0065682b878ab742c16cb80a18b75ac9242da7911268565f50ff3301ea7a4",
-      "chars": 7401
+      "sha256": "c228856ae78e381c41660db6d9944ed004e5f003a51c2258050f5996adb2b465",
+      "chars": 7463
     },
     "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/deprecations": {
       "sha256": "81b78d18d006c2a5b44c76dc027f1b5cd71f4ac191c820890e27b25fa14ebff9",
@@ -358,8 +358,8 @@
       "chars": 1225
     },
     "https://platform.claude.com/docs/en/about-claude/model-deprecations": {
-      "sha256": "683ccf3a9930984bcfde74368a2ce3373b4687536444e50ba67e41fa628f10bd",
-      "chars": 9881
+      "sha256": "f86d68edcf26abd18dacb7fa69f1c08ce84ce70d1be31063097764ef7d99a729",
+      "chars": 11022
     },
     "https://platform.claude.com/docs/en/models/haiku-4-5/overview": {
       "sha256": "e1d3bc4e10f93dd7651fb70385f146352c8c0d9f1ac177c79ab8539bcec34d6d",

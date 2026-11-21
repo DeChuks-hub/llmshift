@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-11-14",
+  "updated": "2026-11-21",
   "about": "Model lifecycle registry for llmshift scan. Built from the providers' official deprecation pages on 2026-10-21. status is recomputed from dates at run time; notes may contain not_before:YYYY-MM-DD (no retirement before that date) and mark inferred rows.",
   "sources": {"openai": "https://developers.openai.com/api/docs/deprecations", "anthropic": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "google": "https://ai.google.dev/gemini-api/docs/deprecations", "google-vertex": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "mistral": "https://docs.mistral.ai/models", "cohere": "https://docs.cohere.com/docs/deprecations", "xai": "https://docs.x.ai/docs/models", "deepseek": "https://api-docs.deepseek.com/quick_start/pricing"},
   "models": [
@@ -251,7 +251,7 @@
     {"id": "gemini-3.5-flash", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-05-19; not_before:2027-05-19"},
     {"id": "gemini-3.5-flash-lite", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-07-21; not_before:2027-07-21"},
     {"id": "gemini-3.6-flash", "provider": "google-vertex", "status": "deprecated", "retires": "2026-11-19", "replacement": "gemini-3.8-flash", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-07-21; short-availability table"},
-    {"id": "gemini-3.7-flash", "provider": "google-vertex", "status": "deprecated", "retires": "2027-01-28", "replacement": "gemini-3.8-flash", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-08-13; short-availability table"},
+    {"id": "gemini-3.7-flash", "provider": "google-vertex", "status": "deprecated", "retires": "2027-01-28", "replacement": "gemini-4-hydrogen", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-08-13; short-availability table"},
     {"id": "gemini-3.8-flash", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-09-02; not_before:2027-09-02"},
     {"id": "gemini-3.8-flash-cyber", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-09-16; short-availability table; no retirement date announced"},
     {"id": "gemini-3.8-live", "provider": "google-vertex", "status": "active", "source": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "note": "rel 2026-09-24; not_before:2027-09-25"},

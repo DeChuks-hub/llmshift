@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "updated": "2026-11-21",
+  "updated": "2026-11-23",
   "about": "Model lifecycle registry for llmshift scan. Built from the providers' official deprecation pages on 2026-10-21. status is recomputed from dates at run time; notes may contain not_before:YYYY-MM-DD (no retirement before that date) and mark inferred rows.",
   "sources": {"openai": "https://developers.openai.com/api/docs/deprecations", "anthropic": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "google": "https://ai.google.dev/gemini-api/docs/deprecations", "google-vertex": "https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions", "mistral": "https://docs.mistral.ai/models", "cohere": "https://docs.cohere.com/docs/deprecations", "xai": "https://docs.x.ai/docs/models", "deepseek": "https://api-docs.deepseek.com/quick_start/pricing"},
   "models": [
@@ -39,7 +39,7 @@
     {"id": "claude-opus-4-1-20250805", "provider": "anthropic", "status": "retired", "deprecated": "2026-06-05", "retires": "2026-08-05", "replacement": "claude-opus-4-8", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"},
     {"id": "claude-opus-4-20250514", "provider": "anthropic", "status": "retired", "deprecated": "2026-04-14", "retires": "2026-06-15", "replacement": "claude-opus-4-8", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"},
     {"id": "claude-opus-4-5", "provider": "anthropic", "status": "active", "source": "https://platform.claude.com/docs/en/models/opus-4-5/overview", "note": "alias -> claude-opus-4-5-20251101; lifecycle follows claude-opus-4-5-20251101 (alias name verified from official docs/Anthropic SDK model list)"},
-    {"id": "claude-opus-4-5-20251101", "provider": "anthropic", "status": "active", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "note": "not_before:2026-11-24 (retirement 'not sooner than'; none scheduled); Claude API alias claude-opus-4-5 resolves to this dated ID"},
+    {"id": "claude-opus-4-5-20251101", "provider": "anthropic", "status": "deprecated", "retires": "2027-01-22", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "note": "not_before:2026-11-24 (retirement 'not sooner than'; none scheduled); Claude API alias claude-opus-4-5 resolves to this dated ID"},
     {"id": "claude-opus-4-6", "provider": "anthropic", "status": "active", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "note": "not_before:2027-02-05 (retirement 'not sooner than'; none scheduled); dateless ID is a pinned snapshot (not an alias); listed as legacy on models overview"},
     {"id": "claude-opus-4-7", "provider": "anthropic", "status": "active", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "note": "not_before:2027-04-16 (retirement 'not sooner than'; none scheduled); dateless ID is a pinned snapshot (not an alias); listed as legacy on models overview"},
     {"id": "claude-opus-4-8", "provider": "anthropic", "status": "active", "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations", "note": "not_before:2027-05-28 (retirement 'not sooner than'; none scheduled); dateless ID is a pinned snapshot (not an alias); listed as legacy on models overview"},
